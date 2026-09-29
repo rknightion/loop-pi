@@ -1,0 +1,557 @@
+#!/usr/bin/env python3
+"""Build, validate and install the pinned loop-pi runtime, one pi home and its launcher.
+
+A build is staged into an absent directory, validated (pins, `pi --version`, agent set, model
+family, required hook scripts, an RPC smoke load of the root and lane entries), then renamed into
+`<data>/<label>`, where the label is the pinned pi version plus a hash of everything copied in.
+Existing builds are kept for rollback. The home is then updated file by file from the build's
+rendered templates; `auth.json`, sessions and every other unmanaged file are never touched.
+`--check` reports drift and writes nothing.
+
+An optional overlay directory customises a build without editing the source:
+  overlay/home/**           replaces or adds home template files
+  overlay/home/settings.json  is deep-merged over home/settings.json (the overlay wins)
+  overlay/policy.md         is appended to the rendered AGENTS.md after home/policy-header.md
+  overlay/scripts/*         land in <home>/scripts/ (guard and hook scripts)
+Templates render {{HOME}}, {{PREFIX}}, {{USER_HOME}} and every `--var KEY=VALUE`.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+SRC = Path(__file__).resolve().parents[1]
+USER_HOME = Path.home()
+# pi writes these into settings.json itself; the installer keeps them rather than reporting drift.
+PI_RUNTIME_SETTINGS = ("lastChangelogVersion", "theme")
+DEFAULT_DATA = USER_HOME / ".local/share/loop-pi"
+DEFAULT_BIN = USER_HOME / ".local/bin"
+PI_PACKAGE = "@earendil-works/pi-coding-agent"
+SUBAGENTS_PACKAGE = "pi-subagents"
+PI_CLI = f"node_modules/{PI_PACKAGE}/dist/bundle/cli.js"
+BUILD_MANIFEST = ".loop-pi-build.json"
+HOME_MANIFEST = ".loop-pi-managed.json"
+# Root-only extensions, loaded by launcher flags, never by settings packages.
+ROOT_EXTENSIONS = ("loop-guard/root.ts", "loop-wait/root.ts", "loop-continuation/index.ts")
+# Lane entries, registered by the root guard as required child extensions.
+LANE_EXTENSIONS = ("loop-guard/lane.ts", "loop-wait/lane.ts")
+# Operator and root CLIs from bin/, installed next to the launcher.
+CLI_TOOLS = ("loop-pi-preflight", "loop-pi-audit")
+NEVER_MANAGED = {"auth.json"}
+MIN_NODE = (22, 19, 0)
+AGENT_SET = {"mapper", "mapper-deep", "gate-runner", "lane-worker", "lane-worker-push", "complex-worker",
+             "complex-worker-push", "reviewer", "reviewer-high", "security-reviewer", "rescue-sol",
+             "rescue-astra"}
+SMOKE_COMMAND = "loop-closeout"
+# Defaults for settings.json `loopPi`; the extensions use the same ones (model-family.ts).
+DEFAULT_FAMILY = {"provider": "openai", "pattern": r"^gpt-6(-[a-z0-9]+)+$", "name": "gpt-6"}
+DEFAULT_ROOT_ROUTE = {"provider": "openai", "model": "gpt-6-sol", "thinking": "medium"}
+EXCLUDED_PARTS = {"node_modules", "__tests__", "test-support", "fixtures"}
+
+
+class InstallError(Exception):
+    pass
+
+
+def pins(src: Path = SRC) -> Dict[str, str]:
+    deps = json.loads((src / "package.json").read_text())["dependencies"]
+    for name in (PI_PACKAGE, SUBAGENTS_PACKAGE):
+        version = deps.get(name, "")
+        if not version or not version[0].isdigit():
+            raise InstallError(f"{name} must be pinned to an exact version, found {version!r}")
+    return {PI_PACKAGE: deps[PI_PACKAGE], SUBAGENTS_PACKAGE: deps[SUBAGENTS_PACKAGE]}
+
+
+def _tree(base: Path, prefix: str) -> List[Tuple[str, Path]]:
+    files = []
+    if not base.is_dir():
+        return files
+    for path in sorted(base.rglob("*")):
+        rel = path.relative_to(base)
+        if path.is_dir() or EXCLUDED_PARTS & set(rel.parts):
+            continue
+        if (path.name.endswith((".test.ts", ".test.mjs", "test-helpers.ts")) or path.name.startswith("test-")
+                or path.name == ".DS_Store" or "__pycache__" in rel.parts):
+            continue
+        files.append((f"{prefix}/{rel.as_posix()}", path))
+    return files
+
+
+def source_files(src: Path = SRC, overlay: Optional[Path] = None) -> List[Tuple[str, Path]]:
+    """Every file copied into a build, as (build-relative path, source path). Overlay files that
+    replace a template come after it, so a copy in order leaves the overlay's bytes."""
+    files = [("package.json", src / "package.json"), ("package-lock.json", src / "package-lock.json")]
+    files += _tree(src / "extensions", "extensions") + _tree(src / "home", "home")
+    files += [(f"bin/{name}", src / "bin" / name) for name in CLI_TOOLS]
+    if overlay is not None:
+        if not overlay.is_dir():
+            raise InstallError(f"overlay {overlay} is not a directory")
+        files += [(rel, path) for rel, path in _tree(overlay / "home", "home") if rel != "home/settings.json"]
+        files += _tree(overlay / "scripts", "home/scripts")
+        for name in ("home/settings.json", "policy.md"):
+            if (overlay / name).is_file():
+                files.append((f"overlay/{name}", overlay / name))
+    return files
+
+
+def deep_merge(base: dict, over: dict) -> dict:
+    merged = dict(base)
+    for key, value in over.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def settings_template(staging: Path) -> dict:
+    return json.loads((staging / "home/settings.json").read_text())
+
+
+def apply_overlay_settings(staging: Path) -> None:
+    extra = staging / "overlay/home/settings.json"
+    if extra.is_file():
+        merged = deep_merge(settings_template(staging), json.loads(extra.read_text()))
+        (staging / "home/settings.json").write_text(json.dumps(merged, indent=2) + "\n")
+
+
+def render_policy(staging: Path, policy_source: str) -> None:
+    """Write home/AGENTS.md from home/policy-header.md and the overlay's policy.md."""
+    header = staging / "home/policy-header.md"
+    policy = staging / "overlay/policy.md"
+    body = [f"<!-- GENERATED FILE: edit {policy_source}, not this file. -->\n",
+            header.read_text() if header.is_file() else "",
+            policy.read_text() if policy.is_file() else ""]
+    (staging / "home/AGENTS.md").write_text("".join(body))
+    header.unlink(missing_ok=True)
+
+
+def build_label(files: List[Tuple[str, Path]], pin: Dict[str, str], extra: str = "") -> str:
+    digest = hashlib.sha256()
+    for rel, path in files:
+        digest.update(rel.encode() + b"\0" + path.read_bytes() + b"\0")
+    if extra:
+        digest.update(extra.encode() + b"\0")
+    return f"{pin[PI_PACKAGE]}-{digest.hexdigest()[:10]}"
+
+
+def node_binary() -> str:
+    node = shutil.which("node")
+    if not node:
+        raise InstallError("node not found on PATH")
+    raw = subprocess.run([node, "--version"], capture_output=True, text=True, check=True).stdout
+    version = tuple(int(part) for part in raw.strip().lstrip("v").split(".")[:3])
+    if version < MIN_NODE:
+        raise InstallError(f"node {raw.strip()} is older than {'.'.join(map(str, MIN_NODE))}")
+    return node
+
+
+def missing_extensions(prefix: Path) -> List[str]:
+    return [rel for rel in ROOT_EXTENSIONS + LANE_EXTENSIONS if not (prefix / "extensions" / rel).is_file()]
+
+
+def render(text: str, variables: Dict[str, str]) -> str:
+    for key, value in variables.items():
+        text = text.replace("{{" + key + "}}", value)
+    return text
+
+
+def template_vars(home: Path, prefix: Path, extra: Dict[str, str]) -> Dict[str, str]:
+    return {**extra, "HOME": str(home), "PREFIX": str(prefix), "USER_HOME": str(USER_HOME)}
+
+
+def keep_runtime_settings(data: bytes, target: Path) -> bytes:
+    """Carry the keys pi writes into settings.json at runtime over the rendered template."""
+    try:
+        current = json.loads(target.read_text())
+    except (OSError, ValueError):
+        return data
+    template = json.loads(data)
+    # A key the template sets is managed: the template wins.
+    kept = {key: current[key] for key in PI_RUNTIME_SETTINGS if key in current and key not in template}
+    if not kept:
+        return data
+    return (json.dumps({**template, **kept}, indent=2) + "\n").encode()
+
+
+def same_json(target: Path, data: bytes) -> bool:
+    try:
+        return json.loads(target.read_text()) == json.loads(data)
+    except (OSError, ValueError):
+        return False
+
+
+def home_plan(prefix: Path, home: Path, variables: Dict[str, str]) -> Dict[str, bytes]:
+    """Managed home files, rendered for this home and prefix."""
+    plan: Dict[str, bytes] = {}
+    template = prefix / "home"
+    values = template_vars(home, prefix, variables)
+    for path in sorted(template.rglob("*")):
+        if path.is_dir() or "__pycache__" in path.parts:
+            continue
+        rel = path.relative_to(template).as_posix()
+        if rel in NEVER_MANAGED:
+            raise InstallError(f"home template must never carry {rel}")
+        data = path.read_bytes()
+        try:
+            data = render(data.decode(), values).encode()
+        except UnicodeDecodeError:
+            pass
+        plan[rel] = data
+    return plan
+
+
+def loop_pi_settings(prefix: Path) -> dict:
+    try:
+        value = json.loads((prefix / "home/settings.json").read_text()).get("loopPi", {})
+    except (OSError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def root_route(prefix: Path) -> Tuple[str, str, str]:
+    route = {**DEFAULT_ROOT_ROUTE, **loop_pi_settings(prefix).get("rootRoute", {})}
+    for key, value in route.items():
+        if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9._:/-]+", value):
+            raise InstallError(f"loopPi.rootRoute.{key} must be a plain identifier")
+    return route["provider"], route["model"], route["thinking"]
+
+
+def launcher_text(prefix: Path, home: Path, node: str, manifest: dict, name: str, generated_by: str) -> str:
+    pi = prefix / PI_CLI
+    lines = [
+        "#!/bin/sh",
+        f"# Generated by {generated_by}. Do not edit; re-run the installer.",
+        "set -eu",
+        f"export PI_CODING_AGENT_DIR='{home}'",
+        f"export PI_SUBAGENTS_TEMP_ROOT='{home}/tmp'",
+        "export PI_SKIP_VERSION_CHECK=1",
+        "export PI_TELEMETRY=0",
+        "export PI_SUBAGENT_WAIT_TOOL_ENABLED=false",
+        'case "${1-}" in',
+        f"  --version|-v) exec '{node}' '{pi}' --version ;;",
+        "esac",
+    ]
+    if manifest["missing_extensions"]:
+        missing = ", ".join(manifest["missing_extensions"])
+        lines += [
+            f"echo '{name}: build {manifest['label']} is incomplete (missing: {missing}); only --version runs.' >&2",
+            "exit 78",
+        ]
+    else:
+        flags = " ".join(f"--extension '{prefix / 'extensions' / rel}'" for rel in ROOT_EXTENSIONS)
+        provider, model, thinking = root_route(prefix)
+        # Inside a git repo every start is a loop run with its own run dir, so concurrent loops
+        # never share a before-snapshot. --plain skips it for an ordinary session.
+        lines += [
+            "unset LOOP_PI_RUN_DIR LOOP_PI_REPO",
+            "plain=0",
+            'if [ "${1-}" = "--plain" ]; then plain=1; shift; fi',
+            'if [ "$plain" = 0 ] && repo=$(git rev-parse --show-toplevel 2>/dev/null); then',
+            f"  mkdir -p '{home}/runs'",
+            f'  run_dir=$(mktemp -d "{home}/runs/$(date -u +%Y%m%dT%H%M%SZ)-$(basename "$repo")-XXXXXX")',
+            f"  if ! '{prefix}/bin/loop-pi-preflight' \"$repo\" >&2; then",
+            '    rmdir "$run_dir"',
+            f'    echo "{name}: preflight refused $repo. Fix it, or run {name} --plain for a non-loop session." >&2',
+            "    exit 78",
+            "  fi",
+            '  export LOOP_PI_RUN_DIR="$run_dir" LOOP_PI_REPO="$repo"',
+            f"  if ! '{prefix}/bin/loop-pi-audit' begin \"$repo\" >&2; then",
+            '    rm -f "$run_dir/.audit.lock" "$run_dir/audit-before.json"',
+            '    rmdir "$run_dir" 2>/dev/null || true',
+            f'    echo "{name}: cannot take the audit snapshot of $repo; not starting." >&2',
+            "    exit 78",
+            "  fi",
+            f'  echo "{name}: run dir $run_dir" >&2',
+            "fi",
+        ]
+        # subagent is loaded up front: some OpenAI-compatible proxies never acknowledge a request
+        # whose tool list grew mid-conversation, which is what subagents_enable does.
+        lines.append(f"exec '{node}' '{pi}' {flags} --exclude-tools subagents_enable "
+                     f"--provider {provider} --model {model} "
+                     f'--thinking {thinking} "$@"')
+    return "\n".join(lines) + "\n"
+
+
+def run(cmd: List[str], cwd: Path) -> str:
+    result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    if result.returncode:
+        raise InstallError(f"{' '.join(cmd)} failed ({result.returncode}):\n{result.stderr[-2000:]}")
+    return result.stdout
+
+
+def check_model_family(prefix: Path) -> None:
+    family = {**DEFAULT_FAMILY, **loop_pi_settings(prefix).get("modelFamily", {})}
+    try:
+        pattern = re.compile(family["pattern"])
+    except (re.error, TypeError):
+        raise InstallError("loopPi.modelFamily.pattern does not compile") from None
+    provider = re.escape(family["provider"])
+    for path in sorted((prefix / "home/agents").glob("*.md")):
+        front = re.match(r"---\n(.*?)\n---\n", path.read_text(), re.DOTALL)
+        match = front and re.search(rf"^model:\s*{provider}/(\S+)\s*$", front.group(1), re.MULTILINE)
+        if not match or not pattern.search(match.group(1)):
+            raise InstallError(f"agent {path.stem} must name a {family['provider']}/{family['name']} family model")
+    _, model, _ = root_route(prefix)
+    if not pattern.search(model):
+        raise InstallError(f"loopPi.rootRoute.model is outside the {family['name']} family")
+
+
+def check_agent_set(prefix: Path) -> None:
+    found = {path.stem for path in (prefix / "home/agents").glob("*.md")}
+    if found != AGENT_SET:
+        raise InstallError(f"agent set differs from the loop-pi set: extra {sorted(found - AGENT_SET)}, "
+                           f"missing {sorted(AGENT_SET - found)}")
+
+
+def required_hook_scripts(prefix: Path) -> List[str]:
+    value = loop_pi_settings(prefix).get("requiredHookScripts", [])
+    if not isinstance(value, list) or not all(isinstance(item, str) and "/" not in item for item in value):
+        raise InstallError("loopPi.requiredHookScripts must be a list of script file names")
+    return value
+
+
+def check_hook_scripts(prefix: Path) -> None:
+    for name in required_hook_scripts(prefix):
+        if not (prefix / "home/scripts" / name).is_file():
+            raise InstallError(f"required hook script {name} is missing from the build (add it to overlay/scripts/)")
+
+
+def smoke_extensions(prefix: Path, node: str, entries: Tuple[str, ...]) -> None:
+    """Load the entries in a throwaway pi home (RPC mode) and require pi to answer get_commands."""
+    with tempfile.TemporaryDirectory(prefix="loop-pi-smoke-") as home:
+        env = {**os.environ, "PI_CODING_AGENT_DIR": home, "PI_SUBAGENTS_TEMP_ROOT": f"{home}/tmp",
+               "PI_OFFLINE": "1", "PI_SKIP_VERSION_CHECK": "1", "PI_TELEMETRY": "0"}
+        flags = [arg for rel in entries for arg in ("--extension", str(prefix / "extensions" / rel))]
+        proc = subprocess.Popen([node, str(prefix / PI_CLI), "--mode", "rpc", "--no-session", *flags],
+                                cwd=home, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True)
+        try:
+            out, err = proc.communicate('{"id":"smoke","type":"get_commands"}\n', timeout=120)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            out, err = proc.communicate()
+        if proc.returncode not in (0, None, -9) or "Failed to load extension" in err:
+            raise InstallError(f"extension smoke failed for {', '.join(entries)}:\n{err[-2000:]}")
+        for line in out.splitlines():
+            try:
+                reply = json.loads(line)
+            except ValueError:
+                continue
+            if reply.get("id") == "smoke" and reply.get("success"):
+                names = {command.get("name") for command in reply["data"]["commands"]}
+                if SMOKE_COMMAND in names or "loop-wait/root.ts" not in entries:
+                    return
+        raise InstallError(f"extension smoke failed for {', '.join(entries)}:\n{err[-2000:]}")
+
+
+def validate(prefix: Path, pin: Dict[str, str], node: str, allow_missing: bool) -> List[str]:
+    for name, version in pin.items():
+        installed = json.loads((prefix / "node_modules" / name / "package.json").read_text())["version"]
+        if installed != version:
+            raise InstallError(f"{name} installed {installed}, pinned {version}")
+    reported = run([node, str(prefix / PI_CLI), "--version"], prefix).strip()
+    if reported != pin[PI_PACKAGE]:
+        raise InstallError(f"pi --version printed {reported!r}, pinned {pin[PI_PACKAGE]}")
+    missing = missing_extensions(prefix)
+    if missing and not allow_missing:
+        raise InstallError("missing extension entries: " + ", ".join(missing))
+    check_hook_scripts(prefix)
+    check_agent_set(prefix)
+    check_model_family(prefix)
+    if not missing:
+        smoke_extensions(prefix, node, ROOT_EXTENSIONS)
+        smoke_extensions(prefix, node, LANE_EXTENSIONS)
+    return missing
+
+
+def source_commit(src: Path) -> str:
+    return subprocess.run(["git", "-C", str(src), "rev-parse", "HEAD"], capture_output=True,
+                          text=True).stdout.strip()
+
+
+def build(data: Path, label: str, files: List[Tuple[str, Path]], pin: Dict[str, str], node: str,
+          allow_missing: bool, policy_source: str, provenance: Dict[str, str]) -> Path:
+    prefix = data / label
+    if prefix.exists():
+        manifest = json.loads((prefix / BUILD_MANIFEST).read_text())
+        if manifest.get("label") != label:
+            raise InstallError(f"{prefix} exists with a different build manifest")
+        if manifest["missing_extensions"] and not allow_missing:
+            raise InstallError(f"{prefix} is an incomplete build; remove it or pass --allow-missing-extensions")
+        return prefix
+    data.mkdir(parents=True, exist_ok=True)
+    staging = data / f".staging-{label}"
+    if staging.exists():
+        if any(staging.iterdir()):
+            raise InstallError(f"staging directory {staging} is not empty; inspect and remove it")
+    else:
+        staging.mkdir()
+    try:
+        for rel, source in files:
+            target = staging / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+        apply_overlay_settings(staging)
+        render_policy(staging, policy_source)
+        shutil.rmtree(staging / "overlay", ignore_errors=True)
+        run(["npm", "ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"], staging)
+        missing = validate(staging, pin, node, allow_missing)
+    except BaseException:
+        # The staging tree holds only copies of source and overlay files, and npm output.
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    manifest = {"label": label, "pins": pin, "node": node, "missing_extensions": missing, **provenance}
+    (staging / BUILD_MANIFEST).write_text(json.dumps(manifest, indent=2) + "\n")
+    os.rename(staging, prefix)
+    return prefix
+
+
+def atomic_write(path: Path, data: bytes, mode: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+class Target:
+    """One home and its launcher: everything `drift` needs besides the build."""
+
+    def __init__(self, home: Path, bin_dir: Path, launcher: str, variables: Optional[Dict[str, str]] = None,
+                 generated_by: str = "loop-pi-install", external: Tuple[str, ...] = ()):
+        self.home, self.bin_dir, self.launcher = home, bin_dir, launcher
+        self.variables = dict(variables or {})
+        self.generated_by = generated_by
+        self.external = tuple(external)
+
+
+def drift(prefix: Path, target: Target, node: str) -> List[Tuple[Path, bytes, int]]:
+    manifest = json.loads((prefix / BUILD_MANIFEST).read_text())
+    home = target.home
+    changes = []
+    plan = home_plan(prefix, home, target.variables)
+    for rel, data in plan.items():
+        path = home / rel
+        mode = 0o755 if rel.startswith("scripts/") else 0o644
+        if rel == "settings.json":
+            data = keep_runtime_settings(data, path)
+            if same_json(path, data):
+                continue
+        if not path.is_file() or path.read_bytes() != data:
+            changes.append((path, data, mode))
+    record = json.dumps({"label": manifest["label"], "files": sorted(set(plan) | set(target.external))},
+                        indent=2).encode() + b"\n"
+    if not (home / HOME_MANIFEST).is_file() or (home / HOME_MANIFEST).read_bytes() != record:
+        changes.append((home / HOME_MANIFEST, record, 0o644))
+    for name in CLI_TOOLS:
+        data = (prefix / "bin" / name).read_bytes()
+        path = target.bin_dir / name
+        if not path.is_file() or path.read_bytes() != data:
+            changes.append((path, data, 0o755))
+    launcher = launcher_text(prefix, home, node, manifest, target.launcher, target.generated_by).encode()
+    path = target.bin_dir / target.launcher
+    if not path.is_file() or path.read_bytes() != launcher:
+        changes.append((path, launcher, 0o755))
+    return changes
+
+
+def stale_managed(home: Path, plan_files: set, external: Tuple[str, ...] = ()) -> List[str]:
+    try:
+        previous = json.loads((home / HOME_MANIFEST).read_text())["files"]
+    except (OSError, ValueError, KeyError):
+        return []
+    return sorted(set(previous) - plan_files - set(external))
+
+
+def parse_vars(items: List[str]) -> Dict[str, str]:
+    variables = {}
+    for item in items:
+        key, sep, value = item.partition("=")
+        if not sep or not re.fullmatch(r"[A-Z][A-Z0-9_]*", key) or key in ("HOME", "PREFIX", "USER_HOME"):
+            raise InstallError(f"--var takes KEY=VALUE with an upper-case KEY other than HOME, PREFIX, USER_HOME")
+        variables[key] = value
+    return variables
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--home", type=Path, required=True, help="the pi home to install (PI_CODING_AGENT_DIR)")
+    parser.add_argument("--launcher", required=True, help="launcher file name written into --bin")
+    parser.add_argument("--data", type=Path, default=DEFAULT_DATA, help="where builds live")
+    parser.add_argument("--bin", type=Path, default=DEFAULT_BIN, help="where the launcher and CLIs go")
+    parser.add_argument("--overlay", type=Path, help="overlay directory (see above)")
+    parser.add_argument("--var", action="append", default=[], metavar="KEY=VALUE", help="extra {{KEY}} substitution")
+    parser.add_argument("--generated-by", default="loop-pi-install", help="named in the launcher header")
+    parser.add_argument("--policy-source", default="the loop-pi home templates",
+                        help="named in the AGENTS.md banner as what to edit instead")
+    parser.add_argument("--external-managed", action="append", default=[], metavar="REL",
+                        help="home file another tool writes; recorded as managed, never written or reported stale")
+    parser.add_argument("--source-repo", default="", help="recorded in the build manifest")
+    parser.add_argument("--overlay-commit", default="", help="recorded in the build manifest")
+    parser.add_argument("--check", action="store_true", help="report drift, write nothing")
+    parser.add_argument("--allow-missing-extensions", action="store_true",
+                        help="bootstrap only: install a build whose launcher runs --version and nothing else")
+    args = parser.parse_args(argv)
+    try:
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", args.launcher):
+            raise InstallError("--launcher must be a plain file name")
+        variables = parse_vars(args.var)
+        target = Target(args.home.expanduser(), args.bin.expanduser(), args.launcher, variables,
+                        args.generated_by, tuple(args.external_managed))
+        pin = pins()
+        files = source_files(SRC, args.overlay)
+        label = build_label(files, pin, f"{args.policy_source}\0{args.generated_by}")
+        node = node_binary()
+        data = args.data.expanduser()
+        prefix = data / label
+        if args.check:
+            if not (prefix / BUILD_MANIFEST).is_file():
+                print(f"DRIFT: build {label} is not installed under {data}")
+                return 1
+            changes = drift(prefix, target, node)
+            for path, _, _ in changes:
+                print(f"DRIFT: {path}")
+            stale = stale_managed(target.home, set(home_plan(prefix, target.home, variables)), target.external)
+            for rel in stale:
+                print(f"STALE: {target.home / rel} is no longer managed")
+            if not changes and not stale:
+                print(f"OK: {label} installed; home and launcher match")
+            return 1 if changes or stale else 0
+        provenance = {"source_repo": args.source_repo, "source_commit": source_commit(SRC),
+                      "overlay_commit": args.overlay_commit}
+        prefix = build(data, label, files, pin, node, args.allow_missing_extensions, args.policy_source, provenance)
+        target.home.mkdir(mode=0o700, parents=True, exist_ok=True)
+        (target.home / "tmp").mkdir(mode=0o700, exist_ok=True)
+        stale = stale_managed(target.home, set(home_plan(prefix, target.home, variables)), target.external)
+        for path, data_bytes, mode in drift(prefix, target, node):
+            atomic_write(path, data_bytes, mode)
+            print(f"wrote {path}")
+        for rel in stale:
+            print(f"STALE (left in place): {target.home / rel}")
+        manifest = json.loads((prefix / BUILD_MANIFEST).read_text())
+        if manifest["missing_extensions"]:
+            print("incomplete build, launcher runs --version only: " + ", ".join(manifest["missing_extensions"]))
+        print(f"installed {label} at {prefix}")
+        return 0
+    except InstallError as error:
+        print(f"loop-pi-install: {error}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

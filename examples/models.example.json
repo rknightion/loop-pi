@@ -1,0 +1,8 @@
+{
+  "providers": {
+    "openai": {
+      "baseUrl": "https://api.openai.com/v1",
+      "apiKey": "!cat {{USER_HOME}}/.config/loop-pi/{{CONTEXT}}/openai_api_key"
+    }
+  }
+}

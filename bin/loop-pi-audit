@@ -1,0 +1,451 @@
+#!/usr/bin/env python3
+"""Closeout remote-change audit for loop-pi runs.
+
+`snapshot --out FILE REPO...` records, for each repository, every remote's
+`git ls-remote` output (less GitHub's recomputed `refs/pull/<n>/merge`
+refs), local tags, and `gh release list` (recorded as unavailable rather
+than empty when `gh` cannot be used).
+
+`compare BEFORE AFTER [--grants FILE]` diffs two snapshots and lists every
+added, moved or deleted ref, tag and release, marking each as covered or not
+by a grants file (`{"<repo>": ["refs/heads/main", ...]}`, matched by the exact
+repo key used on the snapshot command line). Exits 1 if any change is not
+covered by a grant.
+
+Per-run form, used by the `loop-pi` launcher so concurrent loops never share
+a snapshot. The run dir comes from `--run-dir` or `LOOP_PI_RUN_DIR`:
+- `begin REPO` writes `<run-dir>/audit-before.json`, refusing (exit 1, no
+  file) if any remote, tag list or release list cannot be read;
+- `add REPO` adds another repository to that before-snapshot, same rule;
+- `closeout [--grants FILE]` snapshots every repo in it to
+  `<run-dir>/audit-after.json` and compares.
+
+Stdlib only.
+"""
+import argparse
+import fcntl
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+
+
+def run(cmd: list[str], timeout: int = 60) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+
+
+def git_remotes(repo: str) -> list[str]:
+    result = run(["git", "-C", repo, "remote"])
+    if result.returncode != 0:
+        return []
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def is_recomputed_pull_merge_ref(ref: str) -> bool:
+    """refs/pull/<n>/merge is recomputed by GitHub whenever the PR's base
+    moves, so its moves are never a loop's push. refs/pull/<n>/head is kept."""
+    parts = ref.split("/")
+    return len(parts) == 4 and parts[0] == "refs" and parts[1] == "pull" and parts[3] == "merge"
+
+
+def git_ls_remote_refs(repo: str, remote: str) -> dict:
+    """{"available": True, "refs": {ref: sha, ...}} or {"available": False, "reason": ...}."""
+    try:
+        result = run(["git", "-C", repo, "ls-remote", remote], timeout=120)
+    except subprocess.TimeoutExpired:
+        return {"available": False, "reason": f"git ls-remote {remote} timed out"}
+    except OSError as exc:
+        return {"available": False, "reason": f"git ls-remote {remote} failed to run: {exc}"}
+    if result.returncode != 0:
+        return {"available": False, "reason": f"git ls-remote {remote} exited {result.returncode}: {result.stderr.strip()}"}
+    refs: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split("\t", 1)
+        if len(parts) != 2:
+            continue
+        sha, ref = parts
+        if is_recomputed_pull_merge_ref(ref):
+            continue
+        refs[ref] = sha
+    return {"available": True, "refs": refs}
+
+
+def git_local_tags(repo: str) -> dict:
+    """{"available": True, "tags": {tag: sha, ...}} or {"available": False, "reason": ...}."""
+    try:
+        result = run(["git", "-C", repo, "show-ref", "--tags"])
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"available": False, "reason": f"git show-ref --tags failed: {exc}"}
+    # Exit 1 with empty stdout means "no tags", not a failure.
+    if result.returncode not in (0, 1):
+        return {"available": False, "reason": f"git show-ref --tags exited {result.returncode}: {result.stderr.strip()}"}
+    tags: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(" ", 1)
+        if len(parts) != 2:
+            continue
+        sha, ref = parts
+        tags[ref] = sha
+    return {"available": True, "tags": tags}
+
+
+def gh_release_list_in(repo: str) -> dict:
+    """{"available": True, "releases": [...]} or {"available": False, "reason": ...}.
+
+    Never conflates "gh unavailable/failed" with "zero releases": a
+    successful call with no releases is {"available": True, "releases": []}.
+    Runs with cwd=repo so `gh` resolves the repository from its git remotes.
+    """
+    if shutil.which("gh") is None:
+        return {"available": False, "reason": "gh is not installed"}
+    try:
+        result = subprocess.run(
+            ["gh", "release", "list", "--json", "tagName,name,publishedAt,isDraft,isPrerelease", "--limit", "1000"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            cwd=repo,
+        )
+    except subprocess.TimeoutExpired:
+        return {"available": False, "reason": "gh release list timed out"}
+    except OSError as exc:
+        return {"available": False, "reason": f"gh release list failed to run: {exc}"}
+    if result.returncode != 0:
+        return {"available": False, "reason": f"gh release list exited {result.returncode}: {result.stderr.strip()}"}
+    try:
+        releases = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError as exc:
+        return {"available": False, "reason": f"gh release list returned unparseable JSON: {exc}"}
+    return {"available": True, "releases": releases}
+
+
+def snapshot_repo(repo: str) -> dict:
+    remotes = {}
+    for remote in git_remotes(repo):
+        remotes[remote] = git_ls_remote_refs(repo, remote)
+    return {
+        "remotes": remotes,
+        "tags": git_local_tags(repo),
+        "releases": gh_release_list_in(repo),
+    }
+
+
+def cmd_snapshot(args: argparse.Namespace) -> int:
+    snapshot = {
+        "taken_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "repos": {repo: snapshot_repo(repo) for repo in args.repos},
+    }
+    with open(args.out, "w", encoding="utf-8") as fh:
+        json.dump(snapshot, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+    print(f"loop-pi-audit: wrote snapshot of {len(args.repos)} repo(s) to {args.out}")
+    return 0
+
+
+def unavailable_parts(entry: dict) -> list[str]:
+    parts = [f"remote {name}: {r['reason']}" for name, r in entry["remotes"].items() if not r["available"]]
+    parts += [f"{key}: {entry[key]['reason']}" for key in ("tags", "releases") if not entry[key]["available"]]
+    return parts
+
+
+def run_dir_of(args: argparse.Namespace) -> str:
+    run_dir = args.run_dir or os.environ.get("LOOP_PI_RUN_DIR")
+    if not run_dir or not os.path.isdir(run_dir):
+        print("loop-pi-audit: no run dir (pass --run-dir or start the loop with loop-pi, which sets LOOP_PI_RUN_DIR).",
+              file=sys.stderr)
+        sys.exit(2)
+    return run_dir
+
+
+def write_json(path: str, data: dict) -> None:
+    tmp = f"{path}.tmp-{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+    os.replace(tmp, path)
+
+
+def add_to_before(args: argparse.Namespace, fresh: bool) -> int:
+    run_dir = run_dir_of(args)
+    before_path = os.path.join(run_dir, "audit-before.json")
+    repo = os.path.realpath(args.repo)
+    # Held through the read-modify-write so concurrent adds in one run keep every repo.
+    with open(os.path.join(run_dir, ".audit.lock"), "w", encoding="utf-8") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return add_locked(before_path, repo, fresh)
+
+
+def add_locked(before_path: str, repo: str, fresh: bool) -> int:
+    if not fresh:
+        with open(before_path, "r", encoding="utf-8") as fh:
+            before = json.load(fh)
+        if repo in before["repos"]:
+            # A later snapshot would hide every change made since the first one.
+            print(f"loop-pi-audit: {repo} is already recorded in {before_path}; keeping the first snapshot.")
+            return 0
+    entry = snapshot_repo(repo)
+    missing = unavailable_parts(entry)
+    if missing:
+        print(f"loop-pi-audit: cannot audit {repo}; the closeout comparison would fail:", file=sys.stderr)
+        for part in missing:
+            print(f"  {part}", file=sys.stderr)
+        return 1
+    if fresh:
+        before = {"taken_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "repos": {}}
+    before["repos"][repo] = entry
+    write_json(before_path, before)
+    print(f"loop-pi-audit: {repo} recorded in {before_path}")
+    return 0
+
+
+def cmd_begin(args: argparse.Namespace) -> int:
+    return add_to_before(args, fresh=True)
+
+
+def cmd_add(args: argparse.Namespace) -> int:
+    return add_to_before(args, fresh=False)
+
+
+def cmd_closeout(args: argparse.Namespace) -> int:
+    run_dir = run_dir_of(args)
+    with open(os.path.join(run_dir, ".audit.lock"), "w", encoding="utf-8") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return closeout_locked(run_dir, args.grants)
+
+
+def closeout_locked(run_dir: str, grants: str | None) -> int:
+    before_path = os.path.join(run_dir, "audit-before.json")
+    with open(before_path, "r", encoding="utf-8") as fh:
+        repos = sorted(json.load(fh)["repos"])
+    after_path = os.path.join(run_dir, "audit-after.json")
+    write_json(after_path, {"taken_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                            "repos": {repo: snapshot_repo(repo) for repo in repos}})
+    return cmd_compare(argparse.Namespace(before=before_path, after=after_path, grants=grants))
+
+
+def diff_ref_map(before: dict, after: dict) -> list[tuple[str, str, str, str]]:
+    """Returns (change, ref, before_sha, after_sha) tuples; change in
+    {"added", "deleted", "moved"}."""
+    changes = []
+    for ref in sorted(set(before) | set(after)):
+        b, a = before.get(ref), after.get(ref)
+        if b is None and a is not None:
+            changes.append(("added", ref, "", a))
+        elif b is not None and a is None:
+            changes.append(("deleted", ref, b, ""))
+        elif b != a:
+            changes.append(("moved", ref, b, a))
+    return changes
+
+
+def fetch_ref(repo: str, remote: str, ref: str, timeout: int = 60) -> tuple[bool, str]:
+    """Best-effort fetch of one ref from one remote, into `repo`'s own object
+    database, so a subsequent `merge-base --is-ancestor` has the objects it
+    needs even when they were never fetched during the run itself."""
+    try:
+        result = run(["git", "-C", repo, "fetch", remote, ref], timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return False, f"git fetch {remote} {ref} timed out"
+    except OSError as exc:
+        return False, f"git fetch {remote} {ref} failed to run: {exc}"
+    if result.returncode != 0:
+        return False, f"git fetch {remote} {ref} exited {result.returncode}: {result.stderr.strip()}"
+    return True, ""
+
+
+def is_fast_forward(repo: str, before_sha: str, after_sha: str) -> tuple[bool | None, str]:
+    """Returns (True, "") if before_sha is an ancestor of after_sha (a
+    fast-forward move), (False, "") if it definitely is not, or (None,
+    reason) when ancestry could not be determined (missing objects, a bad
+    revision, ...)."""
+    try:
+        result = run(["git", "-C", repo, "merge-base", "--is-ancestor", before_sha, after_sha])
+    except subprocess.TimeoutExpired:
+        return None, "git merge-base --is-ancestor timed out"
+    except OSError as exc:
+        return None, f"git merge-base --is-ancestor failed to run: {exc}"
+    if result.returncode == 0:
+        return True, ""
+    if result.returncode == 1:
+        return False, ""
+    return None, f"git merge-base --is-ancestor exited {result.returncode}: {result.stderr.strip()}"
+
+
+def moved_ref_mark(repo: str, remote: str, ref: str, before_sha: str, after_sha: str, covered: bool) -> tuple[str, bool]:
+    """Checks a moved remote ref for fast-forward ancestry (plan C4 item 5:
+    "a moved ref must be checked for fast-forward ... A non-fast-forward move
+    is a violation even when the branch is granted"). Fetches the ref fresh
+    from the remote first so the ancestry check has the objects it needs.
+    Returns (mark, all_covered_contribution)."""
+    fetched, fetch_reason = fetch_ref(repo, remote, ref)
+    if not fetched:
+        return f"UNVERIFIED fast-forward: {fetch_reason}", False
+    ff, ff_reason = is_fast_forward(repo, before_sha, after_sha)
+    if ff is None:
+        return f"UNVERIFIED fast-forward: {ff_reason}", False
+    if not ff:
+        return ("NON-FAST-FORWARD (granted, but blocked)" if covered else "NON-FAST-FORWARD UNGRANTED"), False
+    return ("GRANTED" if covered else "UNGRANTED"), covered
+
+
+def compare_repo(name: str, before: dict, after: dict, grants: list[str], report: list[str]) -> bool:
+    """Returns True if every change for this repo is covered by a grant."""
+    all_covered = True
+
+    before_remotes = before.get("remotes", {})
+    after_remotes = after.get("remotes", {})
+    for remote in sorted(set(before_remotes) | set(after_remotes)):
+        b = before_remotes.get(remote, {"available": False, "reason": "remote absent before"})
+        a = after_remotes.get(remote, {"available": False, "reason": "remote absent after"})
+        if not b.get("available") or not a.get("available"):
+            report.append(
+                f"[{name}] remote '{remote}': ls-remote unavailable on one side "
+                f"(before={b.get('reason', 'ok')!r}, after={a.get('reason', 'ok')!r}); UNVERIFIED - cannot "
+                f"confirm no ungranted change occurred."
+            )
+            all_covered = False
+            continue
+        for change, ref, before_sha, after_sha in diff_ref_map(b.get("refs", {}), a.get("refs", {})):
+            covered = ref in grants
+            if change == "moved":
+                mark, contributes_covered = moved_ref_mark(name, remote, ref, before_sha, after_sha, covered)
+                all_covered = all_covered and contributes_covered
+            else:
+                all_covered = all_covered and covered
+                mark = "GRANTED" if covered else "UNGRANTED"
+            report.append(f"[{name}] remote '{remote}' ref {change}: {ref} ({before_sha[:12] or '-'} -> {after_sha[:12] or '-'}) [{mark}]")
+
+    before_tags = before.get("tags", {})
+    after_tags = after.get("tags", {})
+    if not before_tags.get("available") or not after_tags.get("available"):
+        report.append(
+            f"[{name}] local tags: unavailable on one side "
+            f"(before={before_tags.get('reason', 'ok')!r}, after={after_tags.get('reason', 'ok')!r}); UNVERIFIED - "
+            f"cannot confirm no ungranted change occurred."
+        )
+        all_covered = False
+    else:
+        for change, ref, before_sha, after_sha in diff_ref_map(before_tags.get("tags", {}), after_tags.get("tags", {})):
+            covered = ref in grants
+            all_covered = all_covered and covered
+            mark = "GRANTED" if covered else "UNGRANTED"
+            report.append(f"[{name}] tag {change}: {ref} ({before_sha[:12] or '-'} -> {after_sha[:12] or '-'}) [{mark}]")
+
+    before_releases = before.get("releases", {})
+    after_releases = after.get("releases", {})
+    if not before_releases.get("available") or not after_releases.get("available"):
+        report.append(
+            f"[{name}] releases: unavailable on one side "
+            f"(before={before_releases.get('reason', 'ok')!r}, after={after_releases.get('reason', 'ok')!r}); "
+            f"UNVERIFIED - cannot confirm no ungranted change occurred."
+        )
+        all_covered = False
+    else:
+        before_tags_set = {r["tagName"] for r in before_releases.get("releases", []) if "tagName" in r}
+        after_tags_set = {r["tagName"] for r in after_releases.get("releases", []) if "tagName" in r}
+        for tag in sorted(after_tags_set - before_tags_set):
+            covered = tag in grants or f"refs/tags/{tag}" in grants
+            all_covered = all_covered and covered
+            mark = "GRANTED" if covered else "UNGRANTED"
+            report.append(f"[{name}] release added: {tag} [{mark}]")
+        for tag in sorted(before_tags_set - after_tags_set):
+            covered = tag in grants or f"refs/tags/{tag}" in grants
+            all_covered = all_covered and covered
+            mark = "GRANTED" if covered else "UNGRANTED"
+            report.append(f"[{name}] release removed: {tag} [{mark}]")
+
+    return all_covered
+
+
+def cmd_compare(args: argparse.Namespace) -> int:
+    with open(args.before, "r", encoding="utf-8") as fh:
+        before = json.load(fh)
+    with open(args.after, "r", encoding="utf-8") as fh:
+        after = json.load(fh)
+
+    grants_by_repo: dict[str, list[str]] = {}
+    if args.grants:
+        with open(args.grants, "r", encoding="utf-8") as fh:
+            grants_by_repo = json.load(fh)
+
+    before_repos = before.get("repos", {})
+    after_repos = after.get("repos", {})
+    all_names = sorted(set(before_repos) | set(after_repos))
+
+    report: list[str] = []
+    all_ok = True
+    any_change = False
+    for name in all_names:
+        if name not in before_repos or name not in after_repos:
+            # A repo dropped from one snapshot entirely (a crashed run, a
+            # wrong repo list, ...) can't be diffed at all, so it must never
+            # be silently treated as "no remotes, nothing to check" - that
+            # would hide every change made to it.
+            missing_from = "before" if name not in before_repos else "after"
+            report.append(f"[{name}] repository missing from the {missing_from} snapshot; UNVERIFIED - cannot confirm no ungranted change occurred.")
+            all_ok = False
+            any_change = True
+            continue
+        b = before_repos[name]
+        a = after_repos[name]
+        pre_len = len(report)
+        covered = compare_repo(name, b, a, grants_by_repo.get(name, []), report)
+        if len(report) > pre_len:
+            any_change = True
+        all_ok = all_ok and covered
+
+    if not any_change:
+        print("loop-pi-audit: no remote changes detected.")
+        return 0
+
+    for line in report:
+        print(line)
+
+    if not all_ok:
+        print("loop-pi-audit: at least one ungranted remote change was found.", file=sys.stderr)
+        return 1
+    print("loop-pi-audit: every remote change is covered by a grant.")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    snap = sub.add_parser("snapshot", help="Record remote state for one or more repositories.")
+    snap.add_argument("--out", required=True, help="Path to write the snapshot JSON.")
+    snap.add_argument("repos", nargs="+", help="Repository paths to snapshot.")
+    snap.set_defaults(func=cmd_snapshot)
+
+    comp = sub.add_parser("compare", help="Compare two snapshots and report ungranted changes.")
+    comp.add_argument("before", help="Path to the before snapshot JSON.")
+    comp.add_argument("after", help="Path to the after snapshot JSON.")
+    comp.add_argument("--grants", help="Path to a grants JSON file: {\"<repo>\": [\"refs/heads/main\", ...]}.")
+    comp.set_defaults(func=cmd_compare)
+
+    for name, func, text in (("begin", cmd_begin, "Start a run's before-snapshot with REPO."),
+                             ("add", cmd_add, "Add REPO to a run's before-snapshot.")):
+        p = sub.add_parser(name, help=text)
+        p.add_argument("--run-dir", help="Run directory (default: $LOOP_PI_RUN_DIR).")
+        p.add_argument("repo")
+        p.set_defaults(func=func)
+
+    close = sub.add_parser("closeout", help="Snapshot the run's repos again and compare.")
+    close.add_argument("--run-dir", help="Run directory (default: $LOOP_PI_RUN_DIR).")
+    close.add_argument("--grants", help="Path to a grants JSON file, keyed by the repo paths in the run.")
+    close.set_defaults(func=cmd_closeout)
+
+    args = parser.parse_args()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,21 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Fleet policy (SHA pinning, cooldown, automerge) comes from the self-hosted Renovate admin config. Only repo-specific rules live here.",
+  "packageRules": [
+    {
+      "description": "pi and pi-subagents change their extension API between minor versions. A bump needs the extension tests and a live loop, so it waits for approval on the dependency dashboard instead of opening on its own.",
+      "matchPackageNames": ["@earendil-works/pi-coding-agent", "pi-subagents"],
+      "dependencyDashboardApproval": true
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Track the Node version pinned for CI.",
+      "managerFilePatterns": ["/^\\.github/workflows/ci\\.yml$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\s+node-version:\\s*\"(?<currentValue>[^\"]+)\""
+      ]
+    }
+  ]
+}

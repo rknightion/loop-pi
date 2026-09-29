@@ -1,0 +1,22 @@
+{
+  "name": "loop-pi",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Pinned pi runtime, pi-subagents and loop-pi extensions for OpenAI-model fan-out loops.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "test": "node --test --test-reporter=spec 'extensions/**/*.test.ts'",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.87.1",
+    "pi-subagents": "0.73.0"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.3",
+    "typescript": "7.0.2"
+  }
+}

@@ -1,0 +1,220 @@
+#!/usr/bin/env python3
+"""Target-repository preflight for loop-pi children.
+
+Children load a target repository's `.pi/settings.json`, `.pi/SYSTEM.md` and project
+extensions regardless of trust, and project agent files under `.pi/agents/` or `.agents/`
+outrank the loop-pi ones. Before the root's first spawn into a repository, this script
+refuses to proceed when any of that is present, and separately checks the checkout is
+clean and `.pi/` is gitignored (pi-subagents writes `.pi/subagents/` into the checkout).
+
+It also asserts, from the files under `$PI_CODING_AGENT_DIR/agents/*.md`, that the C3
+agent set (SEAMS.md "Names and paths") is exactly what will be offered to the root -
+no name outside that set, and no C3 name missing.
+
+Stdlib only. Exit 0 on a clean repository; exit 1 with every failing reason listed on
+stderr otherwise.
+"""
+import argparse
+import os
+import re
+import subprocess
+import sys
+
+C3_AGENTS = {
+    "mapper",
+    "mapper-deep",
+    "gate-runner",
+    "lane-worker",
+    "lane-worker-push",
+    "complex-worker",
+    "complex-worker-push",
+    "reviewer",
+    "reviewer-high",
+    "security-reviewer",
+    "rescue-sol",
+    "rescue-astra",
+}
+
+FRONTMATTER_NAME = re.compile(r"^name:\s*(.+?)\s*$", re.MULTILINE)
+
+
+def parse_frontmatter_name(path: str) -> str | None:
+    """Best-effort extraction of the `name:` field from a Markdown file's YAML
+    frontmatter (between the first two `---` lines). Returns None if the file
+    has no frontmatter or no `name` field."""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return None
+    if not text.startswith("---"):
+        return None
+    end = text.find("\n---", 3)
+    if end < 0:
+        return None
+    frontmatter = text[3:end]
+    match = FRONTMATTER_NAME.search(frontmatter)
+    if not match:
+        return None
+    name = match.group(1).strip()
+    if (name.startswith('"') and name.endswith('"')) or (name.startswith("'") and name.endswith("'")):
+        name = name[1:-1]
+    return name or None
+
+
+def run_git(repo: str, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", "-C", repo, *args],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+def is_git_checkout(repo: str) -> bool:
+    """True for an ordinary repository or a linked worktree, where `.git` is
+    a file (a `gitdir: <path>` pointer) rather than a directory. Uses `git
+    rev-parse --git-dir` instead of `os.path.isdir(os.path.join(repo,
+    ".git"))` so a worktree target is accepted."""
+    try:
+        result = run_git(repo, "rev-parse", "--git-dir")
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+def check_no_pi_project_files(repo: str, failures: list[str]) -> None:
+    """Refuse `.pi/` settings, SYSTEM, extension or agent files, or legacy
+    `.agents/*.md` agent definitions."""
+    pi_dir = os.path.join(repo, ".pi")
+    checks = [
+        (os.path.join(pi_dir, "settings.json"), "a .pi/settings.json"),
+        (os.path.join(pi_dir, "SYSTEM.md"), "a .pi/SYSTEM.md"),
+    ]
+    for path, label in checks:
+        if os.path.isfile(path):
+            failures.append(f"{repo} carries {label}, which would load into every child regardless of trust.")
+
+    for subdir, label in ((os.path.join(pi_dir, "extensions"), ".pi/extensions/"), (os.path.join(pi_dir, "agents"), ".pi/agents/")):
+        if os.path.isdir(subdir) and any(os.scandir(subdir)):
+            failures.append(f"{repo} carries files under {label}, which would load into every child regardless of trust.")
+
+    agents_dir = os.path.join(repo, ".agents")
+    if os.path.isdir(agents_dir):
+        md_files = [f for f in os.listdir(agents_dir) if f.endswith(".md")]
+        if md_files:
+            failures.append(
+                f"{repo} carries {len(md_files)} legacy .agents/*.md agent definition(s) "
+                f"({', '.join(sorted(md_files))}), which outrank the loop-pi agent set."
+            )
+
+
+def check_pi_gitignored(repo: str, failures: list[str]) -> None:
+    """pi-subagents writes `.pi/subagents/` into the checkout, so `.pi/` must
+    be gitignored or that state becomes untracked repo pollution."""
+    try:
+        # Trailing slash matters: `.pi/` in a .gitignore is a directory-only
+        # pattern, and git only matches it against a query that is also
+        # slash-terminated when the path does not yet exist on disk (the
+        # normal case here, since pi-subagents has not run yet).
+        result = run_git(repo, "check-ignore", "-q", "--no-index", ".pi/")
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        failures.append(f"could not check whether .pi/ is gitignored in {repo}: {exc}")
+        return
+    if result.returncode not in (0, 1):
+        failures.append(
+            f"`git check-ignore` for .pi/ in {repo} exited {result.returncode} unexpectedly: {result.stderr.strip()}"
+        )
+        return
+    if result.returncode == 1:
+        failures.append(f"{repo} does not gitignore .pi/; pi-subagents writes .pi/subagents/ into the checkout.")
+
+
+def check_clean_checkout(repo: str, failures: list[str]) -> None:
+    """Worktree isolation requires a clean source checkout."""
+    try:
+        result = run_git(repo, "status", "--porcelain")
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        failures.append(f"could not check git status in {repo}: {exc}")
+        return
+    if result.returncode != 0:
+        failures.append(f"`git status --porcelain` in {repo} exited {result.returncode}: {result.stderr.strip()}")
+        return
+    if result.stdout.strip():
+        dirty_lines = [line for line in result.stdout.splitlines() if line.strip()]
+        failures.append(
+            f"{repo} is not a clean checkout ({len(dirty_lines)} changed path(s)): "
+            f"{', '.join(line.strip() for line in dirty_lines[:5])}"
+            + (" ..." if len(dirty_lines) > 5 else "")
+        )
+
+
+def check_c3_agent_set(failures: list[str]) -> None:
+    """Assert the agent files under $PI_CODING_AGENT_DIR/agents/*.md are exactly
+    the C3 set: no name outside it, and no C3 name missing."""
+    agent_dir_env = os.environ.get("PI_CODING_AGENT_DIR")
+    if not agent_dir_env:
+        failures.append("PI_CODING_AGENT_DIR is not set; cannot validate the C3 agent set.")
+        return
+    agents_glob_dir = os.path.join(os.path.expanduser(agent_dir_env), "agents")
+    if not os.path.isdir(agents_glob_dir):
+        failures.append(f"{agents_glob_dir} does not exist; no agents are defined for this loop-pi home.")
+        return
+
+    found_names: set[str] = set()
+    unparseable: list[str] = []
+    for entry in sorted(os.listdir(agents_glob_dir)):
+        if not entry.endswith(".md"):
+            continue
+        path = os.path.join(agents_glob_dir, entry)
+        if not os.path.isfile(path):
+            continue
+        name = parse_frontmatter_name(path)
+        if name is None:
+            unparseable.append(entry)
+            continue
+        found_names.add(name)
+
+    if unparseable:
+        failures.append(f"could not read a `name:` frontmatter field from: {', '.join(unparseable)}")
+
+    extra = sorted(found_names - C3_AGENTS)
+    missing = sorted(C3_AGENTS - found_names)
+    if extra:
+        failures.append(f"agent name(s) outside the C3 set are defined: {', '.join(extra)}")
+    if missing:
+        failures.append(f"C3 agent name(s) are missing from {agents_glob_dir}: {', '.join(missing)}")
+
+
+def preflight(repo: str) -> list[str]:
+    repo = os.path.abspath(repo)
+    failures: list[str] = []
+    if not os.path.isdir(repo):
+        return [f"{repo} is not a directory."]
+    if not is_git_checkout(repo):
+        failures.append(f"{repo} is not a git checkout (no .git directory); worktree isolation requires one.")
+    else:
+        check_pi_gitignored(repo, failures)
+        check_clean_checkout(repo, failures)
+    check_no_pi_project_files(repo, failures)
+    check_c3_agent_set(failures)
+    return failures
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("repo", help="Path to the target repository the root is about to spawn children into.")
+    args = parser.parse_args()
+
+    failures = preflight(args.repo)
+    if failures:
+        print(f"loop-pi-preflight: refusing to proceed for {os.path.abspath(args.repo)}:", file=sys.stderr)
+        for failure in failures:
+            print(f"  - {failure}", file=sys.stderr)
+        return 1
+    print(f"loop-pi-preflight: {os.path.abspath(args.repo)} is clear.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

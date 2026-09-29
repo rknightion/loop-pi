@@ -1,0 +1,131 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  just-check:
+    name: just check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Harden the runner (audit egress)
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          # renovate: datasource=node-version depName=node
+          node-version: "26.10.0"
+
+      - name: Set up just
+        uses: rknightion/.github/.github/actions/setup-just@f32275a4a7641f34db5cb005d270db961b54a680 # v1.25.3
+
+      - name: just setup
+        run: just setup
+
+      # The leak leg of `just check` runs in the leak-scan job, which holds the term list; a CI
+      # checkout has no installed hooks to verify.
+      - name: just fmt-check lint test
+        run: just fmt-check lint test
+
+  leak-scan:
+    name: leak-scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Harden the runner (audit egress)
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout repository (full history)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Fails closed: an unset or empty LEAK_TERMS secret exits 2.
+      - name: Scan history and tree against the private term list
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          LEAK_TERMS: ${{ secrets.LEAK_TERMS }}
+        run: |
+          python3 bin/leak-scan --history
+          python3 bin/leak-scan --path .
+
+      - name: Scan a fork pull request against the public patterns only
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+        run: |
+          echo "::warning title=leak-scan::Fork pull request: repository secrets are unavailable, so only the public patterns run. A maintainer re-runs the full scan before merging."
+          python3 bin/leak-scan --public-only --history
+          python3 bin/leak-scan --public-only --path .
+
+  trufflehog:
+    name: trufflehog
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Harden the runner (audit egress)
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout repository (full history)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Bump the version and the checksum together, copying the checksum from the release's own
+      # trufflehog_<version>_checksums.txt asset; never type it by hand.
+      - name: Install trufflehog
+        env:
+          TRUFFLEHOG_VERSION: "3.97.9"
+          TRUFFLEHOG_LINUX_AMD64_SHA256: "40377e6572495412fb9ba0bc21c9401f73b72f1d2afd11b9931bc4a5ed622866"
+        run: |
+          archive="trufflehog_${TRUFFLEHOG_VERSION}_linux_amd64.tar.gz"
+          curl --fail --show-error --silent --location --retry 5 --retry-all-errors --output "${archive}" \
+            "https://github.com/trufflesecurity/trufflehog/releases/download/v${TRUFFLEHOG_VERSION}/${archive}"
+          printf '%s  %s\n' "${TRUFFLEHOG_LINUX_AMD64_SHA256}" "${archive}" | sha256sum --check --strict
+          mkdir -p "${RUNNER_TEMP}/trufflehog"
+          tar -xzf "${archive}" -C "${RUNNER_TEMP}/trufflehog" trufflehog
+          rm -f "${archive}"
+
+      - name: Scan the full history
+        run: '"${RUNNER_TEMP}/trufflehog/trufflehog" git file://. --results=verified,unknown --fail --no-update'
+
+  actionlint:
+    name: actionlint
+    permissions:
+      contents: read
+    uses: rknightion/.github/.github/workflows/actionlint.yml@f32275a4a7641f34db5cb005d270db961b54a680 # v1.25.3
+
+  zizmor:
+    name: zizmor
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    uses: rknightion/.github/.github/workflows/zizmor.yml@f32275a4a7641f34db5cb005d270db961b54a680 # v1.25.3

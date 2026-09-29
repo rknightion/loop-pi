@@ -1,0 +1,25 @@
+{
+  "waitTool": false,
+  "forceTopLevelAsync": true,
+  "defaultSubagentContext": "fresh",
+  "maxSubagentDepth": 2,
+  "maxActiveAsyncRunsPerSession": 19,
+  "checkpointBeforeDeadlineMs": 600000,
+  "toolDescriptionMode": "custom",
+  "control": { "activeNoticeAfterMs": 3600000 },
+  "scheduledRuns": { "enabled": false },
+  "missions": { "enabled": false },
+  "intercomBridge": { "mode": "off" },
+  "worktreeBaseDir": "{{HOME}}/worktrees",
+  "artifactDir": "session",
+  "authorityPolicy": {
+    "discardWorktree": "forbid",
+    "destructiveCleanup": "forbid",
+    "spawnBudgetGrant": "forbid",
+    "scheduleCreate": "forbid",
+    "stopRun": "auto",
+    "steerRun": "auto",
+    "inspectorOpen": "forbid",
+    "projectOpen": "forbid"
+  }
+}
