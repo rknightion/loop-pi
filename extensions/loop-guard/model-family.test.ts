@@ -3,8 +3,8 @@ import { test } from "node:test";
 import { isAllowedModel, modelFamilyConfig, refusedPayload, subagentModelOverrides, subagentOverrideBlock } from "./model-family.ts";
 
 test("only the gpt-6 family on openai is allowed", () => {
-  for (const id of ["gpt-6-sol", "gpt-6-luna", "gpt-6-astra"]) assert.ok(isAllowedModel("openai", id), id);
-  for (const id of ["gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.5", "gpt-60", "gpt-6-sol-x/../gpt-5"]) {
+  for (const id of ["gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-6-astra"]) assert.ok(isAllowedModel("openai", id), id);
+  for (const id of ["gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.5", "gpt-60", "gpt-6-sol-x/../gpt-5", "gpt-6.1", "gpt-6..1-sol"]) {
     assert.ok(!isAllowedModel("openai", id), id);
   }
   assert.ok(!isAllowedModel("amazon-bedrock", "global.openai.gpt-6-sol"));
@@ -46,7 +46,10 @@ test("the family and the fallback route come from settings loopPi, defaulting to
   const defaults = modelFamilyConfig({});
   assert.deepEqual(defaults, modelFamilyConfig({ loopPi: {} }));
   assert.equal(defaults.name, "gpt-6");
-  assert.deepEqual(defaults.fallback, { provider: "openai", id: "gpt-6-sol" });
+  assert.deepEqual(defaults.fallback, { provider: "openai", id: "gpt-6.1-sol" });
+  // An overlay can pin the routed models exactly, so gpt-6-sol is refused.
+  const pinned = modelFamilyConfig({ loopPi: { modelFamily: { pattern: "^(gpt-6\\.1-sol|gpt-6-luna|gpt-6-astra)$" } } });
+  assert.ok(isAllowedModel("openai", "gpt-6.1-sol", pinned) && !isAllowedModel("openai", "gpt-6-sol", pinned));
   const custom = modelFamilyConfig({
     loopPi: {
       modelFamily: { provider: "example", pattern: "^model-7(-[a-z]+)+$", name: "model-7", members: ["model-7-large"] },

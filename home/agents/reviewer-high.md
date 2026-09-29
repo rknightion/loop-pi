@@ -2,7 +2,7 @@
 name: reviewer-high
 description: REVIEW or DESIGN lane for unresolved complex decisions.
 advertise: true
-model: openai/gpt-6-sol
+model: openai/gpt-6.1-sol
 thinking: high
 tools: read, grep, find, ls, bash
 extensions:

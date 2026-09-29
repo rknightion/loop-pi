@@ -67,11 +67,11 @@ Settings under `loopPi` in `home/settings.json` (or your overlay):
 
 | Key | Default | Meaning |
 |---|---|---|
-| `modelFamily` | `{"provider": "openai", "pattern": "^gpt-6(-[a-z0-9]+)+$", "name": "gpt-6"}` | the only models the root and lanes may run |
-| `rootRoute` | `{"provider": "openai", "model": "gpt-6-sol", "thinking": "medium"}` | the root's model, and the fallback when a session selects one outside the family |
+| `modelFamily` | `{"provider": "openai", "pattern": "^gpt-6(\\.[0-9]+)?(-[a-z0-9]+)+$", "name": "gpt-6"}` | the only models the root and lanes may run |
+| `rootRoute` | `{"provider": "openai", "model": "gpt-6.1-sol", "thinking": "medium"}` | the root's model, and the fallback when a session selects one outside the family |
 | `requiredHookScripts` | `[]` | guard scripts that must exist; a missing required one blocks every lane tool call |
 
-The agent files name `openai/gpt-6-*` models. If you use another family, replace the agent files
+The agent files name `openai/gpt-6.1-sol` and `openai/gpt-6-*` models. If you use another family, replace the agent files
 through the overlay and set `modelFamily` and `rootRoute` to match; the installer refuses a build
 where they disagree.
 

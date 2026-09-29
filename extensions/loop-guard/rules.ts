@@ -56,6 +56,8 @@ export const C3_AGENTS: ReadonlySet<string> = new Set([
   "gate-runner",
   "lane-worker",
   "lane-worker-push",
+  "lane-worker-retry",
+  "lane-worker-retry-push",
   "complex-worker",
   "complex-worker-push",
   "reviewer",

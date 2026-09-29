@@ -4,6 +4,8 @@ runnable as `python3 -m unittest bin.test_loop_pi_preflight -v` from `pi/`, or
 directly as a script. Builds scratch git repos under a temp dir; never touches
 ~/.pi, ~/.loop-pi-personal, or this checkout.
 """
+import importlib.machinery
+import importlib.util
 import os
 import shutil
 import subprocess
@@ -20,6 +22,8 @@ C3_AGENTS = [
     "gate-runner",
     "lane-worker",
     "lane-worker-push",
+    "lane-worker-retry",
+    "lane-worker-retry-push",
     "complex-worker",
     "complex-worker-push",
     "reviewer",
@@ -187,3 +191,26 @@ class LoopPiPreflightTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AgentSetParity(unittest.TestCase):
+    """The preflight, the installer and the shipped agent files must name the same agents, or every
+    launch after an install fails its preflight."""
+
+    @staticmethod
+    def load(name, path):
+        loader = importlib.machinery.SourceFileLoader(name, path)
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        module = importlib.util.module_from_spec(spec)
+        loader.exec_module(module)
+        return module
+
+    def test_preflight_installer_and_agent_files_agree(self):
+        root = os.path.dirname(HERE)
+        preflight = self.load("loop_pi_preflight_parity", SCRIPT)
+        installer = self.load("loop_pi_install_parity", os.path.join(HERE, "loop-pi-install"))
+        agents = os.path.join(root, "home", "agents")
+        files = {name[:-3] for name in os.listdir(agents) if name.endswith(".md")}
+        self.assertEqual(set(preflight.C3_AGENTS), files)
+        self.assertEqual(set(installer.AGENT_SET), files)
+        self.assertEqual(set(C3_AGENTS), files)

@@ -3,7 +3,7 @@ name: lane-worker
 description: EXECUTION lane (no push): implements a fully specified packet against frozen seams.
 advertise: true
 model: openai/gpt-6-luna
-thinking: max
+thinking: high
 tools: read, bash, edit, write, grep, find, ls, watch_process
 extensions:
 systemPromptMode: append

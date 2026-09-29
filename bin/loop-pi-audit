@@ -25,6 +25,7 @@ Stdlib only.
 import argparse
 import fcntl
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -97,13 +98,64 @@ def git_local_tags(repo: str) -> dict:
     return {"available": True, "tags": tags}
 
 
+def remote_host(url: str) -> str | None:
+    """Host of a network remote URL (scheme://[user@]host[:port]/... or scp-like user@host:path).
+    None for a local path or file:// remote, which could be anything and is left to gh."""
+    m = re.match(r"^[a-z][a-z0-9+.-]*://(?:[^@/]*@)?([^:/]+)", url)
+    if m:
+        return None if url.startswith("file://") else m.group(1).lower()
+    m = re.match(r"^(?:[^@/:]+@)?([^/:]+):(?!//)", url)
+    if m and not os.path.exists(url):
+        return m.group(1).lower()
+    return None
+
+
+def gh_configured_hosts() -> set[str]:
+    """Hosts gh is logged in to (top-level keys of $GH_CONFIG_DIR/hosts.yml), so a GitHub
+    Enterprise host counts as GitHub even when GH_HOST is unset."""
+    config_dir = os.environ.get("GH_CONFIG_DIR") or os.path.join(
+        os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "gh"
+    )
+    try:
+        with open(os.path.join(config_dir, "hosts.yml")) as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return set()
+    return {m.group(1).lower() for line in lines if (m := re.match(r"^([A-Za-z0-9.-]+):\s*$", line))}
+
+
+def has_only_non_github_remotes(repo: str) -> bool:
+    """True when the repository has remotes and every fetch and push URL is a network URL on a
+    host that is neither github.com, $GH_HOST nor a host gh is configured for. The URLs Git
+    resolves (insteadOf rewrites applied) are read, so an alias that expands to GitHub is still
+    treated as GitHub."""
+    github_hosts = {"github.com", os.environ.get("GH_HOST", "github.com").lower()} | gh_configured_hosts()
+    hosts = []
+    for remote in git_remotes(repo):
+        for extra in ([], ["--push"]):
+            result = run(["git", "-C", repo, "remote", "get-url", *extra, "--all", remote])
+            urls = result.stdout.split() if result.returncode == 0 else []
+            if not urls:
+                return False
+            for url in urls:
+                host = remote_host(url)
+                if host is None:
+                    return False
+                hosts.append(host)
+    return bool(hosts) and not any(h in github_hosts or h.endswith(".github.com") for h in hosts)
+
+
 def gh_release_list_in(repo: str) -> dict:
     """{"available": True, "releases": [...]} or {"available": False, "reason": ...}.
 
     Never conflates "gh unavailable/failed" with "zero releases": a
     successful call with no releases is {"available": True, "releases": []}.
     Runs with cwd=repo so `gh` resolves the repository from its git remotes.
+    A repository whose remotes are all on non-GitHub hosts (Forgejo) has no
+    GitHub releases: it is recorded as available, empty and noted, without gh.
     """
+    if has_only_non_github_remotes(repo):
+        return {"available": True, "releases": [], "note": "no GitHub remote; releases not applicable"}
     if shutil.which("gh") is None:
         return {"available": False, "reason": "gh is not installed"}
     try:

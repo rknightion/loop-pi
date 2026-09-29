@@ -2,7 +2,7 @@
 name: reviewer
 description: REVIEW lane: read-only correctness, regression and false-pass review; worktree audits.
 advertise: true
-model: openai/gpt-6-sol
+model: openai/gpt-6.1-sol
 thinking: medium
 tools: read, grep, find, ls, bash
 extensions:

@@ -758,6 +758,8 @@ test("C3_AGENTS matches SEAMS.md exactly", () => {
       "gate-runner",
       "lane-worker",
       "lane-worker-push",
+      "lane-worker-retry",
+      "lane-worker-retry-push",
       "mapper",
       "mapper-deep",
       "rescue-astra",

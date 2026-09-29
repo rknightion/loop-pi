@@ -126,6 +126,21 @@ class SnapshotTests(unittest.TestCase):
         self.assertIn("reason", releases)
         self.assertNotIn("releases", releases)
 
+    def test_snapshot_non_github_remote_records_releases_as_not_applicable_without_gh(self):
+        # A repository whose only remote is a non-GitHub host (Forgejo) has no GitHub
+        # releases to audit: gh must not be asked, and the snapshot must not fail.
+        repo, _remote = init_repo_with_remote(self.tmp, "repoForge")
+        git(repo, "remote", "set-url", "origin", "ssh://git@forge.example.org/rob/repoForge.git")
+        fake_bin = make_bin_without_gh(self.tmp)
+        out = os.path.join(self.tmp, "snap.json")
+        snapshot(out, repo, env_overrides={"PATH": fake_bin, "GIT_SSH_COMMAND": "false"})
+        with open(out) as fh:
+            data = json.load(fh)
+        entry = data["repos"][repo]
+        self.assertTrue(entry["releases"]["available"])
+        self.assertEqual(entry["releases"]["releases"], [])
+        self.assertIn("no GitHub remote", entry["releases"]["note"])
+
     def test_snapshot_repo_with_no_remotes(self):
         repo = os.path.join(self.tmp, "lonely")
         os.makedirs(repo)
@@ -135,6 +150,70 @@ class SnapshotTests(unittest.TestCase):
         with open(out) as fh:
             data = json.load(fh)
         self.assertEqual(data["repos"][repo]["remotes"], {})
+
+
+    def test_an_insteadof_alias_that_expands_to_github_still_uses_gh(self):
+        repo, _remote = init_repo_with_remote(self.tmp, "repoAlias")
+        git(repo, "remote", "set-url", "origin", "gh:rknightion/example.git")
+        git(repo, "config", "url.git@github.com:.insteadOf", "gh:")
+        fake_bin = make_bin_without_gh(self.tmp)
+        out = os.path.join(self.tmp, "snap.json")
+        snapshot(out, repo, env_overrides={"PATH": fake_bin, "GIT_SSH_COMMAND": "false"})
+        with open(out) as fh:
+            data = json.load(fh)
+        releases = data["repos"][repo]["releases"]
+        self.assertFalse(releases["available"])
+        self.assertIn("gh is not installed", releases["reason"])
+
+    def test_a_github_push_url_behind_a_non_github_fetch_url_still_uses_gh(self):
+        repo, _remote = init_repo_with_remote(self.tmp, "repoPush")
+        git(repo, "remote", "set-url", "origin", "ssh://git@forge.example.org/rob/repoPush.git")
+        git(repo, "remote", "set-url", "--push", "origin", "git@github.com:rknightion/example.git")
+        fake_bin = make_bin_without_gh(self.tmp)
+        out = os.path.join(self.tmp, "snap.json")
+        snapshot(out, repo, env_overrides={"PATH": fake_bin, "GIT_SSH_COMMAND": "false"})
+        with open(out) as fh:
+            data = json.load(fh)
+        releases = data["repos"][repo]["releases"]
+        self.assertFalse(releases["available"])
+        self.assertIn("gh is not installed", releases["reason"])
+
+    def test_a_github_enterprise_host_configured_in_gh_still_uses_gh(self):
+        repo, _remote = init_repo_with_remote(self.tmp, "repoGhe")
+        git(repo, "remote", "set-url", "origin", "git@ghe.example.org:team/example.git")
+        gh_config = os.path.join(self.tmp, "gh-config")
+        os.makedirs(gh_config)
+        with open(os.path.join(gh_config, "hosts.yml"), "w") as fh:
+            fh.write("github.com:\n    user: someone\nghe.example.org:\n    user: someone\n")
+        fake_bin = make_bin_without_gh(self.tmp)
+        out = os.path.join(self.tmp, "snap.json")
+        env = {"PATH": fake_bin, "GIT_SSH_COMMAND": "false", "GH_CONFIG_DIR": gh_config}
+        snapshot(out, repo, env_overrides=env)
+        with open(out) as fh:
+            data = json.load(fh)
+        releases = data["repos"][repo]["releases"]
+        self.assertFalse(releases["available"])
+        self.assertIn("gh is not installed", releases["reason"])
+
+
+class RemoteHostTests(unittest.TestCase):
+    def test_remote_host_parses_network_urls_and_leaves_local_paths_to_gh(self):
+        import importlib.machinery
+        import importlib.util
+        loader = importlib.machinery.SourceFileLoader("loop_pi_audit", SCRIPT)
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        cases = {
+            "git@github.com:rknightion/loop-pi.git": "github.com",
+            "https://github.com/rknightion/loop-pi.git": "github.com",
+            "ssh://git@forgejo.example.net:2222/rob/agents.git": "forgejo.example.net",
+            "https://forgejo.example.net/rob/agents.git": "forgejo.example.net",
+            "/tmp/some/bare.git": None,
+            "file:///tmp/some/bare.git": None,
+        }
+        for url, host in cases.items():
+            self.assertEqual(mod.remote_host(url), host, url)
 
 
 class CompareTests(unittest.TestCase):

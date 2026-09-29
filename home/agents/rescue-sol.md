@@ -2,7 +2,7 @@
 name: rescue-sol
 description: Specialist rescue, attempt 3 onward (Sol).
 advertise: true
-model: openai/gpt-6-sol
+model: openai/gpt-6.1-sol
 thinking: high
 tools: read, bash, edit, write, grep, find, ls, watch_process
 extensions:

@@ -2,7 +2,7 @@
 name: complex-worker-push
 description: JUDGMENT+EXECUTION lane granted a push; may delegate only when its brief grants it.
 advertise: true
-model: openai/gpt-6-sol
+model: openai/gpt-6.1-sol
 thinking: medium
 tools: read, bash, edit, write, grep, find, ls, watch_process, subagent
 extensions:
@@ -13,7 +13,7 @@ inheritGlobalContext: true
 inheritSkills: false
 async: true
 timeoutMs: 14400000
-allowedAgents: mapper, mapper-deep, gate-runner, lane-worker, reviewer
+allowedAgents: mapper, mapper-deep, gate-runner, lane-worker, lane-worker-retry, reviewer
 maxSubagentDepth: 1
 ---
 

@@ -9,7 +9,7 @@ instructions mention Codex- or Claude-only tools, use the pi equivalent.
   with `WAITING: <what> until <deadline>`. Never background a process with `&`, `nohup`, `disown`
   or `setsid`.
 - Models: only the model family this home's settings allow (`loopPi.modelFamily`, by default the
-  gpt-6 family: `gpt-6-sol`, `gpt-6-luna`, `gpt-6-astra`). Never pass a `model` override to
+  gpt-6 family: `gpt-6.1-sol`, `gpt-6-luna`, `gpt-6-astra`). Never pass a `model` override to
   `subagent`.
 - Delegation and push rights are fixed per agent file. Spawn only the agents this home defines.
 - Dispatch: launch each lane as its own async `subagent` call with `{agent, task}`. That is the

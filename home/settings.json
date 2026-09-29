@@ -2,7 +2,8 @@
   "defaultProjectTrust": "never",
   "enableInstallTelemetry": false,
   "enabledModels": [
-    "openai/gpt-6-*"
+    "openai/gpt-6-*",
+    "openai/gpt-6.1-*"
   ],
   "httpIdleTimeoutMs": 300000,
   "retry": {

@@ -48,13 +48,14 @@ LANE_EXTENSIONS = ("loop-guard/lane.ts", "loop-wait/lane.ts")
 CLI_TOOLS = ("loop-pi-preflight", "loop-pi-audit")
 NEVER_MANAGED = {"auth.json"}
 MIN_NODE = (22, 19, 0)
-AGENT_SET = {"mapper", "mapper-deep", "gate-runner", "lane-worker", "lane-worker-push", "complex-worker",
+AGENT_SET = {"mapper", "mapper-deep", "gate-runner", "lane-worker", "lane-worker-push", "lane-worker-retry",
+             "lane-worker-retry-push", "complex-worker",
              "complex-worker-push", "reviewer", "reviewer-high", "security-reviewer", "rescue-sol",
              "rescue-astra"}
 SMOKE_COMMAND = "loop-closeout"
 # Defaults for settings.json `loopPi`; the extensions use the same ones (model-family.ts).
-DEFAULT_FAMILY = {"provider": "openai", "pattern": r"^gpt-6(-[a-z0-9]+)+$", "name": "gpt-6"}
-DEFAULT_ROOT_ROUTE = {"provider": "openai", "model": "gpt-6-sol", "thinking": "medium"}
+DEFAULT_FAMILY = {"provider": "openai", "pattern": r"^gpt-6(\.[0-9]+)?(-[a-z0-9]+)+$", "name": "gpt-6"}
+DEFAULT_ROOT_ROUTE = {"provider": "openai", "model": "gpt-6.1-sol", "thinking": "medium"}
 EXCLUDED_PARTS = {"node_modules", "__tests__", "test-support", "fixtures"}
 
 

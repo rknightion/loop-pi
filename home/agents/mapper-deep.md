@@ -3,7 +3,7 @@ name: mapper-deep
 description: MAPPING lane for substantial read-only synthesis.
 advertise: true
 model: openai/gpt-6-luna
-thinking: max
+thinking: high
 tools: read, grep, find, ls, bash
 extensions:
 systemPromptMode: append

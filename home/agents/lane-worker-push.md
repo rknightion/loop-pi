@@ -3,7 +3,7 @@ name: lane-worker-push
 description: EXECUTION lane granted a push by its brief.
 advertise: true
 model: openai/gpt-6-luna
-thinking: max
+thinking: high
 tools: read, bash, edit, write, grep, find, ls, watch_process
 extensions:
 systemPromptMode: append

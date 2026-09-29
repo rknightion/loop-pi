@@ -95,5 +95,6 @@ before any `await`. A missing reply means the provider extension is not loaded; 
   uploads are not serialised across processes.
   Ignore failures. The installer lays the script out only when an overlay provides it.
 - The agent set (the only names the root may spawn): `mapper`, `mapper-deep`, `gate-runner`,
-  `lane-worker`, `lane-worker-push`, `complex-worker`, `complex-worker-push`, `reviewer`,
+  `lane-worker`, `lane-worker-push`, `lane-worker-retry`, `lane-worker-retry-push`, `complex-worker`,
+  `complex-worker-push`, `reviewer`,
   `reviewer-high`, `security-reviewer`, `rescue-sol`, `rescue-astra`.
