@@ -1572,22 +1572,25 @@ export function evaluateSubagentCall(input: SubagentInput): Decision {
   if (input.gate !== undefined) {
     return block("loop-guard: `subagent` calls may not carry `gate` (spawns a shell in the host process).");
   }
-  if (input.workflow !== undefined) {
-    return block(
-      "loop-guard: `subagent` calls may not use the named `workflow` resource field (spawns a shell in the host process).",
-    );
-  }
   // pi-subagents' own guidance asks for one workflow call holding
   // every child. Appendix C launches each lane as its own async call instead:
   // only single-agent launches get the checkpoint steer before `timeoutMs`,
-  // and each lane's completion wakes the root separately. `action: "validate"`
-  // launches nothing and stays allowed.
-  if (input.action === undefined && (input.workflowScript !== undefined || input.workflowScriptPath !== undefined)) {
+  // and each lane's completion wakes the root separately. pi-subagents 0.74.0
+  // carries a workflow in one `workflow` field (`true` for the reply's js
+  // block, a path, or a named resource); the removed `workflowScript` /
+  // `workflowScriptPath` stay listed as a backstop. `action: "validate"` with
+  // the removed fields launches nothing and stays allowed.
+  const carriesWorkflow =
+    input.workflow !== undefined || input.workflowScript !== undefined || input.workflowScriptPath !== undefined;
+  if (carriesWorkflow && input.action === undefined) {
     return block(
-      "loop-guard: workflow scripts are not used in loop-pi (fan-out protocol Appendix C). Launch each lane as its " +
+      "loop-guard: workflows are not used in loop-pi (fan-out protocol Appendix C). Launch each lane as its " +
         "own async `subagent` call with {agent, task}; the pi-subagents 'one workflow call' guidance does not " +
         "apply in this home.",
     );
+  }
+  if (input.workflow !== undefined) {
+    return block("loop-guard: `subagent` calls may not carry a `workflow` (it runs host commands or children outside Appendix C).");
   }
   if (isSubagentLaunch(input) && typeof input.agent === "string" && !C3_AGENTS.has(input.agent)) {
     return block(`loop-guard: '${input.agent}' is outside the C3 agent set the root may spawn.`);

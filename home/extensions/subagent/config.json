@@ -6,6 +6,12 @@
   "maxActiveAsyncRunsPerSession": 19,
   "checkpointBeforeDeadlineMs": 600000,
   "toolDescriptionMode": "custom",
+  "toolActivation": "eager",
+  "disabledFeatures": [
+    "agent-management", "watchdog", "panes", "missions", "lane-management", "spawn-budget-grants",
+    "preflight", "lane-metadata", "gates", "usage-budgets", "tool-budgets", "control-overrides",
+    "extension-bindings", "external-machines"
+  ],
   "control": { "activeNoticeAfterMs": 3600000 },
   "scheduledRuns": { "enabled": false },
   "missions": { "enabled": false },

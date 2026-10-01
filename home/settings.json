@@ -14,6 +14,12 @@
       "maxRetries": 0
     }
   },
+  "extensions": [
+    "-builtin:mcp",
+    "-builtin:llama.cpp",
+    "-builtin:codemode",
+    "-builtin:tool-search"
+  ],
   "packages": [
     "{{PREFIX}}/node_modules/pi-subagents"
   ],

@@ -9,10 +9,23 @@ public statement of those contracts.
 
 ## Runtime facts
 
-- pi 0.87.1 loads `.ts` extensions through jiti. An entry file default-exports
+- pi 0.99.2 loads `.ts` extensions through jiti. An entry file default-exports
   `(pi: ExtensionAPI) => void | Promise<void>`. Type imports come from
   `@earendil-works/pi-coding-agent`; `@earendil-works/pi-ai` resolves through pi's loader at
   runtime (it is nested under pi-coding-agent in `node_modules`, not top level).
+- **Project trust (pi-subagents 0.74.0):** children follow the parent session's project trust, so
+  with `defaultProjectTrust: "never"` a child no longer loads the target repository's `.pi/`
+  settings, system prompt files, skills or extensions. Agent discovery is not trust-gated:
+  repository `.pi/agents` and `.agents/*.md` still outrank the home's agents. `loop-pi-preflight` stays.
+- **Tool list (pi 0.99 / pi-subagents 0.74.0):** `toolActivation` is `"eager"`; never `"auto"`.
+  codex-lb never acknowledges a request carrying an `additional_tools` item, which pi sends for a
+  mid-conversation tool addition when a model's `compat.supportsAdditionalTools` is true. The overlay
+  sets that and `supportsToolSearch` false for every family model, so a changed tool list is resent
+  whole (proved live 2026-10-01: 120 s `upstream_request_timeout` with the flags on, 1.6 s with them
+  off). pi's built-in extensions are switched off in `settings.json`; `bg_wait` and
+  `subagents_enable` are excluded at the launcher. Unused pi-subagents feature groups are in
+  `disabledFeatures`; `workflow-scripts` stays enabled and guarded, because disabling it swaps
+  `workflow` for unguarded `tasks` / `chain`.
 - Installed layout: `<prefix>/extensions/<name>/...` next to `<prefix>/node_modules/`
   (pi-subagents at `<prefix>/node_modules/pi-subagents`). In the source checkout the same relative
   layout holds (`extensions`, `node_modules`). Resolve siblings with
@@ -26,10 +39,10 @@ public statement of those contracts.
 - `PI_SUBAGENTS_TEMP_ROOT` is honoured by pi-subagents (`src/shared/types.js:103`).
 - pi-subagents child sessions are written under the parent's session dir:
   `<agentDir>/sessions/<cwd-slug>/<parent-session-basename>/<runId>/...`
-  (`src/extension/index.js:266-273`); async run state under `$PI_SUBAGENTS_TEMP_ROOT`
+  (`src/extension/index.js`, `getSubagentSessionRoot`); async run state under `$PI_SUBAGENTS_TEMP_ROOT`
   (`async-subagent-runs/`, `async-subagent-results/`).
 - pi-subagents async completion message: `customType: "subagent-notify"`
-  (`src/runs/background/notify.js:428-431`).
+  (`src/runs/background/notify.js:430`).
 - `registerRequiredChildExtensions({ sessionId, extensions: [{ id, path }] })` from
   `pi-subagents/required-child-extensions`; returns `{ dispose() }`; one registration per parent
   session; call at `session_start` with `ctx.sessionManager.getSessionId()`, dispose at

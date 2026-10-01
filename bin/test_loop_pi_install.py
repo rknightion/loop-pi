@@ -91,7 +91,7 @@ class InstallerTests(unittest.TestCase):
         self.assertTrue("only --version runs" not in complete and "PI_SUBAGENT_WAIT_TOOL_ENABLED=false" in complete)
         self.assertIn("--provider openai --model gpt-6.1-sol --thinking medium", complete)
         # Some OpenAI-compatible proxies never acknowledge a request whose tool list changed mid-conversation.
-        self.assertIn("--exclude-tools subagents_enable", complete)
+        self.assertIn("--exclude-tools subagents_enable,bg_wait ", complete)
 
     def test_root_route_and_family_come_from_settings(self):
         agents = {"loopPi": {"modelFamily": {"provider": "example", "pattern": "^m7-[a-z]+$", "name": "m7"},

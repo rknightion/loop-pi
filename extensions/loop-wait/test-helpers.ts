@@ -10,6 +10,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { hermeticPiEnv } from "../test-support/hermetic-env.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const CLI_PATH = join(HERE, "..", "..", "node_modules", "@earendil-works", "pi-coding-agent", "dist", "bundle", "cli.js");
@@ -105,8 +106,7 @@ export function startPiRpc(opts: StartPiOptions): PiRpcSession & { agentDir: str
   ];
   const child = spawn(process.execPath, [CLI_PATH, ...args], {
     cwd: opts.sessionDir ?? agentDir,
-    env: {
-      ...process.env,
+    env: hermeticPiEnv({
       PI_CODING_AGENT_DIR: agentDir,
       PI_SUBAGENTS_TEMP_ROOT: subagentTemp,
       PI_OFFLINE: "1",
@@ -114,7 +114,7 @@ export function startPiRpc(opts: StartPiOptions): PiRpcSession & { agentDir: str
       PI_TELEMETRY: "0",
       LOOP_PI_FAUX_SCRIPT: opts.fauxScriptPath,
       ...opts.extraEnv,
-    },
+    }),
     stdio: ["pipe", "pipe", "pipe"],
   });
   liveChildren.add(child);

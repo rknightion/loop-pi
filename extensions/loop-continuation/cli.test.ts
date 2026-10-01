@@ -6,7 +6,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,6 +16,38 @@ const PI_ROOT = join(HERE, "..", "..");
 const CLI = join(PI_ROOT, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "bundle", "cli.js");
 const FAUX_EXTENSION = join(PI_ROOT, "extensions", "test-support", "faux-extension.ts");
 const LOOP_CONTINUATION_EXTENSION = HERE;
+
+test("three ignored nudges release the root and write a home/cwd-attributed incident", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "loop-continuation-incident-cli-"));
+  const cwd = join(tmp, "cwd");
+  const home = join(tmp, "home");
+  mkdirSync(cwd, { recursive: true });
+  mkdirSync(home, { recursive: true });
+  const script = join(tmp, "faux-script.json");
+  writeFileSync(script, JSON.stringify({ rules: [
+    { match: "You are the root", once: true, text: "Still working.", stopReason: "stop" },
+    { match: "TURN ENDINGS", text: "Still working.", stopReason: "stop" },
+  ] }));
+  const rpc = startRpc(cwd, script, home);
+  try {
+    rpc.send({ id: "launch", type: "prompt", message: "You are the root. Report at codex/report-x-loop1.md when finished." });
+    await rpc.waitFor((e) => e.type === "agent_settled");
+    const nudges = rpc.events.filter((e: any) => e.type === "entry_appended" && e.entry?.customType === "loop-continuation");
+    assert.equal(nudges.length, 3);
+    const files = readdirSync(join(home, "incidents"));
+    assert.equal(files.length, 1);
+    const payload = JSON.parse(readFileSync(join(home, "incidents", files[0]), "utf8"));
+    assert.equal(payload.class, "loop-continuation-chain-exhausted");
+    assert.equal(payload.home, home);
+    assert.equal(payload.cwd, realpathSync(cwd));
+    assert.ok(payload.session && payload.session !== "unknown");
+    assert.equal(payload.v, 1);
+    assert.ok(Number.isFinite(Date.parse(payload.at)));
+  } finally {
+    await rpc.close();
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
 
 interface Rpc {
   proc: ReturnType<typeof spawn>;

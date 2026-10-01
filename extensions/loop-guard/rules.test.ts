@@ -824,6 +824,22 @@ test("subagent allow: management get on a name outside C3 (inspection, not launc
   assert.equal(decision.block, false);
 });
 
+test("subagent deny: a 0.74.0 `workflow` launch gets the one-call-per-lane reason", () => {
+  for (const workflow of [true, "./codex/dispatch.js", "run-ci"]) {
+    const decision = evaluateSubagentCall({ workflow });
+    assert.equal(decision.block, true);
+    assert.match(decision.reason ?? "", /own async `subagent` call/);
+  }
+});
+
+test("subagent deny: a workflow under any action, including validate", () => {
+  for (const action of ["validate", "schedule.create"]) {
+    const decision = evaluateSubagentCall({ action, workflow: true });
+    assert.equal(decision.block, true);
+    assert.match(decision.reason ?? "", /may not carry a `workflow`/);
+  }
+});
+
 test("subagent deny: workflowScript launch (Appendix C: one async call per lane, never a workflow)", () => {
   const decision = evaluateSubagentCall({ workflowScript: 'return runs.run("main", { agent: "lane-worker", task: "x" })' });
   assert.equal(decision.block, true);

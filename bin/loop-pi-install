@@ -275,9 +275,10 @@ def launcher_text(prefix: Path, home: Path, node: str, manifest: dict, name: str
             f'  echo "{name}: run dir $run_dir" >&2',
             "fi",
         ]
-        # subagent is loaded up front: some OpenAI-compatible proxies never acknowledge a request
-        # whose tool list grew mid-conversation, which is what subagents_enable does.
-        lines.append(f"exec '{node}' '{pi}' {flags} --exclude-tools subagents_enable "
+        # subagent is loaded up front and bg_wait is never declared: some OpenAI-compatible proxies
+        # never acknowledge a request whose tool list grew mid-conversation (subagents_enable does
+        # that), and `waitTool: false` leaves bg_wait declared although the root waits by push.
+        lines.append(f"exec '{node}' '{pi}' {flags} --exclude-tools subagents_enable,bg_wait "
                      f"--provider {provider} --model {model} "
                      f'--thinking {thinking} "$@"')
     return "\n".join(lines) + "\n"

@@ -13,8 +13,8 @@ instructions mention Codex- or Claude-only tools, use the pi equivalent.
   `subagent`.
 - Delegation and push rights are fixed per agent file. Spawn only the agents this home defines.
 - Dispatch: launch each lane as its own async `subagent` call with `{agent, task}`. That is the
-  operator-authorised protocol here. Never launch a workflow (`workflowScript`, `workflowScriptPath`,
-  `workflow`); pi-subagents' "exactly one top-level workflow call" guidance does not apply in this home.
+  operator-authorised protocol here. Never launch a workflow (the `workflow` field, or the older
+  `workflowScript` / `workflowScriptPath`); pi-subagents' "exactly one top-level workflow call" guidance does not apply in this home.
 - `loop-guard` blocks plainly typed mistakes; it is not a security boundary. The closeout audit is
   the evidence that no ungranted remote change happened.
 - This home's runtime is owned by `loop-pi-install`. Never edit its generated files, `auth.json` or

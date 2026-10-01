@@ -2,15 +2,17 @@
 """Closeout remote-change audit for loop-pi runs.
 
 `snapshot --out FILE REPO...` records, for each repository, every remote's
-`git ls-remote` output (less GitHub's recomputed `refs/pull/<n>/merge`
-refs), local tags, and `gh release list` (recorded as unavailable rather
+`git ls-remote --symref` output, local tags, and `gh release list` (recorded as unavailable rather
 than empty when `gh` cannot be used).
 
 `compare BEFORE AFTER [--grants FILE]` diffs two snapshots and lists every
 added, moved or deleted ref, tag and release, marking each as covered or not
 by a grants file (`{"<repo>": ["refs/heads/main", ...]}`, matched by the exact
 repo key used on the snapshot command line). Exits 1 if any change is not
-covered by a grant.
+covered by a grant. Ungranted refs/pull/* changes are reported as FOREIGN,
+not violations. HEAD and peeled tags inherit their target's grant. A repo's
+grants may also be {"refs": [...], "allow_non_fast_forward": [...]}; the
+latter opts named, granted branches into expected history rewrites.
 
 Per-run form, used by the `loop-pi` launcher so concurrent loops never share
 a snapshot. The run dir comes from `--run-dir` or `LOOP_PI_RUN_DIR`:
@@ -44,17 +46,10 @@ def git_remotes(repo: str) -> list[str]:
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 
-def is_recomputed_pull_merge_ref(ref: str) -> bool:
-    """refs/pull/<n>/merge is recomputed by GitHub whenever the PR's base
-    moves, so its moves are never a loop's push. refs/pull/<n>/head is kept."""
-    parts = ref.split("/")
-    return len(parts) == 4 and parts[0] == "refs" and parts[1] == "pull" and parts[3] == "merge"
-
-
 def git_ls_remote_refs(repo: str, remote: str) -> dict:
     """{"available": True, "refs": {ref: sha, ...}} or {"available": False, "reason": ...}."""
     try:
-        result = run(["git", "-C", repo, "ls-remote", remote], timeout=120)
+        result = run(["git", "-C", repo, "ls-remote", "--symref", remote], timeout=120)
     except subprocess.TimeoutExpired:
         return {"available": False, "reason": f"git ls-remote {remote} timed out"}
     except OSError as exc:
@@ -62,6 +57,7 @@ def git_ls_remote_refs(repo: str, remote: str) -> dict:
     if result.returncode != 0:
         return {"available": False, "reason": f"git ls-remote {remote} exited {result.returncode}: {result.stderr.strip()}"}
     refs: dict[str, str] = {}
+    symrefs: dict[str, str] = {}
     for line in result.stdout.splitlines():
         line = line.strip()
         if not line:
@@ -70,10 +66,11 @@ def git_ls_remote_refs(repo: str, remote: str) -> dict:
         if len(parts) != 2:
             continue
         sha, ref = parts
-        if is_recomputed_pull_merge_ref(ref):
-            continue
-        refs[ref] = sha
-    return {"available": True, "refs": refs}
+        if sha.startswith("ref: "):
+            symrefs[ref] = sha[5:]
+        else:
+            refs[ref] = sha
+    return {"available": True, "refs": refs, "symrefs": symrefs}
 
 
 def git_local_tags(repo: str) -> dict:
@@ -331,7 +328,7 @@ def is_fast_forward(repo: str, before_sha: str, after_sha: str) -> tuple[bool | 
     return None, f"git merge-base --is-ancestor exited {result.returncode}: {result.stderr.strip()}"
 
 
-def moved_ref_mark(repo: str, remote: str, ref: str, before_sha: str, after_sha: str, covered: bool) -> tuple[str, bool]:
+def moved_ref_mark(repo: str, remote: str, ref: str, before_sha: str, after_sha: str, covered: bool, allow_rewrite: bool = False) -> tuple[str, bool]:
     """Checks a moved remote ref for fast-forward ancestry (plan C4 item 5:
     "a moved ref must be checked for fast-forward ... A non-fast-forward move
     is a violation even when the branch is granted"). Fetches the ref fresh
@@ -344,12 +341,33 @@ def moved_ref_mark(repo: str, remote: str, ref: str, before_sha: str, after_sha:
     if ff is None:
         return f"UNVERIFIED fast-forward: {ff_reason}", False
     if not ff:
+        if covered and allow_rewrite:
+            return "GRANTED EXPECTED NON-FAST-FORWARD", True
         return ("NON-FAST-FORWARD (granted, but blocked)" if covered else "NON-FAST-FORWARD UNGRANTED"), False
     return ("GRANTED" if covered else "UNGRANTED"), covered
 
 
-def compare_repo(name: str, before: dict, after: dict, grants: list[str], report: list[str]) -> bool:
-    """Returns True if every change for this repo is covered by a grant."""
+def head_target(entry: dict, other: dict) -> str | None:
+    """Resolve legacy snapshots conservatively, without consulting moving live state."""
+    explicit = entry.get("symrefs", {}).get("HEAD")
+    if explicit:
+        return explicit
+    refs = entry.get("refs", {})
+    sha = refs.get("HEAD")
+    if sha is None:
+        return None
+    candidates = [ref for ref, value in refs.items()
+                  if ref.startswith("refs/heads/") and value == sha]
+    hint = other.get("symrefs", {}).get("HEAD")
+    if hint in candidates:
+        return hint
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def compare_repo(name: str, before: dict, after: dict, grants: list[str] | dict, report: list[str]) -> bool:
+    """Returns True if changes are granted or foreign automation."""
+    rewrites = set(grants.get("allow_non_fast_forward", [])) if isinstance(grants, dict) else set()
+    grants = grants.get("refs", []) if isinstance(grants, dict) else grants
     all_covered = True
 
     before_remotes = before.get("remotes", {})
@@ -365,14 +383,40 @@ def compare_repo(name: str, before: dict, after: dict, grants: list[str], report
             )
             all_covered = False
             continue
-        for change, ref, before_sha, after_sha in diff_ref_map(b.get("refs", {}), a.get("refs", {})):
-            covered = ref in grants
-            if change == "moved":
-                mark, contributes_covered = moved_ref_mark(name, remote, ref, before_sha, after_sha, covered)
-                all_covered = all_covered and contributes_covered
+        changes = diff_ref_map(b.get("refs", {}), a.get("refs", {}))
+        before_head = b.get("symrefs", {}).get("HEAD")
+        after_head = a.get("symrefs", {}).get("HEAD")
+        # Missing metadata in a legacy snapshot is not itself a retargeting.
+        if (before_head and after_head and before_head != after_head
+                and not any(ref == "HEAD" for _, ref, _, _ in changes)):
+            changes.append(("retargeted", "HEAD", b.get("refs", {}).get("HEAD", ""),
+                            a.get("refs", {}).get("HEAD", "")))
+        for change, ref, before_sha, after_sha in changes:
+            target = ref
+            if ref == "HEAD":
+                targets = [head_target(entry, other) for entry, other, sha in
+                           ((b, a, before_sha), (a, b, after_sha)) if sha]
+                if not targets or any(t is None for t in targets):
+                    mark = "UNVERIFIED HEAD target"
+                    all_covered = False
+                else:
+                    covered = all(t in grants for t in targets)
+                    mark = "GRANTED derived HEAD" if covered else "UNGRANTED derived HEAD"
+                    all_covered = all_covered and covered
+            elif ref.startswith("refs/pull/") and ref not in grants:
+                mark = "FOREIGN"
             else:
-                all_covered = all_covered and covered
-                mark = "GRANTED" if covered else "UNGRANTED"
+                if ref.startswith("refs/tags/") and ref.endswith("^{}"):
+                    target = ref[:-3]
+                covered = target in grants
+                if change == "moved" and ref == target:
+                    mark, contributes_covered = moved_ref_mark(
+                        name, remote, ref, before_sha, after_sha, covered,
+                        ref.startswith("refs/heads/") and ref in rewrites)
+                    all_covered = all_covered and contributes_covered
+                else:
+                    all_covered = all_covered and covered
+                    mark = "GRANTED" if covered else "UNGRANTED"
             report.append(f"[{name}] remote '{remote}' ref {change}: {ref} ({before_sha[:12] or '-'} -> {after_sha[:12] or '-'}) [{mark}]")
 
     before_tags = before.get("tags", {})

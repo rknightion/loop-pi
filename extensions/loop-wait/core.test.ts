@@ -362,6 +362,14 @@ describe("process group termination (compound commands)", () => {
     throw new Error(`grandchild pid file never appeared: ${pidFile}`);
   }
 
+  // Pipe closure and the leader's close event can precede the OS finishing the grandchild's
+  // exit/reap. Wait for that observable condition, not a fixed sleep. The one-second bound is
+  // shorter than the three-second SIGKILL escalation: a missed SIGTERM still fails the test.
+  async function waitForGrandchildExit(pid: number): Promise<void> {
+    const until = Date.now() + 1000;
+    while (isProcessAlive(pid) && Date.now() < until) await delay(10);
+  }
+
   test("runWatchProcess kills the whole process group on deadline, not just the sh -c pid", async () => {
     const dir = freshDir();
     const pidFile = join(dir, "grandchild.pid");
@@ -370,6 +378,7 @@ describe("process group termination (compound commands)", () => {
     assert.equal(isProcessAlive(grandchildPid), true);
     const result = await resultPromise;
     assert.equal(result.deadlineHit, true);
+    await waitForGrandchildExit(grandchildPid);
     assert.equal(isProcessAlive(grandchildPid), false, "the grandchild must be dead, not orphaned");
   });
 
@@ -386,6 +395,7 @@ describe("process group termination (compound commands)", () => {
     const grandchildPid = await readGrandchildPid(pidFile);
     controller.abort();
     await resultPromise;
+    await waitForGrandchildExit(grandchildPid);
     assert.equal(isProcessAlive(grandchildPid), false, "the grandchild must be dead, not orphaned");
   });
 

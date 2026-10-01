@@ -4,8 +4,6 @@
 //
 // Owned paths: pi/extensions/loop-continuation/** only (per SEAMS.md's ownership table).
 
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import type {
   AgentBeforeSettleEvent,
   AgentBeforeSettleEventResult,
@@ -30,6 +28,7 @@ import {
 } from "./state.ts";
 import { nudgeTextFor } from "./nudge-text.ts";
 import { createTranscriptSync } from "./transcript-sync.ts";
+import { writeIncident } from "./incident.ts";
 
 /** How often an open session re-checks the checkpoint throttle (lanes run without extensions). */
 const SYNC_TICK_MS = 60 * 1000;
@@ -98,22 +97,11 @@ export default function (pi: ExtensionAPI) {
     return result;
   }
 
-  function writeIncident() {
+  function recordIncident(cwd: string) {
     try {
-      const agentDir = getAgentDir();
-      const dir = join(agentDir, "incidents");
-      mkdirSync(dir, { recursive: true });
-      const ts = new Date().toISOString().replace(/[:.]/g, "-");
-      const path = join(dir, `${sessionId || "unknown"}-${ts}.json`);
-      const payload = {
-        v: 1,
-        session: sessionId || "unknown",
-        class: "loop-continuation-chain-exhausted",
-        at: new Date().toISOString(),
-      };
-      writeFileSync(path, JSON.stringify(payload));
+      writeIncident(getAgentDir(), sessionId, cwd);
     } catch {
-      // Incident bookkeeping must never trap the session.
+      // Resolving the home must not trap the session either.
     }
   }
 
@@ -180,7 +168,7 @@ export default function (pi: ExtensionAPI) {
         case "release-exhausted":
           state = decision.newState;
           persist();
-          if (decision.writeIncident) writeIncident();
+          if (decision.writeIncident) recordIncident(cwd);
           return {};
         case "nudge": {
           state = decision.newState;

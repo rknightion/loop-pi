@@ -307,16 +307,16 @@ class CompareTests(unittest.TestCase):
         self.assertIn("refs/tags/v1", result.stdout)
         self.assertIn("deleted", result.stdout)
 
-    def test_recomputed_pull_merge_ref_is_ignored_but_pull_head_is_not(self):
+    def test_pull_refs_are_foreign_unless_explicitly_granted(self):
         # GitHub recomputes refs/pull/<n>/merge whenever the base moves, so it
-        # is never a loop's push; refs/pull/<n>/head still is audited.
+        # is foreign automation, as is the synthesised head ref.
         git(self.repo, "push", "-q", "origin", "HEAD:refs/pull/7/merge")
         git(self.repo, "push", "-q", "origin", "HEAD:refs/pull/7/head")
         before = os.path.join(self.tmp, "before-pull.json")
         snapshot(before, self.repo, env_overrides={"PATH": self.gh_bin})
         with open(before) as fh:
             refs = json.load(fh)["repos"][self.repo]["remotes"]["origin"]["refs"]
-        self.assertNotIn("refs/pull/7/merge", refs)
+        self.assertIn("refs/pull/7/merge", refs)
         self.assertIn("refs/pull/7/head", refs)
 
         with open(os.path.join(self.repo, "f.txt"), "a") as fh:
@@ -328,16 +328,102 @@ class CompareTests(unittest.TestCase):
 
         result = run_audit("compare", before, after)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertNotIn("refs/pull/7/merge", result.stdout)
-        self.assertNotIn("refs/pull/8/merge", result.stdout)
+        self.assertIn("refs/pull/7/merge", result.stdout)
+        self.assertIn("refs/pull/8/merge", result.stdout)
+        self.assertIn("FOREIGN", result.stdout)
 
         git(self.repo, "push", "-q", "-f", "origin", "HEAD:refs/pull/7/head")
         after_head = os.path.join(self.tmp, "after-head.json")
         snapshot(after_head, self.repo, env_overrides={"PATH": self.gh_bin})
         result = run_audit("compare", after, after_head)
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("refs/pull/7/head", result.stdout)
-        self.assertIn("UNGRANTED", result.stdout)
+        self.assertIn("FOREIGN", result.stdout)
+
+    def _compare_with_grants(self, before, after, value):
+        grants = os.path.join(self.tmp, "grants.json")
+        with open(grants, "w") as fh:
+            json.dump({self.repo: value}, fh)
+        return run_audit("compare", before, after, "--grants", grants)
+
+    def test_head_uses_target_grant_and_legacy_snapshot_is_readable(self):
+        git(self.remote, "symbolic-ref", "HEAD", "refs/heads/main")
+        snapshot(self.before, self.repo, env_overrides={"PATH": self.gh_bin})
+        with open(self.before) as fh:
+            legacy = json.load(fh)
+        legacy["repos"][self.repo]["remotes"]["origin"].pop("symrefs", None)
+        with open(self.before, "w") as fh:
+            json.dump(legacy, fh)
+        git(self.repo, "commit", "-q", "--allow-empty", "-m", "advance")
+        git(self.repo, "push", "-q", "origin", "main")
+        after = self._snapshot_after()
+        result = self._compare_with_grants(self.before, after, ["refs/heads/main"])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("UNGRANTED", result.stdout)
+        # A standalone HEAD grant cannot authorize its ungranted target.
+        denied = self._compare_with_grants(self.before, after, ["HEAD"])
+        self.assertEqual(denied.returncode, 1)
+        self.assertIn("UNGRANTED", denied.stdout)
+
+    def test_head_retarget_same_object_requires_target_grant(self):
+        git(self.remote, "symbolic-ref", "HEAD", "refs/heads/main")
+        git(self.repo, "push", "-q", "origin", "HEAD:refs/heads/other")
+        snapshot(self.before, self.repo, env_overrides={"PATH": self.gh_bin})
+        git(self.remote, "symbolic-ref", "HEAD", "refs/heads/other")
+        after = self._snapshot_after()
+        denied = self._compare_with_grants(self.before, after, ["refs/heads/main"])
+        self.assertEqual(denied.returncode, 1, denied.stdout + denied.stderr)
+        self.assertIn("UNGRANTED derived HEAD", denied.stdout)
+        allowed = self._compare_with_grants(self.before, after,
+                                            ["refs/heads/main", "refs/heads/other"])
+        self.assertEqual(allowed.returncode, 0, allowed.stdout + allowed.stderr)
+        self.assertIn("GRANTED derived HEAD", allowed.stdout)
+
+    def test_snapshot_records_head_symref(self):
+        git(self.remote, "symbolic-ref", "HEAD", "refs/heads/main")
+        after = self._snapshot_after()
+        with open(after) as fh:
+            remote = json.load(fh)["repos"][self.repo]["remotes"]["origin"]
+        self.assertEqual(remote["symrefs"]["HEAD"], "refs/heads/main")
+
+    def test_annotated_tag_peel_uses_tag_grant(self):
+        git(self.repo, "tag", "-a", "v2", "-m", "release")
+        git(self.repo, "push", "-q", "origin", "v2")
+        after = self._snapshot_after()
+        result = self._compare_with_grants(self.before, after, ["refs/tags/v2"])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("refs/tags/v2^{}", result.stdout)
+        denied = run_audit("compare", self.before, after)
+        self.assertEqual(denied.returncode, 1)
+
+    def test_explicit_automation_branch_grant_allows_rewrite_only_for_named_branch(self):
+        ref = "refs/heads/release-please--branches--main"
+        git(self.repo, "push", "-q", "origin", "HEAD:" + ref)
+        before = os.path.join(self.tmp, "automation-before.json")
+        snapshot(before, self.repo, env_overrides={"PATH": self.gh_bin})
+        git(self.repo, "commit", "-q", "--amend", "-m", "rewrite automation")
+        git(self.repo, "push", "-q", "--force", "origin", "HEAD:" + ref)
+        after = self._snapshot_after()
+        result = self._compare_with_grants(before, after, {
+            "refs": [ref], "allow_non_fast_forward": [ref]})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("EXPECTED NON-FAST-FORWARD", result.stdout)
+        denied = self._compare_with_grants(before, after, [ref])
+        self.assertEqual(denied.returncode, 1)
+        self.assertIn("NON-FAST-FORWARD", denied.stdout)
+
+    def test_named_pull_ref_is_audited_not_foreign(self):
+        ref = "refs/pull/9/head"
+        git(self.repo, "push", "-q", "origin", "HEAD:" + ref)
+        before = os.path.join(self.tmp, "pull-before.json")
+        snapshot(before, self.repo, env_overrides={"PATH": self.gh_bin})
+        git(self.repo, "commit", "-q", "--amend", "-m", "rewrite pull")
+        git(self.repo, "push", "-q", "--force", "origin", "HEAD:" + ref)
+        after = self._snapshot_after()
+        result = self._compare_with_grants(before, after, [ref])
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("NON-FAST-FORWARD", result.stdout)
+        self.assertNotIn("FOREIGN", result.stdout)
 
     def test_grants_file_repo_key_must_match_exactly(self):
         git(self.repo, "checkout", "-q", "-b", "feature")
