@@ -50,9 +50,19 @@ public statement of those contracts.
   the module instance pi-subagents itself uses.
 - Non-TTY stdin: pi in `--mode json`/`--print` waits on stdin. Tests close it (`stdio: ["ignore", ...]`
   or `</dev/null`). RPC mode keeps stdin open by design.
-- **Push grant:** no reliable in-process way for a child extension to learn its agent name.
-  Lanes may make plain non-force `git push`; the closeout audit reports any push no grant covers.
-  `-push` agent variants remain as the brief-level grant record, not a guard input.
+- **Push grant (async single-agent launches):** the root guard overwrites the entire
+  `extensionBindings` tool input with `{"loop-pi.guard/1":{"agent":<selected agent>}}` after
+  validating the launch. pi-subagents 0.74.0 delivers it in `PI_SUBAGENT_EXTENSION_BINDINGS`
+  to the detached child. Only `lane-worker-push`, `lane-worker-retry-push` and
+  `complex-worker-push` may make plain `git push`; a missing, malformed or unknown identity
+  denies pushes. The lane guard applies this to `bash` and `watch_process`, including the
+  existing parser's wrappers, aliases and fallback scan. Force pushes remain blocked for all.
+  The real-CLI faux-provider test proves denial, a push to a disposable local bare remote,
+  and replacement of model-supplied bindings. This remains an honest-mistake fence, not an
+  OS security boundary. Foreground/nested identity transport is not part of this proof;
+  children without the binding deny pushes. Lane `subagent` calls that supply any
+  `extensionBindings` are refused before launch, so nested callers cannot forge grants.
+  Installed homes adopt it only after a lock bump.
 
 ## Test harness
 

@@ -1211,10 +1211,13 @@ function isCommitDashA(commitArgs: string[]): boolean {
  *  invocation (course correction, main thread, 2026-09-27: a `-c
  *  alias.<name>=<value>` whose <name> shadows a real built-in is ignored by
  *  real git, so relying on the expanded reading alone would miss it). */
-function checkGitPushAddCommit(gitArgs: string[]): Decision | null {
+function checkGitPushAddCommit(gitArgs: string[], pushGranted = true): Decision | null {
   const sub = gitArgs[0];
   if (sub === "push" && isForcePush(gitArgs.slice(1))) {
     return block("loop-guard: force-push forms are blocked for every role (SEAMS.md push grant).");
+  }
+  if (sub === "push" && !pushGranted) {
+    return block("loop-guard: git push requires a push-granted lane identity (SEAMS.md push grant).");
   }
   if (sub === "add" && isBulkAdd(gitArgs.slice(1))) {
     return block("loop-guard: `git add -A`, `.` or `--all` is blocked; add explicit pathspecs.");
@@ -1397,7 +1400,7 @@ function fallbackLaneCheck(segment: string[]): string | undefined {
   return undefined;
 }
 
-export function fallbackScan(text: string, role: Role, depth = 0): Decision {
+export function fallbackScan(text: string, role: Role, depth = 0, pushGranted = true): Decision {
   const clean = text.replace(/[\\'"]/g, "");
   if (FALLBACK_BACKGROUND.test(clean)) {
     return block(
@@ -1415,17 +1418,17 @@ export function fallbackScan(text: string, role: Role, depth = 0): Decision {
       }
       if (bare !== "git") continue;
       const tokens = ["git", ...segment.slice(i + 1)];
-      const literal = checkGitPushAddCommit(gitArguments(tokens));
+      const literal = checkGitPushAddCommit(gitArguments(tokens), pushGranted);
       if (literal) return block(fallbackReason(literal.reason ?? ""));
       const resolved = resolveGitArguments(tokens);
       if (resolved.shellCommand !== undefined && depth < MAX_FALLBACK_DEPTH) {
-        const nested = fallbackScan(resolved.shellCommand, role, depth + 1);
+        const nested = fallbackScan(resolved.shellCommand, role, depth + 1, pushGranted);
         if (nested.block) return nested;
       } else if (resolved.aliasText !== undefined && depth < MAX_FALLBACK_DEPTH) {
-        const nested = fallbackScan(resolved.aliasText, role, depth + 1);
+        const nested = fallbackScan(resolved.aliasText, role, depth + 1, pushGranted);
         if (nested.block) return nested;
       } else {
-        const expanded = checkGitPushAddCommit(resolved.args);
+        const expanded = checkGitPushAddCommit(resolved.args, pushGranted);
         if (expanded) return block(fallbackReason(expanded.reason ?? ""));
       }
     }
@@ -1443,12 +1446,12 @@ export function fallbackScan(text: string, role: Role, depth = 0): Decision {
 // Public: evaluateBashCommand
 // ---------------------------------------------------------------------------
 
-export function evaluateBashCommand(command: string, role: Role, gitAliasDepth = 0): Decision {
+export function evaluateBashCommand(command: string, role: Role, gitAliasDepth = 0, pushGranted = true): Decision {
   if (command.includes(NUL)) {
     return block("loop-guard: a NUL character cannot appear in a command");
   }
   const parsed = parseCommand(command, role);
-  if (!parsed) return fallbackScan(command, role);
+  if (!parsed) return fallbackScan(command, role, 0, pushGranted);
 
   if (parsed.hasBackgroundOperator) {
     return block(
@@ -1474,7 +1477,7 @@ export function evaluateBashCommand(command: string, role: Role, gitAliasDepth =
       // alias-expanded reading alone would miss it. Rather than hardcode a
       // built-in-name list (which drifts against git's own set), always check
       // the literal subcommand token too and block if either reading blocks.
-      const literalDecision = checkGitPushAddCommit(gitArguments(stripped));
+      const literalDecision = checkGitPushAddCommit(gitArguments(stripped), pushGranted);
       if (literalDecision) return literalDecision;
 
       const resolved = resolveGitArguments(stripped);
@@ -1485,16 +1488,16 @@ export function evaluateBashCommand(command: string, role: Role, gitAliasDepth =
         // alias cycle; past the bound the alias text gets the fallback scan.
         const aliasDecision =
           gitAliasDepth >= MAX_GIT_ALIAS_DEPTH
-            ? fallbackScan(resolved.shellCommand, role)
-            : evaluateBashCommand(resolved.shellCommand, role, gitAliasDepth + 1);
+            ? fallbackScan(resolved.shellCommand, role, 0, pushGranted)
+            : evaluateBashCommand(resolved.shellCommand, role, gitAliasDepth + 1, pushGranted);
         if (aliasDecision.block) return aliasDecision;
       } else if (resolved.unparseable) {
         // The alias's own body could not be lexed (e.g. an unterminated
         // quote): never treat it as an inert literal subcommand string.
-        const aliasDecision = fallbackScan(resolved.aliasText ?? rawSegment.join(" "), role);
+        const aliasDecision = fallbackScan(resolved.aliasText ?? rawSegment.join(" "), role, 0, pushGranted);
         if (aliasDecision.block) return aliasDecision;
       } else {
-        const aliasExpandedDecision = checkGitPushAddCommit(resolved.args);
+        const aliasExpandedDecision = checkGitPushAddCommit(resolved.args, pushGranted);
         if (aliasExpandedDecision) return aliasExpandedDecision;
       }
     }
@@ -1504,7 +1507,7 @@ export function evaluateBashCommand(command: string, role: Role, gitAliasDepth =
       // each argument gets the fallback text scan so a dangerous command
       // spelled out in the code still blocks.
       for (const arg of stripped.slice(1)) {
-        const decision = fallbackScan(arg, role);
+        const decision = fallbackScan(arg, role, 0, pushGranted);
         if (decision.block) return decision;
       }
     }
@@ -1518,7 +1521,7 @@ export function evaluateBashCommand(command: string, role: Role, gitAliasDepth =
   }
 
   for (const script of parsed.interpreterScripts) {
-    const decision = fallbackScan(script, role);
+    const decision = fallbackScan(script, role, 0, pushGranted);
     if (decision.block) return decision;
   }
 

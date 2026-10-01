@@ -10,7 +10,7 @@
   "disabledFeatures": [
     "agent-management", "watchdog", "panes", "missions", "lane-management", "spawn-budget-grants",
     "preflight", "lane-metadata", "gates", "usage-budgets", "tool-budgets", "control-overrides",
-    "extension-bindings", "external-machines"
+    "external-machines"
   ],
   "control": { "activeNoticeAfterMs": 3600000 },
   "scheduledRuns": { "enabled": false },

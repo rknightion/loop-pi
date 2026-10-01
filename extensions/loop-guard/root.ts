@@ -12,6 +12,7 @@ import { getAgentDir, isToolCallEventType } from "@earendil-works/pi-coding-agen
 import { registerRequiredChildExtensions } from "pi-subagents/required-child-extensions";
 import { hookScriptsToRun, runHookScripts } from "./hooks.ts";
 import { installModelFamily, subagentOverrideBlock } from "./model-family.ts";
+import { bindLaneIdentity } from "./push-grant.ts";
 import { evaluateBashCommand, evaluateBgWait, evaluateSubagentCall, evaluateWatchProcess, isAsyncSubagentLaunch } from "./rules.ts";
 
 export default function (pi: ExtensionAPI) {
@@ -147,9 +148,13 @@ export default function (pi: ExtensionAPI) {
       if (wrongModel) {
         return wrongModel;
       }
-      const decision = evaluateSubagentCall(event.input as Record<string, unknown>);
+      const input = event.input as Record<string, unknown>;
+      const decision = evaluateSubagentCall(input);
       if (decision.block) {
         return { block: true, reason: decision.reason };
+      }
+      if (input.action === undefined && typeof input.agent === "string" && typeof input.task === "string") {
+        bindLaneIdentity(input);
       }
       return;
     }

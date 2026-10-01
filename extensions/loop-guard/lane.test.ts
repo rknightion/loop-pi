@@ -79,15 +79,22 @@ test("lane tool_call: allows an ordinary bash command", async () => {
   laneExtension(api as any);
   const handler = toolCallHandler(handlers);
   const result = await handler(
-    { type: "tool_call", toolCallId: "1", toolName: "bash", input: { command: "git push origin main" } },
+    { type: "tool_call", toolCallId: "1", toolName: "bash", input: { command: "git status" } },
     fakeCtx(agentDir),
   );
   assert.equal(result?.block ?? false, false);
 });
 
-test("lane tool_call: allows a plain non-force git push (SEAMS.md push grant)", async () => {
+test("lane tool_call: a bound push-granted identity allows a plain non-force git push", async () => {
   const { api, handlers } = fakeApi();
-  laneExtension(api as any);
+  const previous = process.env.PI_SUBAGENT_EXTENSION_BINDINGS;
+  try {
+    process.env.PI_SUBAGENT_EXTENSION_BINDINGS = JSON.stringify({ "loop-pi.guard/1": { agent: "lane-worker-push" } });
+    laneExtension(api as any);
+  } finally {
+    if (previous === undefined) delete process.env.PI_SUBAGENT_EXTENSION_BINDINGS;
+    else process.env.PI_SUBAGENT_EXTENSION_BINDINGS = previous;
+  }
   const handler = toolCallHandler(handlers);
   const result = await handler(
     { type: "tool_call", toolCallId: "1", toolName: "bash", input: { command: "git push" } },
@@ -132,6 +139,12 @@ test("lane tool_call: watch_process runs the same shell-command gate as bash", a
     fakeCtx(agentDir),
   );
   assert.equal(allowed?.block ?? false, false);
+  const noGrantPush = await handler(
+    { type: "tool_call", toolCallId: "3", toolName: "watch_process", input: { command: "git push" } },
+    fakeCtx(agentDir),
+  );
+  assert.equal(noGrantPush?.block, true);
+  assert.match(noGrantPush?.reason ?? "", /push requires a push-granted lane identity/);
 });
 
 test("lane tool_call: hook script denial blocks bash even when rules.ts allows it", async () => {

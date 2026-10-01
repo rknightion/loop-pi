@@ -10,8 +10,11 @@ import { getAgentDir, isToolCallEventType } from "@earendil-works/pi-coding-agen
 import { hookScriptsToRun, runHookScripts } from "./hooks.ts";
 import { installModelFamily, subagentOverrideBlock } from "./model-family.ts";
 import { evaluateBashCommand } from "./rules.ts";
+import { hasLanePushGrant } from "./push-grant.ts";
 
 export default function (pi: ExtensionAPI) {
+  // Capture once at extension load: later tool calls cannot widen the launch grant.
+  const pushGranted = hasLanePushGrant(process.env.PI_SUBAGENT_EXTENSION_BINDINGS);
   // Shared path for the builtin `bash` tool and loop-wait's `watch_process`
   // (available to lanes), which spawns a process from a `command` field
   // exactly like bash does. Course correction from the main thread
@@ -21,7 +24,7 @@ export default function (pi: ExtensionAPI) {
     command: string,
     ctx: ExtensionContext,
   ): Promise<ToolCallEventResult | void> => {
-    const decision = evaluateBashCommand(command, "lane");
+    const decision = evaluateBashCommand(command, "lane", 0, pushGranted);
     if (decision.block) {
       return { block: true, reason: decision.reason };
     }
@@ -49,6 +52,11 @@ export default function (pi: ExtensionAPI) {
     }
 
     if (event.toolName === "subagent") {
+      // Only the root supplies launch identity. A nested caller must not forge
+      // bindings now that the feature is enabled globally.
+      if ((event.input as Record<string, unknown>).extensionBindings !== undefined) {
+        return { block: true, reason: "loop-guard: lanes may not supply extensionBindings; only the root binds lane identity." };
+      }
       return subagentOverrideBlock(event.input);
     }
 
