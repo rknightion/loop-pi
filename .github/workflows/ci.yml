@@ -72,7 +72,7 @@ jobs:
 
   macos-test:
     name: just test (macOS)
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 15
     permissions:
       contents: read
