@@ -9,6 +9,12 @@ first, then in every extension it touches.
 `just check` is the gate: run it before every commit. `just setup` installs dependencies and the
 git hooks.
 
+## Task tracking
+
+This repository has no task board and does not use GitHub Issues for planned work: the maintainer
+tracks it on a private board. Never initialise a Backlog board here, and never write a private task
+id into a file, commit message or pull request.
+
 ## Leak gate
 
 This repository is public and must never carry a private hostname, address, tenant or account id,
