@@ -17,7 +17,7 @@ public statement of those contracts.
   with `defaultProjectTrust: "never"` a child no longer loads the target repository's `.pi/`
   settings, system prompt files, skills or extensions. Agent discovery is not trust-gated:
   repository `.pi/agents` and `.agents/*.md` still outrank the home's agents. `loop-pi-preflight` stays.
-- **Tool list (pi 0.99 / pi-subagents 0.74.0):** `toolActivation` is `"eager"`; never `"auto"`.
+- **Tool list (pi 0.99.2 / pi-subagents 0.74.0):** `toolActivation` is `"eager"`; never `"auto"`.
   codex-lb never acknowledges a request carrying an `additional_tools` item, which pi sends for a
   mid-conversation tool addition when a model's `compat.supportsAdditionalTools` is true. The overlay
   sets that and `supportsToolSearch` false for every family model, so a changed tool list is resent

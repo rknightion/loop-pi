@@ -8,7 +8,7 @@ default:
 
 # Install npm dependencies and the leak-gate git hooks
 setup:
-    npm ci --no-audit --no-fund
+    npm ci --ignore-scripts --no-audit --no-fund
     just hooks
 
 # Format the justfile (the TypeScript and Python sources carry no formatter yet)

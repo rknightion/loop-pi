@@ -42,10 +42,60 @@ jobs:
       - name: just setup
         run: just setup
 
+      - name: Require pinned runtime provenance and verify registry signatures
+        # npm verifies attestations when present, but does not require every package to have one.
+        # Require provenance for our direct runtime dependencies; transitives remain signature-only
+        # unless they publish an attestation, in which case npm verifies it too.
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { readFileSync } from 'node:fs';
+          import { execFileSync } from 'node:child_process';
+          const { dependencies } = JSON.parse(readFileSync('package.json', 'utf8'));
+          const { packages } = JSON.parse(readFileSync('package-lock.json', 'utf8'));
+          for (const [name, version] of Object.entries(dependencies)) {
+            const installed = JSON.parse(readFileSync(`node_modules/${name}/package.json`, 'utf8'));
+            assert.equal(installed.version, version, `${name}: installed version differs from pin`);
+            const dist = JSON.parse(execFileSync('npm', ['view', `${name}@${version}`, 'dist', '--json'], { encoding: 'utf8' }));
+            assert.equal(dist.integrity, packages[`node_modules/${name}`].integrity, `${name}: registry integrity differs from lock`);
+            assert.ok(dist.attestations?.url && dist.attestations?.provenance?.predicateType,
+              `${name}@${version}: missing provenance attestation`);
+            console.log(`${name}@${version}: provenance present; verifying with npm audit signatures`);
+          }
+          NODE
+          npm audit signatures
+
       # The leak leg of `just check` runs in the leak-scan job, which holds the term list; a CI
       # checkout has no installed hooks to verify.
       - name: just fmt-check lint test
         run: just fmt-check lint test
+
+  macos-test:
+    name: just test (macOS)
+    runs-on: macos-15
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          # renovate: datasource=node-version depName=node
+          node-version: "26.10.0"
+
+      - name: Set up just
+        uses: rknightion/.github/.github/actions/setup-just@f32275a4a7641f34db5cb005d270db961b54a680 # v1.25.3
+
+      - name: just setup
+        run: just setup
+
+      - name: just test
+        run: just test
 
   leak-scan:
     name: leak-scan

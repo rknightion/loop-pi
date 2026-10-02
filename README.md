@@ -86,8 +86,8 @@ Samples of both live in `extensions/test-support/hook-scripts/`. List a script i
 
 ## Limits, stated plainly
 
-- **Pinned pi.** The runtime is pinned to `@earendil-works/pi-coding-agent` 0.87.1 and
-  pi-subagents 0.73.0. The extensions use pi's extension API, which still changes between minor
+- **Pinned pi.** The runtime is pinned to `@earendil-works/pi-coding-agent` 0.99.2 and
+  pi-subagents 0.74.0. The extensions use pi's extension API, which still changes between minor
   releases; a bump means re-running the tests and a real loop, not just the installer.
 - **Not a sandbox.** loop-guard is a fence against honest mistakes, parsed from the command text.
   A determined model can get round it (an interpreter, an encoded string, a file it writes and then
