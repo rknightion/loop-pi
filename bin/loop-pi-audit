@@ -378,8 +378,8 @@ def validate_automation(grants_by_repo: dict) -> None:
                     {"ref", "actor"}, {"ref_prefix", "actor"}):
                 raise ValueError("automation item needs exactly actor and ref or ref_prefix")
             actor = item["actor"]
-            if not isinstance(actor, str) or not re.fullmatch(r"[A-Za-z0-9-]+(?:\[bot\])?", actor):
-                raise ValueError("automation actor must be an exact login")
+            if not isinstance(actor, str) or not re.fullmatch(r"[A-Za-z0-9-]+\[bot\]", actor):
+                raise ValueError("automation actor must be an exact GitHub App bot login ending in [bot]")
             ref = item.get("ref", item.get("ref_prefix"))
             if (not isinstance(ref, str) or not ref.startswith("refs/heads/")
                     or len(ref) <= len("refs/heads/") or any(c in ref for c in " *?[:\\")

@@ -103,10 +103,12 @@ actor-bound automation, independently of those lists:
 }
 ```
 
-Each automation item requires an exact push actor login and exactly one of `ref` (an exact
-branch) or `ref_prefix` (a branch namespace longer than `refs/heads/`, ending in `/`). Unknown
-keys or malformed items exit 2. Read the login from the forge's activity API, not the commit
-metadata or a pull request's author display. No wildcards are accepted.
+Each automation item requires an exact GitHub App bot push actor login: a nonempty bot name
+ending in literal `[bot]`. Human or other nonbot actor declarations are malformed, even if
+push records match, and exit 2. Each item has exactly one of `ref` (an exact branch) or
+`ref_prefix` (a branch namespace longer than `refs/heads/`, ending in `/`). Unknown keys or
+malformed items exit 2. Read the login from the forge's activity API, not the commit metadata
+or a pull request's author display. No wildcards are accepted.
 
 Automation covers creation, movement, rewriting or deletion only when the read-only GitHub
 activity API for that remote and ref accounts for the complete before-to-after SHA chain

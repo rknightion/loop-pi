@@ -709,6 +709,21 @@ class AutomationTests(unittest.TestCase):
                                       items=None if ref.endswith("root") else items)
                 self.assertEqual(result.returncode, 1)
 
+    def test_human_actor_grant_is_a_usage_error_even_with_matching_push_records(self):
+        actor = "rknightion"
+        for selector in ({"ref": self.REF}, {"ref_prefix": "refs/heads/renovate/"}):
+            with self.subTest(selector=selector):
+                result = self.compare([self.activity(actor=actor)],
+                                      items=[{**selector, "actor": actor}])
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertNotIn("[automation actor=", result.stdout)
+
+    def test_automation_actor_requires_a_nonempty_name_and_literal_bot_suffix(self):
+        for actor in ("", "[bot]", "dependency", "dependency[BOT]", "dependency[bot]-other"):
+            with self.subTest(actor=actor):
+                result = self.compare([], items=[{"ref": self.REF, "actor": actor}])
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+
     def test_exact_ref_only(self):
         item = {"ref": self.REF, "actor": self.ACTOR}
         self.assertEqual(self.compare([self.activity()], items=[item]).returncode, 0)
