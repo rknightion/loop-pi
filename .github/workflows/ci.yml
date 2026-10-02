@@ -15,7 +15,7 @@ concurrency:
 jobs:
   just-check:
     name: just check
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
       contents: read
@@ -99,7 +99,7 @@ jobs:
 
   leak-scan:
     name: leak-scan
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -133,7 +133,7 @@ jobs:
 
   trufflehog:
     name: trufflehog
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     permissions:
       contents: read
