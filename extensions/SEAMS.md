@@ -53,15 +53,23 @@ public statement of those contracts.
 - **Push grant (async single-agent launches):** the root guard overwrites the entire
   `extensionBindings` tool input with `{"loop-pi.guard/1":{"agent":<selected agent>}}` after
   validating the launch. pi-subagents 0.74.0 delivers it in `PI_SUBAGENT_EXTENSION_BINDINGS`
-  to the detached child. Only `lane-worker-push`, `lane-worker-retry-push` and
-  `complex-worker-push` may make plain `git push`; a missing, malformed or unknown identity
+  to the detached child. For directly bound detached children, only `lane-worker-push`,
+  `lane-worker-retry-push` and `complex-worker-push` may make plain `git push`;
+  a missing, malformed or unknown identity
   denies pushes. The lane guard applies this to `bash` and `watch_process`, including the
   existing parser's wrappers, aliases and fallback scan. Force pushes remain blocked for all.
   The real-CLI faux-provider test proves denial, a push to a disposable local bare remote,
   and replacement of model-supplied bindings. This remains an honest-mistake fence, not an
-  OS security boundary. Foreground/nested identity transport is not part of this proof;
-  children without the binding deny pushes. Lane `subagent` calls that supply any
-  `extensionBindings` are refused before launch, so nested callers cannot forge grants.
+  OS security boundary. **Foreground nested children inherit the detached parent's push
+  grant, even when the nested agent is not one of the three push agents.** pi-subagents
+  0.74.0 creates foreground children in the parent's process and does not apply per-child
+  `processEnv` there; the lane extension therefore reads the parent's binding. Denying
+  that inheritance requires a supported per-session identity transport, not parsing prompt
+  text or mutating shared process environment. A child without a binding denies pushes,
+  but a foreground child of a granted parent is not such a child. Lane `subagent` calls
+  that supply any `extensionBindings` are refused before launch; this prevents explicit
+  binding forgery, not foreground inheritance. Briefs must not treat the guard as enforcing
+  a separate no-push right on a granted lane's foreground descendants.
   Installed homes adopt it only after a lock bump.
 
 ## Test harness
