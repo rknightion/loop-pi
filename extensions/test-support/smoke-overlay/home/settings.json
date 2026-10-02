@@ -1,0 +1,25 @@
+{
+  "enabledModels": [
+    "faux/faux-1"
+  ],
+  "loopPi": {
+    "modelFamily": {
+      "provider": "faux",
+      "pattern": "^faux-1$",
+      "name": "faux",
+      "members": [
+        "faux-1"
+      ]
+    },
+    "rootRoute": {
+      "provider": "faux",
+      "model": "faux-1",
+      "thinking": "off"
+    }
+  },
+  "subagents": {
+    "agentExcludeDirs": [
+      "~/.agents"
+    ]
+  }
+}

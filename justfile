@@ -32,6 +32,7 @@ lint:
 test:
     npm test
     python3 -m unittest {{ python_tests }}
+    python3 -m unittest bin.test_loop_smoke
 
 # The pre-commit gate: formatting, types, tests and the leak scan
 [group('check')]
