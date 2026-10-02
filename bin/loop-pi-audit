@@ -25,6 +25,8 @@ a snapshot. The run dir comes from `--run-dir` or `LOOP_PI_RUN_DIR`:
 Stdlib only.
 """
 import argparse
+from datetime import datetime, timezone
+from urllib.parse import quote, urlparse
 import fcntl
 import json
 import re
@@ -364,8 +366,115 @@ def head_target(entry: dict, other: dict) -> str | None:
     return candidates[0] if len(candidates) == 1 else None
 
 
-def compare_repo(name: str, before: dict, after: dict, grants: list[str] | dict, report: list[str]) -> bool:
+def validate_automation(grants_by_repo: dict) -> None:
+    for grants in grants_by_repo.values():
+        if not isinstance(grants, dict) or "automation" not in grants:
+            continue
+        items = grants["automation"]
+        if not isinstance(items, list):
+            raise ValueError("automation must be a list")
+        for item in items:
+            if not isinstance(item, dict) or set(item) not in (
+                    {"ref", "actor"}, {"ref_prefix", "actor"}):
+                raise ValueError("automation item needs exactly actor and ref or ref_prefix")
+            actor = item["actor"]
+            if not isinstance(actor, str) or not re.fullmatch(r"[A-Za-z0-9-]+(?:\[bot\])?", actor):
+                raise ValueError("automation actor must be an exact login")
+            ref = item.get("ref", item.get("ref_prefix"))
+            if (not isinstance(ref, str) or not ref.startswith("refs/heads/")
+                    or len(ref) <= len("refs/heads/") or any(c in ref for c in " *?[:\\")
+                    or any(ord(c) < 33 or ord(c) == 127 for c in ref)
+                    or ".." in ref or "@{" in ref or "//" in ref
+                    or ("ref_prefix" in item and not ref.endswith("/"))
+                    or ("ref" in item and (ref.endswith(("/", ".", ".lock"))))):
+                raise ValueError("automation ref must be an exact branch; prefix must end in /")
+            # Git is the authority for branch syntax, including component restrictions.
+            checked_ref = ref + "automation-probe" if "ref_prefix" in item else ref
+            try:
+                valid = run(["git", "check-ref-format", checked_ref]).returncode == 0
+            except (OSError, subprocess.TimeoutExpired):
+                valid = False
+            if not valid:
+                raise ValueError("automation ref is not a valid branch ref")
+
+
+def snapshot_time(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("snapshot/activity time needs a timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+def automation_actor(repo: str, remote: str, ref: str, old: str, new: str,
+                     items: list[dict], defaults: list[str | None],
+                     times: tuple[str, str]) -> str | None:
+    """Read push records, never commit metadata. Unknown or incomplete evidence fails closed."""
+    if (not ref.startswith("refs/heads/") or ref == "refs/heads/main"
+            or None in defaults or ref in defaults):
+        return None
+    candidates = [item["actor"] for item in items if
+                  item.get("ref") == ref or
+                  ("ref_prefix" in item and ref.startswith(item["ref_prefix"]))]
+    if not candidates:
+        return None
+    try:
+        start, end = map(snapshot_time, times)
+        if start >= end:
+            return None
+        url = run(["git", "-C", repo, "remote", "get-url", remote])
+        if url.returncode:
+            return None
+        raw = url.stdout.strip()
+        if "://" in raw:
+            parsed = urlparse(raw)
+            host, path = parsed.hostname, parsed.path.lstrip("/")
+        else:
+            match = re.fullmatch(r"(?:[^@/:]+@)?([^/:]+):(.+)", raw)
+            if not match:
+                return None
+            host, path = match.groups()
+        if host not in ({"github.com", os.environ.get("GH_HOST", "github.com")} | gh_configured_hosts()):
+            return None
+        path = path.removesuffix(".git")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", path):
+            return None
+        result = run(["gh", "api", "--hostname", host, "--paginate", "--slurp",
+                      f"repos/{path}/activity?ref={quote(ref, safe='')}&per_page=100"], timeout=120)
+        if result.returncode:
+            return None
+        pages = json.loads(result.stdout)
+        if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
+            return None
+        entries = []
+        for page in pages:
+            for entry in page:
+                timestamp = snapshot_time(entry["timestamp"])
+                if start <= timestamp <= end:
+                    entries.append(entry)
+        if not entries:
+            return None
+        # API is newest first. Preserve chronological order even for equal timestamps.
+        entries.reverse()
+        entries.sort(key=lambda entry: snapshot_time(entry["timestamp"]))
+        zero = "0" * 40
+        expected = old or zero
+        for entry in entries:
+            if (entry["ref"] != ref or entry["actor"]["login"] not in candidates
+                    or entry["actor"]["login"] != entries[0]["actor"]["login"]
+                    or entry["activity_type"] not in {"push", "force_push", "branch_creation", "branch_deletion"}
+                    or entry["before"] != expected
+                    or not re.fullmatch(r"[0-9a-f]{40}", entry["after"])):
+                return None
+            expected = entry["after"]
+        return entries[0]["actor"]["login"] if expected == (new or zero) else None
+    except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
+def compare_repo(name: str, before: dict, after: dict, grants: list[str] | dict, report: list[str],
+                 times: tuple[str, str] = ("", "")) -> bool:
     """Returns True if changes are granted or foreign automation."""
+    automation = grants.get("automation", []) if isinstance(grants, dict) else []
     rewrites = set(grants.get("allow_non_fast_forward", [])) if isinstance(grants, dict) else set()
     grants = grants.get("refs", []) if isinstance(grants, dict) else grants
     all_covered = True
@@ -393,6 +502,12 @@ def compare_repo(name: str, before: dict, after: dict, grants: list[str] | dict,
                             a.get("refs", {}).get("HEAD", "")))
         for change, ref, before_sha, after_sha in changes:
             target = ref
+            actor = automation_actor(name, remote, ref, before_sha, after_sha, automation,
+                                     [head_target(b, a), head_target(a, b)], times)
+            if actor:
+                report.append(f"[{name}] remote '{remote}' ref {change}: {ref} "
+                              f"({before_sha or '-'} -> {after_sha or '-'}) [automation actor={actor}]")
+                continue
             if ref == "HEAD":
                 targets = [head_target(entry, other) for entry, other, sha in
                            ((b, a, before_sha), (a, b, after_sha)) if sha]
@@ -472,6 +587,12 @@ def cmd_compare(args: argparse.Namespace) -> int:
         with open(args.grants, "r", encoding="utf-8") as fh:
             grants_by_repo = json.load(fh)
 
+    try:
+        validate_automation(grants_by_repo)
+    except (ValueError, AttributeError) as exc:
+        print(f"loop-pi-audit: invalid grants: {exc}", file=sys.stderr)
+        return 2
+
     before_repos = before.get("repos", {})
     after_repos = after.get("repos", {})
     all_names = sorted(set(before_repos) | set(after_repos))
@@ -493,7 +614,8 @@ def cmd_compare(args: argparse.Namespace) -> int:
         b = before_repos[name]
         a = after_repos[name]
         pre_len = len(report)
-        covered = compare_repo(name, b, a, grants_by_repo.get(name, []), report)
+        covered = compare_repo(name, b, a, grants_by_repo.get(name, []), report,
+                               (before.get("taken_at", ""), after.get("taken_at", "")))
         if len(report) > pre_len:
             any_change = True
         all_ok = all_ok and covered

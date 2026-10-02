@@ -623,5 +623,96 @@ class RunDirTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
 
 
+class AutomationTests(unittest.TestCase):
+    REF = "refs/heads/renovate/ubuntu-26.x"
+    ACTOR = "rknightion-renovate[bot]"
+    OLD = "8acbe4be3d6a8befc190d7da749644624342323b"
+    MID = "2fdc7e7c824b008333936171625b831453646a23"
+    NEW = "e477eecb22e1b97a83d6196eb63fd5da1e92b3e9"
+
+    def activity(self, ref=None, old=None, new=None, actor=None):
+        return {"ref": ref or self.REF, "before": self.OLD if old is None else old,
+                "after": self.NEW if new is None else new, "timestamp": "2026-10-02T15:21:13Z",
+                "activity_type": "force_push", "actor": {"login": actor or self.ACTOR}}
+
+    def compare(self, entries, ref=None, old=None, new=None, items=None, unavailable=False):
+        ref = ref or self.REF
+        old = self.OLD if old is None else old
+        new = self.NEW if new is None else new
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = os.path.join(tmp, "repo")
+            os.mkdir(repo)
+            subprocess.run(["git", "init", "-q", repo], check=True)
+            git(repo, "remote", "add", "origin", "https://github.com/export/audit-fixture.git")
+            paths = []
+            for label, sha, timestamp in (("before", old, "2026-10-02T14:00:00Z"),
+                                          ("after", new, "2026-10-02T16:00:00Z")):
+                refs = {ref: sha} if sha else {}
+                path = os.path.join(tmp, label + ".json")
+                with open(path, "w") as fh:
+                    json.dump({"taken_at": timestamp, "repos": {repo: {
+                        "remotes": {"origin": {"available": True, "refs": refs,
+                                                "symrefs": {"HEAD": "refs/heads/trunk"}}},
+                        "tags": {"available": True, "tags": {}},
+                        "releases": {"available": True, "releases": []}}}}, fh)
+                paths.append(path)
+            grants = os.path.join(tmp, "grants.json")
+            with open(grants, "w") as fh:
+                json.dump({repo: {"automation": items if items is not None else [
+                    {"ref_prefix": "refs/heads/renovate/", "actor": self.ACTOR}]}}, fh)
+            fake = make_bin_with_gh_stub(tmp)
+            with open(os.path.join(fake, "gh"), "w") as fh:
+                fh.write("#!/bin/sh\n" + ("exit 1\n" if unavailable else
+                         "printf '%s\\n' '" + json.dumps([entries]) + "'\n"))
+            return run_audit("compare", *paths, "--grants", grants, env_overrides={"PATH": fake})
+
+    def test_recorded_two_force_push_replay(self):
+        entries = [self.activity(old=self.MID), self.activity(new=self.MID)]
+        entries[1]["timestamp"] = "2026-10-02T14:20:31Z"
+        result = self.compare(entries)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("automation", result.stdout)
+        self.assertIn(self.ACTOR, result.stdout)
+
+    def test_creation_and_deletion(self):
+        zero = "0" * 40
+        for old, new in (("", self.NEW), (self.OLD, "")):
+            with self.subTest(old=old):
+                result = self.compare([self.activity(old=old or zero, new=new or zero)], old=old, new=new)
+                self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+
+    def test_untrusted_or_missing_activity_fails(self):
+        cases = ([self.activity(), self.activity(actor="other")], [],
+                 [self.activity(old=self.MID)], [self.activity(ref="refs/heads/other")])
+        for entries in cases:
+            with self.subTest(entries=entries):
+                self.assertEqual(self.compare(entries).returncode, 1)
+        self.assertEqual(self.compare([], unavailable=True).returncode, 1)
+
+    def test_invalid_items_are_usage_errors(self):
+        items = [{"ref_prefix": "refs/heads/", "actor": self.ACTOR},
+                 {"ref_prefix": "refs/heads/renovate", "actor": self.ACTOR},
+                 {"ref": self.REF}, {"ref": self.REF, "actor": self.ACTOR, "unknown": True},
+                 {"ref": self.REF, "ref_prefix": "refs/heads/renovate/", "actor": self.ACTOR}]
+        for item in items:
+            with self.subTest(item=item):
+                self.assertEqual(self.compare([], items=[item]).returncode, 2)
+
+    def test_protected_and_ungranted_refs_fail(self):
+        for ref in ("refs/heads/main", "refs/heads/trunk", "refs/tags/v1", "refs/heads/root"):
+            with self.subTest(ref=ref):
+                items = [{"ref": ref, "actor": self.ACTOR}] if not ref.startswith("refs/tags/") else [
+                    {"ref_prefix": "refs/heads/renovate/", "actor": self.ACTOR}]
+                result = self.compare([self.activity(ref=ref)], ref=ref,
+                                      items=None if ref.endswith("root") else items)
+                self.assertEqual(result.returncode, 1)
+
+    def test_exact_ref_only(self):
+        item = {"ref": self.REF, "actor": self.ACTOR}
+        self.assertEqual(self.compare([self.activity()], items=[item]).returncode, 0)
+        other = self.REF + "-other"
+        self.assertEqual(self.compare([self.activity(ref=other)], ref=other, items=[item]).returncode, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -84,6 +84,39 @@ printing `{"hookSpecificOutput": {"permissionDecision": "deny", "permissionDecis
 Samples of both live in `extensions/test-support/hook-scripts/`. List a script in
 `requiredHookScripts` when its absence should stop lanes rather than be skipped.
 
+### Closeout grants
+
+`loop-pi-audit compare BEFORE AFTER --grants grants.json` (or `closeout --grants`)
+uses exact snapshot repository paths as keys. An entry remains either a list of exact refs,
+or an object with `refs` and `allow_non_fast_forward` lists. Objects can also predeclare
+actor-bound automation, independently of those lists:
+
+```json
+{
+  "<repository path>": {
+    "refs": ["refs/heads/main"],
+    "automation": [
+      {"ref_prefix": "refs/heads/renovate/", "actor": "dependency-app[bot]"},
+      {"ref": "refs/heads/release-please--branches--main", "actor": "release-app[bot]"}
+    ]
+  }
+}
+```
+
+Each automation item requires an exact push actor login and exactly one of `ref` (an exact
+branch) or `ref_prefix` (a branch namespace longer than `refs/heads/`, ending in `/`). Unknown
+keys or malformed items exit 2. Read the login from the forge's activity API, not the commit
+metadata or a pull request's author display. No wildcards are accepted.
+
+Automation covers creation, movement, rewriting or deletion only when the read-only GitHub
+activity API for that remote and ref accounts for the complete before-to-after SHA chain
+between the snapshot timestamps, with every entry attributed to that one actor. All activity
+pages are read. Missing, unavailable, malformed or mixed-actor evidence grants nothing; the
+ordinary audit verdict remains unchanged. Covered changes have a separate `automation` report
+line with full old/new SHAs and actor. Neither `main`, either snapshot's default branch, tags,
+nor an unresolved default branch can be covered this way. This never grants another ref or
+permits the root's own ungranted pushes. Declare grants before a run, not to repair an old audit.
+
 ## Limits, stated plainly
 
 - **Pinned pi.** The runtime is pinned to `@earendil-works/pi-coding-agent` 0.99.2 and
