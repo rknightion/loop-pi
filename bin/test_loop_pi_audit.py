@@ -682,7 +682,8 @@ class AutomationTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
 
     def test_untrusted_or_missing_activity_fails(self):
-        cases = ([self.activity(), self.activity(actor="other")], [],
+        # The mixed-actor response is otherwise a complete, valid SHA chain.
+        cases = ([self.activity(old=self.MID), self.activity(new=self.MID, actor="other")], [],
                  [self.activity(old=self.MID)], [self.activity(ref="refs/heads/other")])
         for entries in cases:
             with self.subTest(entries=entries):
@@ -690,7 +691,8 @@ class AutomationTests(unittest.TestCase):
         self.assertEqual(self.compare([], unavailable=True).returncode, 1)
 
     def test_invalid_items_are_usage_errors(self):
-        items = [{"ref_prefix": "refs/heads/", "actor": self.ACTOR},
+        items = [{"ref": "refs/tags/v1", "actor": self.ACTOR},
+                 {"ref_prefix": "refs/heads/", "actor": self.ACTOR},
                  {"ref_prefix": "refs/heads/renovate", "actor": self.ACTOR},
                  {"ref": self.REF}, {"ref": self.REF, "actor": self.ACTOR, "unknown": True},
                  {"ref": self.REF, "ref_prefix": "refs/heads/renovate/", "actor": self.ACTOR}]
