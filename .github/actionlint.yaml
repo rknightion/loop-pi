@@ -1,0 +1,6 @@
+# actionlint 1.7.12 (pinned by the shared reusable) predates the ubuntu-26.04
+# runner label and reports it as unknown. Declare it here until a released
+# actionlint knows it (rhysd/actionlint#682), then delete this file.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04
