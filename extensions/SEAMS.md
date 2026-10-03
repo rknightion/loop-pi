@@ -50,8 +50,9 @@ public statement of those contracts.
   the module instance pi-subagents itself uses. pi-subagents 0.75.0 fails the child launch closed
   when a required child extension fails to load or throws during startup ("Required child extension
   failed during startup"), so a lane-guard startup error aborts the lane rather than running it unguarded.
-- pi-subagents 0.75.0 appends every async run, including its task text, to
-  `<agentDir>/run-history.jsonl` in the loop-pi home, not the target repository.
+- pi-subagents 0.75.0 appends a row for every launched async child (agent, outcome, duration and a
+  sha256 `taskHash`; the task text itself is stored as `[redacted]`) to `<agentDir>/run-history.jsonl`
+  in the loop-pi home, not the target repository.
 - Non-TTY stdin: pi in `--mode json`/`--print` waits on stdin. Tests close it (`stdio: ["ignore", ...]`
   or `</dev/null`). RPC mode keeps stdin open by design.
 - **Push grant (async single-agent launches):** the root guard overwrites the entire
