@@ -9,15 +9,17 @@ public statement of those contracts.
 
 ## Runtime facts
 
-- pi 1.0.0 loads `.ts` extensions through jiti. An entry file default-exports
+- pi 1.0.1 loads `.ts` extensions through jiti. An entry file default-exports
   `(pi: ExtensionAPI) => void | Promise<void>`. Type imports come from
-  `@earendil-works/pi-coding-agent`; `@earendil-works/pi-ai` resolves through pi's loader at
-  runtime (it is nested under pi-coding-agent in `node_modules`, not top level).
+  `@earendil-works/pi-coding-agent`; `@earendil-works/pi-ai` and `typebox` are pi's dependencies,
+  not ours, and resolve through pi's loader at runtime. pi 1.0.1 publishes no
+  `npm-shrinkwrap.json`, so npm hoists them to the top-level `node_modules`; never rely on either
+  layout (`tsconfig.json` lists both, and the loop-wait test hook resolves from pi's directory).
 - **Project trust (pi-subagents 0.75.0):** children follow the parent session's project trust, so
   with `defaultProjectTrust: "never"` a child no longer loads the target repository's `.pi/`
   settings, system prompt files, skills or extensions. Agent discovery is not trust-gated:
   repository `.pi/agents` and `.agents/*.md` still outrank the home's agents. `loop-pi-preflight` stays.
-- **Tool list (pi 1.0.0 / pi-subagents 0.75.0):** `toolActivation` is `"eager"`; never `"auto"`.
+- **Tool list (pi 1.0.1 / pi-subagents 0.75.0):** `toolActivation` is `"eager"`; never `"auto"`.
   codex-lb never acknowledges a request carrying an `additional_tools` item, which pi sends for a
   mid-conversation tool addition when a model's `compat.supportsAdditionalTools` is true. The overlay
   sets that and `supportsToolSearch` false for every family model, so a changed tool list is resent
@@ -80,7 +82,7 @@ public statement of those contracts.
 ## Request ceiling
 
 `extensions/request-ceiling/` is installed by both loop-guard entries (`installRequestCeiling`), so
-the root and every lane carry it. pi 1.0.0 has no wall-clock bound on a streaming request:
+the root and every lane carry it. pi 1.0.1 has no wall-clock bound on a streaming request:
 `httpIdleTimeoutMs` is an idle timer reset by every streamed event, so a model that keeps streaming
 reasoning never trips it, and the provider `timeoutMs` (`retry.provider.timeoutMs`) is cleared once
 response headers arrive. The output budget is pi's model `maxTokens` (sent as `max_output_tokens`),
