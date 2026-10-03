@@ -14,8 +14,8 @@
 // detached child process. It does — see the recorded evidence in the test and
 // this file's header comment below.
 import assert from "node:assert/strict";
-import { mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { cpSync, existsSync, mkdirSync, readdirSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 import {
   FAUX_EXTENSION,
@@ -184,6 +184,117 @@ test(
     }
   },
 );
+
+test("root's required extension registration rejects an external runner's public launch contract", async () => {
+  const agentDir = freshDir("loop-guard-e2e-external-agentdir-");
+  const cwd = freshDir("loop-guard-e2e-external-cwd-");
+  const marker = join(cwd, "runner-started");
+  const runner = join(cwd, "runner.cjs");
+  writeFileSync(runner, `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "started");`);
+  mkdirSync(join(agentDir, "agents"), { recursive: true });
+  writeFileSync(join(agentDir, "settings.json"), JSON.stringify({
+    packages: [PI_SUBAGENTS_PACKAGE_DIR],
+    subagents: { agentExcludeDirs: ["~/.agents"] },
+  }));
+  writeFileSync(join(agentDir, "agents", "lane-worker.md"), [
+    "---", "name: lane-worker", "description: Test external runner",
+    "runner:", "  type: external-cli", `  command: ${JSON.stringify(process.execPath)}`,
+    `  args: [${JSON.stringify(runner)}]`, "---", "Test external runner.",
+  ].join("\n"));
+  // The root's direct subagent path always adds native-only extensionBindings, which
+  // already rejects external runners. Use public preflight without bindings to isolate
+  // the host-required extension contract instead of testing that unrelated fence.
+  const probeDir = freshDir("loop-guard-e2e-preflight-extension-");
+  symlinkSync(dirname(PI_SUBAGENTS_PACKAGE_DIR), join(probeDir, "node_modules"), "dir");
+  const probe = join(probeDir, "probe.ts");
+  writeFileSync(probe, [
+    'import { resolveSubagentLaunchContract } from "pi-subagents/preflight";',
+    'export default function (pi) { pi.registerTool({',
+    'name: "inspect_child_contract", label: "Inspect child contract", description: "Test launch preflight",',
+    'parameters: { type: "object", properties: {} },',
+    'async execute(_id, _args, _signal, _update, ctx) {',
+    'const result = await resolveSubagentLaunchContract({ agent: "lane-worker", cwd: ctx.cwd,',
+    'parentSessionId: ctx.sessionManager.getSessionId() });',
+    'return { content: [{ type: "text", text: JSON.stringify(result) }], details: result };',
+    '} }); }',
+  ].join("\n"));
+  const session = startPiRpc({
+    extensions: [FAUX_EXTENSION, ROOT_EXTENSION, probe],
+    fauxScriptPath: writeFauxScript([
+      { match: "SPAWN_EXTERNAL", once: true, toolCalls: [
+        { name: "inspect_child_contract", args: {} },
+      ] },
+      { match: ".*", text: "ok" },
+    ]),
+    agentDir, cwd, subagentTempRoot: freshDir("loop-guard-e2e-external-subtemp-"),
+    sessionArgs: [], extraArgs: ["--exclude-tools", "subagents_enable"],
+  });
+  try {
+    session.send({ id: "p1", type: "prompt", message: "SPAWN_EXTERNAL" });
+    const result = await session.waitFor((e) => e.type === "tool_execution_end" && e.toolName === "inspect_child_contract");
+    assert.equal(result.isError, false, "the preflight probe itself must succeed");
+    const details = (result.result as { details: { ok: boolean } }).details;
+    assert.equal(details.ok, false, `external launch contract must be refused: ${JSON.stringify(result)}`);
+    assert.match(JSON.stringify(result.result), /host requires child extensions.*for every runner/);
+    assert.equal(existsSync(marker), false, "the external runner process must not start");
+  } finally {
+    await session.close();
+  }
+});
+
+test("a required lane guard throwing at session_start refuses the child before its task runs", async () => {
+  const agentDir = freshDir("loop-guard-e2e-throw-agentdir-");
+  const cwd = freshDir("loop-guard-e2e-throw-cwd-");
+  const fixture = freshDir("loop-guard-e2e-throw-extension-");
+  // Exercise the unchanged root entry with a faulty sibling guard, as in an installed build.
+  // Only the disposable copy's lane entry is replaced; the production lane stays untouched.
+  cpSync(dirname(ROOT_EXTENSION), join(fixture, "extensions", "loop-guard"), { recursive: true });
+  symlinkSync(dirname(PI_SUBAGENTS_PACKAGE_DIR), join(fixture, "node_modules"), "dir");
+  const startupMarker = join(cwd, "guard-started");
+  const taskMarker = join(cwd, "task-ran");
+  writeFileSync(join(fixture, "extensions", "loop-guard", "lane.ts"), [
+    'import { writeFileSync } from "node:fs";',
+    'export default function (pi) { pi.on("session_start", () => {',
+    `writeFileSync(${JSON.stringify(startupMarker)}, "started");`,
+    'throw new Error("FAULTY_LANE_GUARD_STARTUP");',
+    '}); }',
+  ].join("\n"));
+  mkdirSync(join(agentDir, "agents"), { recursive: true });
+  writeFileSync(join(agentDir, "settings.json"), JSON.stringify({
+    packages: [PI_SUBAGENTS_PACKAGE_DIR],
+    subagents: { agentExcludeDirs: ["~/.agents"] },
+  }));
+  writeFileSync(join(agentDir, "agents", "lane-worker.md"), [
+    "---", "name: lane-worker", "description: Test faulty lane guard", "tools: bash",
+    "extensions: []", `subagentOnlyExtensions: ${FAUX_EXTENSION}`, "model: faux/faux-1",
+    "---", "Test lane worker.",
+  ].join("\n"));
+  const session = startPiRpc({
+    extensions: [FAUX_EXTENSION, join(fixture, "extensions", "loop-guard", "root.ts")],
+    fauxScriptPath: writeFauxScript([
+      { match: "SPAWN_FAULTY_GUARD", once: true, toolCalls: [
+        { name: "subagent", args: { agent: "lane-worker", task: "CHILD_TASK_MARKER", async: false } },
+      ] },
+      { match: "CHILD_TASK_MARKER", once: true, toolCalls: [
+        { name: "bash", args: { command: `touch '${taskMarker}'` } },
+      ] },
+      { match: ".*", text: "ok" },
+    ]),
+    agentDir, cwd, subagentTempRoot: freshDir("loop-guard-e2e-throw-subtemp-"),
+    sessionArgs: [], extraArgs: ["--exclude-tools", "subagents_enable"],
+  });
+  try {
+    session.send({ id: "p1", type: "prompt", message: "SPAWN_FAULTY_GUARD" });
+    const result = await session.waitFor((e) => e.type === "tool_execution_end" && e.toolName === "subagent");
+    assert.equal(existsSync(startupMarker), true, "the required guard's startup handler must have run");
+    assert.equal(result.isError, true, `faulty guard must refuse the launch: ${JSON.stringify(result)}`);
+    assert.match(JSON.stringify(result.result), /Required child extension failed during startup/);
+    assert.match(JSON.stringify(result.result), /FAULTY_LANE_GUARD_STARTUP/);
+    assert.equal(existsSync(taskMarker), false, "no child task may run after guard startup fails");
+  } finally {
+    await session.close();
+  }
+});
 
 /** Recursively find a pi-subagents child's `session.jsonl` (or `run-N/session.jsonl`)
  *  under the parent's `sessions/` dir, once it has at least one line. */

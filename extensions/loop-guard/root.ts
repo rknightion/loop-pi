@@ -39,7 +39,7 @@ export default function (pi: ExtensionAPI) {
       extensions.push({ id: "loop-wait-lane", path: loopWaitLanePath });
     }
     try {
-      childRegistration = registerRequiredChildExtensions({ sessionId, extensions });
+      childRegistration = registerRequiredChildExtensions({ sessionId, extensions, requireForAllRunners: true });
     } catch (err) {
       childRegistrationFailed = true;
       ctx.ui.notify(
