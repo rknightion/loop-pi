@@ -9,6 +9,9 @@ It exists because the Codex CLI root in the same kind of loop polls while it wai
 check is a model call, and over a long run those calls add up. pi gives an extension API that can
 hold a root idle until something actually happens.
 
+The loop contract itself (run contract, lane briefs, waits, closeout) is the
+[fan-out protocol](https://github.com/rknightion/fan-out-protocol); its Appendix C covers pi.
+
 ## What is in it
 
 Three pi extensions, a home template and an installer:
