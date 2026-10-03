@@ -42,6 +42,81 @@ def apply(prefix: Path, tgt, node: str = "/usr/bin/node") -> None:
         m.atomic_write(path, data, mode)
 
 
+class NodeReceiptTests(unittest.TestCase):
+    """Drive the installer only in a child process fenced by a disposable HOME."""
+
+    def test_receipt_is_independent_of_path_and_explicit_node_wins(self):
+        import sys
+        with tempfile.TemporaryDirectory(prefix="loop-pi-node-test-") as tmp:
+            env = {**os.environ, "HOME": tmp}
+            env.pop("LOOP_PI_NODE", None)
+            driver = r'''
+import importlib.machinery, importlib.util, json, os, sys
+from pathlib import Path
+loader = importlib.machinery.SourceFileLoader("installer", sys.argv[1])
+spec = importlib.util.spec_from_loader(loader.name, loader)
+m = importlib.util.module_from_spec(spec)
+loader.exec_module(m)
+home = Path.home()
+data, bins, target = home / "data", home / "bin", home / "pi"
+print("HOME:", home, "destinations:", data, bins, target, flush=True)
+assert str(home) == os.environ["HOME"]
+(home / "sentinel").write_text("untouched")
+a, b = home / "preferred-node", home / "other-node"
+for path, version in ((a, "v24.1.0"), (b, "v24.2.0")):
+    path.write_text("#!/bin/sh\necho " + version + "\n")
+    path.chmod(0o755)
+# Substitute only the fixed platform discovery list, never destinations or HOME.
+m.NODE_CANDIDATES = (str(a), str(b))
+path_a, path_b = home / "path-a", home / "path-b"
+for directory, node in ((path_a, a), (path_b, b)):
+    directory.mkdir()
+    (directory / "node").symlink_to(node)
+label = m.build_label(m.source_files(), m.pins(), "the loop-pi home templates\0loop-pi-install")
+prefix = data / label
+(prefix / "home").mkdir(parents=True)
+(prefix / "home/settings.json").write_text("{}")
+(prefix / "bin").mkdir()
+for name in m.CLI_TOOLS:
+    (prefix / "bin" / name).write_text("#!/bin/sh\n")
+(prefix / m.BUILD_MANIFEST).write_text(json.dumps({"label": label, "missing_extensions": []}))
+args = ["--home", str(target), "--bin", str(bins), "--data", str(data), "--launcher", "loop-pi"]
+os.environ["PATH"] = str(path_a) + ":/usr/bin:/bin"
+assert m.main(args) == 0
+record = json.loads((target / m.HOME_MANIFEST).read_text())
+assert record["node"] == {"path": str(a.resolve()), "version": "v24.1.0"}, record
+original = (bins / "loop-pi").read_bytes()
+for directory in (path_a, path_b):
+    os.environ["PATH"] = str(directory) + ":/usr/bin:/bin"
+    assert m.main(args + ["--check"]) == 0
+# Even a changed preference list cannot silently replace the installed node.
+m.NODE_CANDIDATES = (str(b), str(a))
+assert m.main(args) == 0
+assert (bins / "loop-pi").read_bytes() == original
+os.environ["LOOP_PI_NODE"] = str(a)
+assert m.main(args + ["--node", str(b)]) == 0
+record = json.loads((target / m.HOME_MANIFEST).read_text())
+assert record["node"] == {"path": str(b.resolve()), "version": "v24.2.0"}
+assert m.main(args + ["--check", "--node", str(b)]) == 0
+os.environ.pop("LOOP_PI_NODE")
+b.write_text("#!/bin/sh\necho v24.3.0\n")
+assert m.main(args + ["--check"]) == 1, "version drift must be reported"
+assert m.main(args) == 0
+receipt_bytes = (target / m.HOME_MANIFEST).read_bytes()
+(target / m.HOME_MANIFEST).write_text("[]")
+assert m.main(args + ["--check"]) == 2, "non-object receipts must be rejected"
+(target / m.HOME_MANIFEST).write_bytes(receipt_bytes)
+b.unlink()
+assert m.main(args + ["--check"]) == 2, "missing recorded node must not fall back"
+assert (home / "sentinel").read_text() == "untouched"
+print("PASS: PATH-invariant check/reinstall; explicit override; version drift; missing node", flush=True)
+'''
+            result = subprocess.run([sys.executable, "-c", driver, str(HERE / "loop-pi-install")],
+                                    env=env, capture_output=True, text=True, timeout=60)
+            print(result.stdout, end="")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
 class InstallerTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory(prefix="loop-pi-install-test-")
