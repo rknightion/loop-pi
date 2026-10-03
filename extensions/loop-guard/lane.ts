@@ -9,6 +9,7 @@ import type { ExtensionAPI, ExtensionContext, ToolCallEvent, ToolCallEventResult
 import { getAgentDir, isToolCallEventType } from "@earendil-works/pi-coding-agent";
 import { hookScriptsToRun, runHookScripts } from "./hooks.ts";
 import { installModelFamily, subagentOverrideBlock } from "./model-family.ts";
+import { installRequestCeiling } from "../request-ceiling/index.ts";
 import { evaluateBashCommand } from "./rules.ts";
 import { hasLanePushGrant } from "./push-grant.ts";
 
@@ -75,4 +76,5 @@ export default function (pi: ExtensionAPI) {
   });
 
   installModelFamily(pi);
+  installRequestCeiling(pi);
 }

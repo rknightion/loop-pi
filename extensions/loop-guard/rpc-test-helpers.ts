@@ -33,9 +33,10 @@ export interface FauxRule {
   text?: string;
   thinking?: string;
   toolCalls?: { name: string; args: Record<string, unknown> }[];
-  stopReason?: "stop" | "toolUse" | "error";
+  stopReason?: "stop" | "toolUse" | "error" | "length";
   errorMessage?: string;
   delayMs?: number;
+  hang?: boolean;
 }
 
 export interface RpcEvent {

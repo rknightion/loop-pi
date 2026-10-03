@@ -77,6 +77,30 @@ public statement of those contracts.
   a separate no-push right on a granted lane's foreground descendants.
   Installed homes adopt it only after a lock bump.
 
+## Request ceiling
+
+`extensions/request-ceiling/` is installed by both loop-guard entries (`installRequestCeiling`), so
+the root and every lane carry it. pi 1.0.0 has no wall-clock bound on a streaming request:
+`httpIdleTimeoutMs` is an idle timer reset by every streamed event, so a model that keeps streaming
+reasoning never trips it, and the provider `timeoutMs` (`retry.provider.timeoutMs`) is cleared once
+response headers arrive. The output budget is pi's model `maxTokens` (sent as `max_output_tokens`),
+set per model in the home's `models.json` `modelOverrides`.
+
+- Settings: `loopPi.requestCeiling: {wallClockMs, maxFollowUps}`; defaults 840000 (under the
+  watchdog's 15-minute stall reading) and 2. A wall-clock value that is not a positive number within
+  Node's timer range falls back to the default; `maxFollowUps: 0` surfaces every incident without
+  starting a turn. `session_start` resets the chain.
+- The timer runs from `turn_start` (one model request per agent-loop turn; a retry is a new turn)
+  to the assistant `message_end`. If it fires first, `ctx.abort()` ends the run.
+- An assistant `length` stop with no text and no tool call is rewritten at `message_end` to
+  `stopReason: "error"` with `EMPTY_LENGTH_ERROR`, which matches neither pi's retryable nor its
+  context-overflow patterns: no identical retry, no compaction, and loop-continuation skips the
+  error outcome instead of nudging.
+- At `agent_settled` either incident sends one `loop-request-incident` message with
+  `triggerTurn: true`, up to `maxFollowUps` in a row; any `stop` or `toolUse` response resets the
+  chain. Past the limit the message is appended without a turn and the `-exhausted` incident is
+  written; the session then stops for the watchdog to see.
+
 ## Test harness
 
 - Tests live beside the code as `*.test.ts`, run with `node --test` from the repository root (Node 26 strips
@@ -110,13 +134,19 @@ before any `await`. A missing reply means the provider extension is not loaded; 
 - Model-facing tools: `watch_process` (root and lane entries), `watch_start`, `watch_stop`,
   `wake_at`, `wake_cancel` (root only).
 - Custom message types (these start root turns, parsed by `parse_pi.py`): `loop-watch` (watcher
-  exit or deadline), `loop-wake` (timer fired), `loop-continuation` (nudge). Persisted state uses
+  exit or deadline), `loop-wake` (timer fired), `loop-continuation` (nudge), `loop-request-incident`
+  (request ceiling follow-up; also starts lane turns). Persisted state uses
   `pi.appendEntry` with `customType` `loop-wait-state` and `loop-continuation-state`.
 - loop-wait run dir: `<agentDir>/loop-wait/<sessionId>/`, receipts at
   `<run-dir>/receipts/<watch-id>.json` with fields (`phase`, `observations`,
   `last_observed_at`, `deadline`, `result`, `pid`, `command`, `interval_s`), written atomically
   (write temp + rename). Watcher output at `<run-dir>/logs/<watch-id>.log`.
 - Continuation incident files: `<agentDir>/incidents/<sessionId>-<UTC timestamp>.json`.
+- Request incident files: `<agentDir>/incidents/request/<sessionId>-<UTC timestamp>-<kind>-<attempt>[-exhausted].json`,
+  `{v: 1, session, class, at, home, cwd, model, elapsed_ms, wall_clock_ms, attempt}` with class
+  `loop-request-wall-clock-ceiling` or `loop-request-empty-length-stop`, plus `-exhausted` when the
+  follow-up chain is used up. A subdirectory, because the watchdog moves any top-level incident
+  whose class is not the continuation class to `bad/`.
 - Transcript sync trigger (loop-continuation, `transcript-sync.ts`), aligned with the Claude/Codex
   hooks: spawn detached `python3 <agentDir>/scripts/sync-transcripts.py --home <agentDir>` under
   `/usr/bin/lockf -k` on the same `$TMPDIR/.agent-transcript-sync-<home>.flock` those hooks use, when

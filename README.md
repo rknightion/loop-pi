@@ -26,6 +26,9 @@ Three pi extensions, a home template and an installer:
   timer or a finished watcher starts the next root turn.
 - `extensions/loop-continuation` re-prompts a root that stops before the loop is finished, detects
   launch files, and triggers an optional transcript sync script.
+- `extensions/request-ceiling` bounds each model request in the root and every lane by wall-clock
+  time, and turns an output-budget stop with no output into an incident. Either one sends the
+  session a follow-up message that starts its next turn, a bounded number of times in a row.
 - `home/` holds the twelve agent files (mapper, lane-worker, reviewer and so on), the pi settings
   and the policy header for the dedicated loop home.
 - `bin/loop-pi-install` builds a pinned runtime, validates it, installs one pi home and writes a

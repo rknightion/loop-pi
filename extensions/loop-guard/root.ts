@@ -12,6 +12,7 @@ import { getAgentDir, isToolCallEventType } from "@earendil-works/pi-coding-agen
 import { registerRequiredChildExtensions } from "pi-subagents/required-child-extensions";
 import { hookScriptsToRun, runHookScripts } from "./hooks.ts";
 import { installModelFamily, subagentOverrideBlock } from "./model-family.ts";
+import { installRequestCeiling } from "../request-ceiling/index.ts";
 import { bindLaneIdentity } from "./push-grant.ts";
 import { evaluateBashCommand, evaluateBgWait, evaluateSubagentCall, evaluateWatchProcess, isAsyncSubagentLaunch } from "./rules.ts";
 
@@ -180,4 +181,5 @@ export default function (pi: ExtensionAPI) {
   });
 
   installModelFamily(pi);
+  installRequestCeiling(pi);
 }

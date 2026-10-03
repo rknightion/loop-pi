@@ -7,7 +7,9 @@
 // A rule with `once: true` is used at most once per process. Rule shape:
 //   {"match": "regex", "once"?: bool, "text"?: "reply", "thinking"?: "...",
 //    "toolCalls"?: [{"name": "bash", "args": {...}}], "stopReason"?: "stop" | "toolUse" | "error",
-//    "errorMessage"?: "...", "delayMs"?: number}
+//    "errorMessage"?: "...", "delayMs"?: number, "hang"?: bool}
+// `stopReason: "length"` scripts an output-budget stop. `hang: true` never answers: the request
+// stays open until it is aborted, like a model that keeps streaming reasoning.
 // With no matching rule the reply is the text "FAUX: no rule matched".
 import { readFileSync } from "node:fs";
 import { fauxAssistantMessage, fauxProvider, fauxText, fauxThinking, fauxToolCall } from "@earendil-works/pi-ai";
@@ -19,9 +21,10 @@ type Rule = {
   text?: string;
   thinking?: string;
   toolCalls?: { name: string; args: Record<string, unknown> }[];
-  stopReason?: "stop" | "toolUse" | "error";
+  stopReason?: "stop" | "toolUse" | "error" | "length";
   errorMessage?: string;
   delayMs?: number;
+  hang?: boolean;
 };
 
 function latestText(context: any): string {
@@ -45,13 +48,20 @@ export default function (pi: ExtensionAPI) {
   const used = new Set<number>();
   const faux = fauxProvider({ provider: "faux", models: [{ id: "faux-1", reasoning: true, contextWindow: 272000, maxTokens: 128000 }] });
   faux.setResponses(
-    Array.from({ length: 10_000 }, () => async (context: any) => {
+    Array.from({ length: 10_000 }, () => async (context: any, options: any) => {
       const text = latestText(context);
       const index = rules.findIndex((rule, i) => !(rule.once && used.has(i)) && new RegExp(rule.match, "s").test(text));
       if (index < 0) return fauxAssistantMessage("FAUX: no rule matched");
       used.add(index);
       const rule = rules[index];
       if (rule.delayMs) await new Promise((resolve) => setTimeout(resolve, rule.delayMs));
+      if (rule.hang) {
+        const signal: AbortSignal | undefined = options?.signal;
+        await new Promise<void>((resolve) => {
+          if (!signal || signal.aborted) return resolve();
+          signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+      }
       const blocks: any[] = [];
       if (rule.thinking) blocks.push(fauxThinking(rule.thinking));
       if (rule.text) blocks.push(fauxText(rule.text));

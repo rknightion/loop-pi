@@ -249,6 +249,8 @@ test("a required lane guard throwing at session_start refuses the child before i
   // Exercise the unchanged root entry with a faulty sibling guard, as in an installed build.
   // Only the disposable copy's lane entry is replaced; the production lane stays untouched.
   cpSync(dirname(ROOT_EXTENSION), join(fixture, "extensions", "loop-guard"), { recursive: true });
+  // root.ts imports its sibling request-ceiling extension, as in an installed build.
+  cpSync(join(dirname(ROOT_EXTENSION), "..", "request-ceiling"), join(fixture, "extensions", "request-ceiling"), { recursive: true });
   symlinkSync(dirname(PI_SUBAGENTS_PACKAGE_DIR), join(fixture, "node_modules"), "dir");
   const startupMarker = join(cwd, "guard-started");
   const taskMarker = join(cwd, "task-ran");
