@@ -205,5 +205,11 @@ before any `await`. A missing reply means the provider extension is not loaded; 
   that is null or the gated tip; the `gate` event records the reported exit (null stays null) and
   SHA. A pre-green land `loop-state` refuses is recorded as an after-green land plus a park, and
   stops new work. The dispatcher reads LOOP.md exactly as `loop-state` does (nothing stripped).
+- Red baseline: LOOP.md may carry `baseline-red: <TASK-ID> - <reason>` (main is known red; the named
+  task owns making it green). `loop-state` refuses `land mode=pre-green` in that repo, and the
+  dispatcher predicate refuses it before `open`, so only an LLM root runs it. That root's composed
+  gate runs on the batch's base SHA and on the integrated SHA, counts as green when every check or
+  test failing on the integrated SHA also fails on the base SHA, and records both failing lists in a
+  `judgement` event. `gate-runner` gates both SHAs when the brief's Gate line names a base.
 - Runtime entry: each session appends `loop-pi-runtime` `{v:1, variant, models:{<id>:{service_tier}}}`
   at `session_start` (variant from the home receipt's `variant`).

@@ -26,6 +26,10 @@ state it names (commit SHA or worktree identity).
 - Report skipped or cancelled checks separately from passes. A skip is never a pass.
 - Do not edit source, rerun an unchanged gate to get a different result, commit or push.
 
+When the brief's Gate line names a base SHA as well as the candidate, run the gate on both, base
+first, each in a clean checkout of that SHA. In the prose, list the failing checks or tests on each.
+`exit` stays the integrated run's real exit status.
+
 Your final message is the deliverable: at most a few lines of prose, then exactly one block, with
 nothing after it. `check` is the gate command, `exit` its status, `tail` the failing lines and their
 classification, `sha` the tested SHA and `landed` false:

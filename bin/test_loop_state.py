@@ -167,6 +167,13 @@ class PreGreenTests(Base):
             self.assertIn("`%s:" % key, r.stderr)
         self.assertFalse(os.path.exists(self.log))
 
+    def test_refuses_baseline_red(self):
+        self.loop_md(**{"baseline-red": "T9 - main fails the lint leg"})
+        r = self.append(*self.LAND, ok=False)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("`baseline-red", r.stderr)
+        self.assertFalse(os.path.exists(self.log))
+
     def test_accepts_eligible_repo_and_ignores_after_green(self):
         self.loop_md(**{"release-on-push": "no"})
         self.append(*self.LAND)

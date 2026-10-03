@@ -117,6 +117,7 @@ test("dispatcherEligible refuses each failing condition with a reason", () => {
   assert.match(reasons(goalText([...three.slice(0, 2), row("T3", "c/**", "lands-after-green", "lane-worker")])), /needs a -push agent/);
   assert.match(reasons(goalText([...three.slice(0, 2), row("T3", "c/**", "lands-after-green", "lane-worker-push", "guarded")])), /T3: tier guarded/);
   assert.match(reasons(goalText([...three.slice(0, 2), row("T3", "c/**", "lands-pre-green")]), "tier: routine\nrelease-on-push: yes\n"), /not land-before-green eligible/);
+  assert.match(reasons(goalText(three), `${ROUTINE_LOOP}baseline-red: T9 - main fails the lint leg\n`), /LOOP\.md carries `baseline-red:/);
   assert.match(reasons(goalText(three, { header: "| task | owned files | gate |" })), /Envelope columns/);
   assert.match(reasons(goalText([...three.slice(0, 2), "| T3 | x | c/** |"])), /row has 3 cells/);
 });
@@ -132,6 +133,7 @@ test("the dispatcher and loop-state read LOOP.md identically for a pre-green lan
     ROUTINE_LOOP.replace("deploy-on-push: no", "Deploy-On-Push: no"),
     `${ROUTINE_LOOP}\n## Traps\nrelease-on-push: yes\n`,
     ROUTINE_LOOP.replace("release-on-push: no", "release-on-push: yes"),
+    `${ROUTINE_LOOP}baseline-red: T9 - main fails the lint leg\n`,
   ];
   for (const text of variants) {
     const repo = mkdtempSync(join(tmpdir(), "loop-md-parity-"));

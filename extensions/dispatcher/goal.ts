@@ -156,12 +156,18 @@ export function guardedExtra(loop: LoopMd): string[] {
   return splitList(loop.keys["guarded-paths"] ?? "");
 }
 
-/** S4: land-before-green needs a routine repo that neither releases nor deploys on push. The
+/** S4: land-before-green needs a routine repo that neither releases nor deploys on push and whose
+ *  LOOP.md carries no `baseline-red` (a main known to be red). The
  *  fourth leg, `ci-required` matching the branch-protection required checks, is loop-lint's: it
  *  reads them through `gh api` when the goal and LOOP.md are written. Neither this check nor
  *  loop-state's (which is offline) repeats it. */
 export function preGreenEligible(loop: LoopMd): boolean {
-  return loop.keys.tier === "routine" && loop.keys["release-on-push"] === "no" && loop.keys["deploy-on-push"] === "no";
+  return (
+    loop.keys.tier === "routine" &&
+    loop.keys["release-on-push"] === "no" &&
+    loop.keys["deploy-on-push"] === "no" &&
+    !Object.hasOwn(loop.keys, "baseline-red")
+  );
 }
 
 /** The tier a task runs at: guarded when its owned files touch the guarded set (S4 decision 4),
@@ -181,9 +187,10 @@ export interface Eligibility {
 }
 
 /** S7 planner predicate: a dispatcher root only when every task is routine with owned files, an
- *  acceptance check, a gate and `lands-*` landing; no ops grant; at least three tasks. The Envelope
- *  table has no dependency column, so file order (overlapping owned files run in table order) is the
- *  only ordering there is. Pure: takes the goal and LOOP.md text (or their parsed forms) and,
+ *  acceptance check, a gate and `lands-*` landing; no ops grant; at least three tasks; and LOOP.md
+ *  carries no `baseline-red`, whose base-versus-integrated gate judgement only an LLM root makes.
+ *  The Envelope table has no dependency column, so file order (overlapping owned files run in table
+ *  order) is the only ordering there is. Pure: takes the goal and LOOP.md text (or their parsed forms) and,
  *  optionally, the repository's tracked files for the guarded-path check. */
 export function dispatcherEligible(
   goal: string | Goal,
@@ -195,6 +202,9 @@ export function dispatcherEligible(
   const reasons: string[] = [...g.errors];
   if (g.tasks.length < 3) reasons.push(`the Envelope has ${g.tasks.length} task(s); a dispatcher needs at least 3`);
   if (hasOpsGrant(g)) reasons.push("the goal grants ops");
+  if (Object.hasOwn(loop.keys, "baseline-red")) {
+    reasons.push(`LOOP.md carries \`baseline-red: ${loop.keys["baseline-red"]}\`; a known-red main needs an LLM root`);
+  }
   const ids = new Set<string>();
   for (const t of g.tasks) {
     if (ids.has(t.id)) reasons.push(`task id ${t.id} appears twice`);

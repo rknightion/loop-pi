@@ -327,6 +327,11 @@ def check_pre_green_eligible(log_path):
                 "land mode=pre-green refused: LOOP.md needs `%s: %s` (found %r)"
                 % (key, value, keys.get(key))
             )
+    if "baseline-red" in keys:
+        raise Rejected(
+            "land mode=pre-green refused: LOOP.md carries `baseline-red: %s`; a known-red main "
+            "never lands pre-green" % keys["baseline-red"]
+        )
 
 
 def do_append(log_path, event, by):
