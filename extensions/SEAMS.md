@@ -9,15 +9,15 @@ public statement of those contracts.
 
 ## Runtime facts
 
-- pi 0.99.2 loads `.ts` extensions through jiti. An entry file default-exports
+- pi 1.0.0 loads `.ts` extensions through jiti. An entry file default-exports
   `(pi: ExtensionAPI) => void | Promise<void>`. Type imports come from
   `@earendil-works/pi-coding-agent`; `@earendil-works/pi-ai` resolves through pi's loader at
   runtime (it is nested under pi-coding-agent in `node_modules`, not top level).
-- **Project trust (pi-subagents 0.74.0):** children follow the parent session's project trust, so
+- **Project trust (pi-subagents 0.75.0):** children follow the parent session's project trust, so
   with `defaultProjectTrust: "never"` a child no longer loads the target repository's `.pi/`
   settings, system prompt files, skills or extensions. Agent discovery is not trust-gated:
   repository `.pi/agents` and `.agents/*.md` still outrank the home's agents. `loop-pi-preflight` stays.
-- **Tool list (pi 0.99.2 / pi-subagents 0.74.0):** `toolActivation` is `"eager"`; never `"auto"`.
+- **Tool list (pi 1.0.0 / pi-subagents 0.75.0):** `toolActivation` is `"eager"`; never `"auto"`.
   codex-lb never acknowledges a request carrying an `additional_tools` item, which pi sends for a
   mid-conversation tool addition when a model's `compat.supportsAdditionalTools` is true. The overlay
   sets that and `supportsToolSearch` false for every family model, so a changed tool list is resent
@@ -47,12 +47,16 @@ public statement of those contracts.
   `pi-subagents/required-child-extensions`; returns `{ dispose() }`; one registration per parent
   session; call at `session_start` with `ctx.sessionManager.getSessionId()`, dispose at
   `session_shutdown`. The e2e child-block test (`loop-guard/e2e.test.ts`) proves an import from this extension shares
-  the module instance pi-subagents itself uses.
+  the module instance pi-subagents itself uses. pi-subagents 0.75.0 fails the child launch closed
+  when a required child extension fails to load or throws during startup ("Required child extension
+  failed during startup"), so a lane-guard startup error aborts the lane rather than running it unguarded.
+- pi-subagents 0.75.0 appends every async run, including its task text, to
+  `<agentDir>/run-history.jsonl` in the loop-pi home, not the target repository.
 - Non-TTY stdin: pi in `--mode json`/`--print` waits on stdin. Tests close it (`stdio: ["ignore", ...]`
   or `</dev/null`). RPC mode keeps stdin open by design.
 - **Push grant (async single-agent launches):** the root guard overwrites the entire
   `extensionBindings` tool input with `{"loop-pi.guard/1":{"agent":<selected agent>}}` after
-  validating the launch. pi-subagents 0.74.0 delivers it in `PI_SUBAGENT_EXTENSION_BINDINGS`
+  validating the launch. pi-subagents 0.75.0 delivers it in `PI_SUBAGENT_EXTENSION_BINDINGS`
   to the detached child. For directly bound detached children, only `lane-worker-push`,
   `lane-worker-retry-push` and `complex-worker-push` may make plain `git push`;
   a missing, malformed or unknown identity
@@ -62,7 +66,7 @@ public statement of those contracts.
   and replacement of model-supplied bindings. This remains an honest-mistake fence, not an
   OS security boundary. **Foreground nested children inherit the detached parent's push
   grant, even when the nested agent is not one of the three push agents.** pi-subagents
-  0.74.0 creates foreground children in the parent's process and does not apply per-child
+  0.75.0 creates foreground children in the parent's process and does not apply per-child
   `processEnv` there; the lane extension therefore reads the parent's binding. Denying
   that inheritance requires a supported per-session identity transport, not parsing prompt
   text or mutating shared process environment. A child without a binding denies pushes,
