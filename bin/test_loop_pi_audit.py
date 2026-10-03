@@ -14,16 +14,17 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(HERE, "loop-pi-audit")
+GIT = "/usr/bin/git" if sys.platform == "darwin" else shutil.which("git")
 
 
 def git(repo, *args, check=True):
-    return subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True, check=check)
+    return subprocess.run([GIT, "-C", repo, *args], capture_output=True, text=True, check=check, timeout=60)
 
 
 def init_repo_with_remote(tmp, name):
     remote = os.path.join(tmp, f"{name}-remote.git")
     repo = os.path.join(tmp, name)
-    subprocess.run(["git", "init", "--bare", "-q", remote], check=True)
+    subprocess.run([GIT, "init", "--bare", "-q", remote], check=True, timeout=60)
     os.makedirs(repo)
     git(repo, "init", "-q")
     git(repo, "config", "user.email", "test@example.com")
@@ -49,7 +50,7 @@ def make_bin_without_gh(tmp):
     """A PATH directory that has `git` (symlinked from the real one) but no `gh`."""
     fake_bin = os.path.join(tmp, "fake-bin")
     os.makedirs(fake_bin, exist_ok=True)
-    real_git = shutil.which("git")
+    real_git = GIT
     assert real_git, "git must be on PATH to build this fixture"
     os.symlink(real_git, os.path.join(fake_bin, "git"))
     return fake_bin
@@ -71,7 +72,7 @@ def make_bin_with_gh_stub(tmp, releases_json="[]"):
     """
     fake_bin = os.path.join(tmp, "fake-bin-gh-ok")
     os.makedirs(fake_bin, exist_ok=True)
-    real_git = shutil.which("git")
+    real_git = GIT
     assert real_git, "git must be on PATH to build this fixture"
     os.symlink(real_git, os.path.join(fake_bin, "git"))
     gh_stub = os.path.join(fake_bin, "gh")
@@ -87,6 +88,55 @@ def snapshot(out_path, *repos, env_overrides=None):
     result = run_audit("snapshot", "--out", out_path, *repos, env_overrides=env_overrides)
     assert result.returncode == 0, result.stderr
     return result
+
+
+class DuplicateRemoteTests(unittest.TestCase):
+    def test_duplicate_grants_and_ungranted_moves(self):
+        # Exercise snapshot and compare through the CLI against a real bare remote.
+        for grant_paths in ((), (0,), (1,), (0, 1)):
+            with self.subTest(grant_paths=grant_paths), tempfile.TemporaryDirectory() as tmp:
+                first, remote = init_repo_with_remote(tmp, "first")
+                git(remote, "symbolic-ref", "HEAD", "refs/heads/main")
+                second = os.path.join(tmp, "second")
+                subprocess.run([GIT, "clone", "--no-local", "-q", remote, second],
+                               check=True, timeout=60)
+                paths = (first, second)
+                env = {"PATH": make_bin_with_gh_stub(tmp)}
+                before, after = (os.path.join(tmp, f"{phase}.json") for phase in ("before", "after"))
+                snapshot(before, *paths, env_overrides=env)
+                git(first, "commit", "--allow-empty", "-q", "-m", "advance")
+                git(first, "push", "-q", "origin", "main")
+                snapshot(after, *paths, env_overrides=env)
+                grants = os.path.join(tmp, "grants.json")
+                with open(grants, "w") as fh:
+                    json.dump({paths[i]: ["refs/heads/main"] for i in grant_paths}, fh)
+                result = run_audit("compare", before, after, "--grants", grants, env_overrides=env)
+                self.assertEqual(result.returncode, 0 if grant_paths else 1, result.stdout + result.stderr)
+                moves = [line for line in result.stdout.splitlines() if "ref moved: refs/heads/main " in line]
+                self.assertEqual(len(moves), 1 if grant_paths else 2, result.stdout)
+                if grant_paths:
+                    self.assertIn("[GRANTED]", moves[0])
+                    self.assertNotIn("UNGRANTED", result.stdout)
+                else:
+                    for path in paths:
+                        self.assertTrue(any(f"[{path}]" in line and "[UNGRANTED]" in line for line in moves))
+
+    def test_single_path_grant_is_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _ = init_repo_with_remote(tmp, "single")
+            env = {"PATH": make_bin_with_gh_stub(tmp)}
+            before, after = (os.path.join(tmp, f"{phase}.json") for phase in ("before", "after"))
+            snapshot(before, repo, env_overrides=env)
+            git(repo, "commit", "--allow-empty", "-q", "-m", "advance")
+            git(repo, "push", "-q", "origin", "main")
+            snapshot(after, repo, env_overrides=env)
+            grants = os.path.join(tmp, "grants.json")
+            with open(grants, "w") as fh:
+                json.dump({repo: ["refs/heads/main"]}, fh)
+            for granted in (False, True):
+                result = run_audit("compare", before, after, *(["--grants", grants] if granted else []), env_overrides=env)
+                self.assertEqual(result.returncode, 0 if granted else 1, result.stdout + result.stderr)
+                self.assertEqual(result.stdout.count("ref moved: refs/heads/main "), 1)
 
 
 class SnapshotTests(unittest.TestCase):

@@ -8,7 +8,11 @@ than empty when `gh` cannot be used).
 `compare BEFORE AFTER [--grants FILE]` diffs two snapshots and lists every
 added, moved or deleted ref, tag and release, marking each as covered or not
 by a grants file (`{"<repo>": ["refs/heads/main", ...]}`, matched by the exact
-repo key used on the snapshot command line). Exits 1 if any change is not
+repo key used on the snapshot command line). For remote refs, paths whose
+snapshots record the same unchanged remote URL share explicit ref grants:
+a granted move is reported once; ungranted moves remain visible under every
+path. Legacy snapshots without URLs do not share grants. Local tags and
+releases remain path-specific. Exits 1 if any change is not
 covered by a grant. Ungranted refs/pull/* changes are reported as FOREIGN,
 not violations. HEAD and peeled tags inherit their target's grant. A repo's
 grants may also be {"refs": [...], "allow_non_fast_forward": [...]}; the
@@ -182,6 +186,12 @@ def snapshot_repo(repo: str) -> dict:
     remotes = {}
     for remote in git_remotes(repo):
         remotes[remote] = git_ls_remote_refs(repo, remote)
+        try:
+            url = run(["git", "-C", repo, "remote", "get-url", remote])
+            if url.returncode == 0 and url.stdout.strip():
+                remotes[remote]["url"] = url.stdout.strip()
+        except (OSError, subprocess.TimeoutExpired):
+            pass  # Missing identity never permits sharing grants.
     return {
         "remotes": remotes,
         "tags": git_local_tags(repo),
@@ -471,8 +481,26 @@ def automation_actor(repo: str, remote: str, ref: str, old: str, new: str,
         return None
 
 
+def shared_remote_grants(before_repos: dict, after_repos: dict, grants_by_repo: dict) -> dict:
+    """Share only explicit remote-ref authority, identified from both snapshots."""
+    shared = {}
+    for name in sorted(set(before_repos) & set(after_repos)):
+        grants = grants_by_repo.get(name, [])
+        refs = set(grants.get("refs", [])) if isinstance(grants, dict) else set(grants)
+        rewrites = set(grants.get("allow_non_fast_forward", [])) & refs if isinstance(grants, dict) else set()
+        for remote, b in before_repos[name].get("remotes", {}).items():
+            a = after_repos[name].get("remotes", {}).get(remote, {})
+            url = b.get("url")
+            if url and url == a.get("url") and b.get("available") and a.get("available"):
+                authority = shared.setdefault(url, {"refs": set(), "rewrites": set()})
+                authority["refs"].update(refs)
+                authority["rewrites"].update(rewrites)
+    return shared
+
+
 def compare_repo(name: str, before: dict, after: dict, grants: list[str] | dict, report: list[str],
-                 times: tuple[str, str] = ("", "")) -> bool:
+                 times: tuple[str, str] = ("", ""), shared: dict | None = None,
+                 seen_granted: set | None = None) -> bool:
     """Returns True if changes are granted or foreign automation."""
     automation = grants.get("automation", []) if isinstance(grants, dict) else []
     rewrites = set(grants.get("allow_non_fast_forward", [])) if isinstance(grants, dict) else set()
@@ -492,6 +520,10 @@ def compare_repo(name: str, before: dict, after: dict, grants: list[str] | dict,
             )
             all_covered = False
             continue
+        url = b.get("url") if b.get("url") == a.get("url") else None
+        authority = (shared or {}).get(url, {})
+        remote_grants = authority.get("refs", grants)
+        remote_rewrites = authority.get("rewrites", rewrites)
         changes = diff_ref_map(b.get("refs", {}), a.get("refs", {}))
         before_head = b.get("symrefs", {}).get("HEAD")
         after_head = a.get("symrefs", {}).get("HEAD")
@@ -515,23 +547,30 @@ def compare_repo(name: str, before: dict, after: dict, grants: list[str] | dict,
                     mark = "UNVERIFIED HEAD target"
                     all_covered = False
                 else:
-                    covered = all(t in grants for t in targets)
+                    covered = all(t in remote_grants for t in targets)
                     mark = "GRANTED derived HEAD" if covered else "UNGRANTED derived HEAD"
                     all_covered = all_covered and covered
-            elif ref.startswith("refs/pull/") and ref not in grants:
+            elif ref.startswith("refs/pull/") and ref not in remote_grants:
                 mark = "FOREIGN"
             else:
                 if ref.startswith("refs/tags/") and ref.endswith("^{}"):
                     target = ref[:-3]
-                covered = target in grants
+                covered = target in remote_grants
                 if change == "moved" and ref == target:
                     mark, contributes_covered = moved_ref_mark(
                         name, remote, ref, before_sha, after_sha, covered,
-                        ref.startswith("refs/heads/") and ref in rewrites)
+                        ref.startswith("refs/heads/") and ref in remote_rewrites)
                     all_covered = all_covered and contributes_covered
                 else:
                     all_covered = all_covered and covered
                     mark = "GRANTED" if covered else "UNGRANTED"
+            # Deduplicate only verified granted outcomes, never violations or unknowns.
+            head_identity = (before_head, after_head) if ref == "HEAD" else ()
+            key = (url, change, ref, before_sha, after_sha, head_identity, mark)
+            if url and mark.startswith("GRANTED") and seen_granted is not None:
+                if key in seen_granted:
+                    continue
+                seen_granted.add(key)
             report.append(f"[{name}] remote '{remote}' ref {change}: {ref} ({before_sha[:12] or '-'} -> {after_sha[:12] or '-'}) [{mark}]")
 
     before_tags = before.get("tags", {})
@@ -597,6 +636,8 @@ def cmd_compare(args: argparse.Namespace) -> int:
     after_repos = after.get("repos", {})
     all_names = sorted(set(before_repos) | set(after_repos))
 
+    shared = shared_remote_grants(before_repos, after_repos, grants_by_repo)
+    seen_granted: set = set()
     report: list[str] = []
     all_ok = True
     any_change = False
@@ -615,7 +656,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
         a = after_repos[name]
         pre_len = len(report)
         covered = compare_repo(name, b, a, grants_by_repo.get(name, []), report,
-                               (before.get("taken_at", ""), after.get("taken_at", "")))
+                               (before.get("taken_at", ""), after.get("taken_at", "")), shared, seen_granted)
         if len(report) > pre_len:
             any_change = True
         all_ok = all_ok and covered
