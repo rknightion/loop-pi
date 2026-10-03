@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { deriveLogPath, mapNotifyStatus, parseBrief, parseLaneReturn, returnEvent, runIdFromText } from "./core.ts";
+import { deriveLogPath, parseBrief, parseLaneReturn, returnEvent, runIdFromText } from "./core.ts";
 
 test("parseBrief reads the header line and an optional Deadline line", () => {
   const brief = parseBrief("\nLane: L3 · Task: T-42.01 · Tier: guarded\nObjective: x\nDeadline: 2026-10-03T12:00:00Z\n");
@@ -42,15 +42,8 @@ test("parseLaneReturn takes the last valid v2 or legacy block", () => {
   assert.equal(parseLaneReturn("no block"), null);
 });
 
-test("mapNotifyStatus", () => {
-  assert.equal(mapNotifyStatus("completed"), "complete");
-  assert.equal(mapNotifyStatus("stopped"), "partial");
-  assert.equal(mapNotifyStatus("failed"), "failed");
-  assert.equal(mapNotifyStatus(undefined), "failed");
-});
-
 test("returnEvent uses the block when present and drops fields that do not fit", () => {
-  const ev = returnEvent("L1", "r1", "completed", {
+  const ev = returnEvent("L1", "r1", {
     v: 2,
     status: "complete",
     sha: "abc",
@@ -67,7 +60,11 @@ test("returnEvent uses the block when present and drops fields that do not fit",
     ev: "return", lane: "L1", run: "r1", status: "complete", sha: "abc", landed: false, check: "just check",
     exit: 0, ci: "123", coderabbit: { ran: true, major: 0, unreviewed: 2 }, base: "def", questions: ["q"],
   });
-  const bad = returnEvent("L1", "r1", "failed", { status: "great", exit: "zero", coderabbit: { ran: 1 }, questions: [1] });
+  const bad = returnEvent("L1", "r1", { status: "great", exit: "zero", coderabbit: { ran: 1 }, questions: [1] });
   assert.deepEqual(bad, { ev: "return", lane: "L1", run: "r1", status: "failed" });
-  assert.deepEqual(returnEvent("L1", "r1", "completed", null), { ev: "return", lane: "L1", run: "r1", status: "complete" });
+});
+
+test("a run that finished without a usable lane-return block is recorded failed, as the dispatcher reads it", () => {
+  assert.deepEqual(returnEvent("L1", "r1", null), { ev: "return", lane: "L1", run: "r1", status: "failed" });
+  assert.equal(returnEvent("L1", "r1", { status: "great" }).status, "failed");
 });

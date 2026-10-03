@@ -163,6 +163,18 @@ test("a completion that beats its launch result is flushed after the dispatch", 
   assert.equal(log[1].status, "failed");
 });
 
+test("a run pi-subagents calls completed but that returned no lane-return block is recorded failed", async () => {
+  const r = makeRepo();
+  const h = harness({ reportPath: r.report, cwd: r.repo });
+  h.start();
+  h.call("tc1", { agent: "lane-worker", task: BRIEF });
+  h.result("tc1", "Async: lane-worker [run1]", { runId: "run1" });
+  h.emit("subagent:async-complete", { runId: "run1", sessionId: SESS, success: true, results: [{ status: "completed", summary: "All done, trust me." }] });
+  const log = await until(() => events(r.log).length >= 2 && events(r.log));
+  assert.equal(log[1].ev, "return");
+  assert.equal(log[1].status, "failed");
+});
+
 test("invalid lane-return fields are dropped and the rest recorded", async () => {
   const r = makeRepo();
   const h = harness({ reportPath: r.report, cwd: r.repo });

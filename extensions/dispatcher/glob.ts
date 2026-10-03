@@ -6,6 +6,8 @@
 // grammar: it walks the product of the two patterns' automata, so `src/**` and `**/auth/**`
 // overlap (src/auth/x) while `src/a/**` and `src/b/**` do not.
 
+import { posix } from "node:path";
+
 type Elem =
   | { k: "lit"; c: string }
   | { k: "one" } // ? or [...]: one non-slash character
@@ -145,12 +147,32 @@ function intersectsCompiled(a: Elem[], b: Elem[]): boolean {
   return false;
 }
 
-/** Normalises an owned-files entry: strips `./` and leading `/`; `dir/` means everything under it.
- *  A bare entry is a file, as the goal format says owned files are globs. */
+/** An owned-files entry as repo-relative globs, one per brace alternative, each normalised with
+ *  `path.posix.normalize` (`a/../b.ts` is `b.ts`, `src//x.ts` is `src/x.ts`); `dir/` means
+ *  everything under it, and a bare entry is a file. Null when an alternative leaves the repository:
+ *  it still holds a `..` segment or starts with `/` once normalised. */
+function normaliseOwned(entry: string): string[] | null {
+  const raw = entry.trim().replace(/^`|`$/g, "").trim();
+  if (!raw) return [];
+  const out: string[] = [];
+  for (const alt of expandBraces(raw)) {
+    const glob = posix.normalize(alt);
+    if (glob.startsWith("/") || glob.split("/").includes("..")) return null;
+    if (glob === "." || glob === "./") out.push("**");
+    else out.push(glob.endsWith("/") ? `${glob}**` : glob);
+  }
+  return out;
+}
+
+/** The repo-relative globs of an owned-files entry; none for an entry that leaves the repository
+ *  (see `invalidOwned`, which every check below treats as failing closed). */
 export function ownedPatterns(entry: string): string[] {
-  const glob = entry.trim().replace(/^`|`$/g, "").replace(/^\.\//, "").replace(/^\/+/, "");
-  if (!glob) return [];
-  return [glob.endsWith("/") ? `${glob}**` : glob];
+  return normaliseOwned(entry) ?? [];
+}
+
+/** The owned-files entries that leave the repository once normalised (`../x`, `a/../../b`, `/etc`). */
+export function invalidOwned(owned: readonly string[]): string[] {
+  return owned.filter((entry) => normaliseOwned(entry) === null);
 }
 
 /** True when some path matches both globs. */
@@ -168,8 +190,10 @@ export function globMatch(path: string, glob: string): boolean {
   return expandBraces(glob).some((g) => intersectsCompiled(literal(path), compile(g)));
 }
 
-/** True when any glob of one owned list overlaps any glob of the other. */
+/** True when any glob of one owned list overlaps any glob of the other. An entry that leaves the
+ *  repository overlaps everything, so it never runs beside another task. */
 export function ownedOverlap(a: readonly string[], b: readonly string[]): boolean {
+  if (invalidOwned(a).length || invalidOwned(b).length) return true;
   const pa = a.flatMap(ownedPatterns);
   const pb = b.flatMap(ownedPatterns);
   return pa.some((x) => pb.some((y) => globsIntersect(x, y)));
@@ -206,25 +230,29 @@ function guardedPattern(glob: string): string {
 /** The guarded globs the owned list touches (built-in set plus LOOP.md `guarded-paths`). An owned
  *  glob touches a guarded glob when the glob's own text, read as a path, matches it (`src/auth/**`,
  *  `deploy.tf`, each brace alternative separately), or when a repository file it matches also matches it. Plain glob overlap is not
- *  used: every `**` glob overlaps `**\/auth/**`. */
+ *  used: every `**` glob overlaps `**\/auth/**`. Owned entries are normalised first, and an entry
+ *  that leaves the repository is itself reported as a hit (`outside the repository: <entry>`). */
 export function guardedHits(owned: readonly string[], extraGuarded: readonly string[] = [], files: readonly string[] = []): string[] {
   const patterns = owned.flatMap(ownedPatterns);
   const touched = files.filter((f) => patterns.some((p) => globMatch(f, p)));
   // Read each brace alternative as its own path, so `src/{auth,util}/**` is checked as `src/auth/**`.
   const literals = patterns.flatMap(expandBraces);
-  return [...BUILTIN_GUARDED, ...extraGuarded]
+  const hits = [...BUILTIN_GUARDED, ...extraGuarded]
     .filter((g) => g.trim())
     .filter((g) => {
       const guard = guardedPattern(g);
       return literals.some((p) => globMatch(p, guard)) || touched.some((f) => globMatch(f, guard));
     });
+  return [...hits, ...invalidOwned(owned).map((entry) => `outside the repository: ${entry.trim()}`)];
 }
 
 /** Approximate containment for a split subtask: the child glob, read literally and with its
  *  wildcards filled in, must match one parent glob. */
 export function ownedWithin(child: string, parent: readonly string[]): boolean {
   const parents = parent.flatMap(ownedPatterns);
-  return ownedPatterns(child).every((c) => {
+  const children = normaliseOwned(child);
+  if (children === null) return false;
+  return children.every((c) => {
     const probes = [c, c.replace(/\*\*/g, "p/q").replace(/\*/g, "p").replace(/\?/g, "p")];
     return parents.some((p) => probes.every((probe) => globMatch(probe, p)));
   });

@@ -451,5 +451,30 @@ class LauncherTests(unittest.TestCase):
         self.assertTrue(log[0].startswith("node run=none"))
 
 
+LANE_RETURN_V2 = """```lane-return
+{"v":2,"lane":"<id>","status":"complete|partial|blocked|failed","sha":"<full>|null","landed":true|false,
+ "base":"<full SHA>","check":"<exact command>","exit":<int>|null,"tail":"<last <= 40 lines>",
+ "ci":"<run id>|null","coderabbit":{"ran":true|false,"major":<n>,"unreviewed":<n>}|null,
+ "questions":["..."]}
+```"""
+
+
+class AgentReturnContractTests(unittest.TestCase):
+    """Every lane agent carries the lane-return v2 block itself: an overlay replaces
+    home/lane-policy.md at install time, so the policy cannot be where the contract lives. The
+    triager returns a `triage` block instead, which its own file defines."""
+
+    def test_every_lane_agent_carries_the_lane_return_v2_block(self):
+        agents = sorted((HERE.parent / "home/agents").glob("*.md"))
+        self.assertTrue(agents)
+        for path in agents:
+            text = path.read_text()
+            self.assertNotIn("Return exactly:", text, path.name)
+            if path.stem == "triager":
+                self.assertNotIn("```lane-return", text, path.name)
+                continue
+            self.assertEqual(text.count(LANE_RETURN_V2), 1, f"{path.name} lacks the exact lane-return v2 block")
+
+
 if __name__ == "__main__":
     unittest.main()

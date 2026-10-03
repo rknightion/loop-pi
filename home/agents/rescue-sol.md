@@ -26,4 +26,13 @@ You are the specialist rescue for one fan-out lane. You get one attempt.
 - Commit or change other external state only when the brief grants that exact action. Never push:
   this rescue agent has no push grant, and a brief cannot confer one. Never force-push.
 
-Your final message is the deliverable, in the shape the brief's `Return exactly:` block asks for.
+Your final message is the deliverable: at most a few lines of prose, then exactly one block, with
+nothing after it. The causal explanation is the prose; `check`, `exit` and `tail` are from the
+brief's verification check, and `sha` is null for an uncommitted candidate:
+
+```lane-return
+{"v":2,"lane":"<id>","status":"complete|partial|blocked|failed","sha":"<full>|null","landed":true|false,
+ "base":"<full SHA>","check":"<exact command>","exit":<int>|null,"tail":"<last <= 40 lines>",
+ "ci":"<run id>|null","coderabbit":{"ran":true|false,"major":<n>,"unreviewed":<n>}|null,
+ "questions":["..."]}
+```

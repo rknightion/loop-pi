@@ -133,13 +133,16 @@ export function composedGate(goal: Goal, loop: LoopMd): string | undefined {
   return gates.size === 1 ? [...gates][0] || undefined : undefined;
 }
 
-/** The key: value lines that open LOOP.md, up to the first heading. */
+/** The key: value lines that open LOOP.md, up to the first `## ` heading; the first of a key wins.
+ *  This is exactly loop-state's reading (`read_loop_md_keys` in bin/loop-state): the value is the
+ *  rest of the line with its surrounding blanks trimmed and nothing else removed, so
+ *  `release-on-push: no (tags only)` is not `no`. A test runs both readers on the same files. */
 export function parseLoopMd(text: string | null | undefined): LoopMd {
   const keys: Record<string, string> = {};
   for (const line of (text ?? "").split(/\r?\n/)) {
-    if (/^##\s/.test(line)) break;
-    const m = /^([a-z][a-z-]*)\s*:\s*(.*?)\s*(?:\(.*\))?\s*$/.exec(line);
-    if (m && !(m[1] in keys)) keys[m[1]] = m[2];
+    if (line.startsWith("## ")) break;
+    const m = /^([A-Za-z][A-Za-z0-9_-]*):[ \t]*(.*?)[ \t]*$/.exec(line);
+    if (m && !Object.hasOwn(keys, m[1])) keys[m[1]] = m[2];
   }
   return { keys };
 }
@@ -154,7 +157,9 @@ export function guardedExtra(loop: LoopMd): string[] {
 }
 
 /** S4: land-before-green needs a routine repo that neither releases nor deploys on push. The
- *  `ci-required` match against branch protection is loop-lint's and loop-state's check. */
+ *  fourth leg, `ci-required` matching the branch-protection required checks, is loop-lint's: it
+ *  reads them through `gh api` when the goal and LOOP.md are written. Neither this check nor
+ *  loop-state's (which is offline) repeats it. */
 export function preGreenEligible(loop: LoopMd): boolean {
   return loop.keys.tier === "routine" && loop.keys["release-on-push"] === "no" && loop.keys["deploy-on-push"] === "no";
 }

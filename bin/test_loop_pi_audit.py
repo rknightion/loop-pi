@@ -4,6 +4,7 @@ runnable as `python3 -m unittest bin.test_loop_pi_audit -v` from `pi/`, or
 directly as a script. Builds scratch git repos with a local bare "remote"
 (file-path, no network) under a temp dir.
 """
+import hashlib
 import json
 import os
 import shutil
@@ -905,6 +906,43 @@ class OpsReleaseTests(unittest.TestCase):
         result = run_audit("closeout", "--ops", self.ops_file("release"), env_overrides=env)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("GRANTED ops release", result.stdout)
+
+    def sha256_of(self, path):
+        with open(path, "rb") as fh:
+            return hashlib.sha256(fh.read()).hexdigest()
+
+    def test_ops_sha256_must_match_the_ops_file(self):
+        after = self.release_v9()
+        ops = self.ops_file("release")
+        good = run_audit("compare", self.before, after, "--ops", ops, "--ops-sha256", self.sha256_of(ops))
+        self.assertEqual(good.returncode, 0, good.stdout + good.stderr)
+        self.assertIn("GRANTED ops release", good.stdout)
+        self.assertNotIn("unverified", good.stderr)
+        bad = run_audit("compare", self.before, after, "--ops", ops, "--ops-sha256", "0" * 64)
+        self.assertEqual(bad.returncode, 2, bad.stdout + bad.stderr)
+        self.assertIn("does not match", bad.stderr)
+        self.assertNotIn("GRANTED ops release", bad.stdout)
+
+    def test_ops_without_a_sha256_works_but_warns_unverified(self):
+        result = run_audit("compare", self.before, self.release_v9(), "--ops", self.ops_file("release"))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("unverified", result.stderr)
+
+    def test_closeout_refuses_an_ops_file_that_changed_since_launch(self):
+        run_dir = os.path.join(self.tmp, "run")
+        os.makedirs(run_dir)
+        env = {"PATH": self.gh_bin, "LOOP_PI_RUN_DIR": run_dir}
+        self.assertEqual(run_audit("begin", self.repo, env_overrides=env).returncode, 0)
+        ops = self.ops_file("deploy")
+        frozen = self.sha256_of(ops)
+        git(self.repo, "tag", "v9")
+        git(self.repo, "push", "-q", "origin", "v9")
+        self.set_releases('[{"tagName": "v8"}, {"tagName": "v9"}]')
+        self.ops_file("release")  # rewritten mid-run to grant a release
+        result = run_audit("closeout", "--ops", ops, "--ops-sha256", frozen, env_overrides=env)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("does not match", result.stderr)
+        self.assertNotIn("GRANTED ops release", result.stdout)
 
 
 if __name__ == "__main__":

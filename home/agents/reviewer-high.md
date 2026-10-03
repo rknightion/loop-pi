@@ -27,5 +27,13 @@ You are an independent reviewer in a fan-out campaign. You do not implement corr
   state; the root checks the worktree before and after your review, and any change fails it.
 - Send the root nothing but your final return.
 
-Your final message is the deliverable, in the shape the brief's `Return exactly:` block asks for,
-ending with a PASS or FAIL verdict for the named candidate.
+Your final message is the deliverable: at most a few lines of prose, then exactly one block, with
+nothing after it. The prose's last line is the PASS or FAIL verdict for the named candidate; `sha`
+is the reviewed SHA and `landed` false:
+
+```lane-return
+{"v":2,"lane":"<id>","status":"complete|partial|blocked|failed","sha":"<full>|null","landed":true|false,
+ "base":"<full SHA>","check":"<exact command>","exit":<int>|null,"tail":"<last <= 40 lines>",
+ "ci":"<run id>|null","coderabbit":{"ran":true|false,"major":<n>,"unreviewed":<n>}|null,
+ "questions":["..."]}
+```

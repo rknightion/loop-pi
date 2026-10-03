@@ -21,6 +21,7 @@ import sys
 from datetime import datetime, timezone
 
 VERSION = 1
+GATE_AGENT = "gate-runner"
 DIGEST_MAX_BYTES = 4096
 JUDGEMENT_MAX_BYTES = 2048
 JUDGEMENTS_IN_DIGEST = 5
@@ -73,7 +74,7 @@ SCHEMA = {
         },
     ),
     "gate": (
-        {"scope": ("lane", "composed"), "sha": STR, "cmd": STR, "exit": INT},
+        {"scope": ("lane", "composed"), "sha": STR, "cmd": STR, "exit": INT_OR_NULL},
         {"lane": STR, "base": STR},
     ),
     "accept": ({"task": STR, "accepted": BOOL, "reason": STR}, {"lane": STR}),
@@ -229,28 +230,75 @@ def utc_now():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _last_seq(data):
-    """Seq of the last non-empty line of the log bytes (0 for an empty log)."""
+def _event_seq(raw):
+    """The integer seq of one complete log line, else None."""
+    try:
+        obj = json.loads(raw.decode("utf-8"))
+    except ValueError:
+        return None
+    seq = obj.get("seq") if isinstance(obj, dict) else None
+    return seq if _is_int(seq) else None
+
+
+def _is_torn(raw):
+    """A partial write of an event: the start of a JSON object that does not parse."""
+    if not raw.lstrip().startswith(b"{"):
+        return False
+    try:
+        json.loads(raw.decode("utf-8"))
+    except ValueError:
+        return True
+    return False
+
+
+def _tail_state(data):
+    """(last seq, prefix) for an append to a log holding `data`. The prefix is written before the
+    new event and is a newline when the log does not end with one.
+
+    The writer puts each event and its newline down in one write under the lock, so a last line
+    with no newline is a write that was cut short. When it parses with an integer seq it is a
+    complete event that lost only its newline: it is kept and the seq continues from it. When it
+    is torn (the start of an event that does not parse) it held no complete event: the new event
+    starts on a fresh line, the torn bytes stay where they are, and reads skip them. Anything else
+    is refused."""
     if not data:
-        return 0
-    if not data.endswith(b"\n"):
-        raise Rejected("log does not end with a newline; run `loop-state check` and repair it")
+        return 0, b""
+    prefix = b""
     lines = data.split(b"\n")
+    if not data.endswith(b"\n"):
+        tail = lines.pop()
+        seq = _event_seq(tail)
+        if seq is not None:
+            return seq, b"\n"
+        if not _is_torn(tail):
+            raise Rejected(
+                "the log's last line is not an event and has no newline; repair it by moving that "
+                "line out of the log (`loop-state check <log>` names it), then append again"
+            )
+        sys.stderr.write(
+            "loop-state: skipped a torn last line (%d bytes, a cut-short write); "
+            "the event starts on a fresh line\n" % len(tail)
+        )
+        prefix = b"\n"
     for raw in reversed(lines):
-        if raw.strip():
-            try:
-                seq = json.loads(raw.decode("utf-8"))["seq"]
-            except (ValueError, KeyError, TypeError):
-                raise Rejected("last log line is not a valid event; run `loop-state check`")
-            if not _is_int(seq):
-                raise Rejected("last log line has no integer seq")
-            return seq
-    return 0
+        if not raw.strip():
+            continue
+        seq = _event_seq(raw)
+        if seq is not None:
+            return seq, prefix
+        if _is_torn(raw):
+            continue
+        raise Rejected(
+            "the log's last line is not a valid event; repair it by moving that line out of the log "
+            "(`loop-state check <log>` names it), then append again"
+        )
+    return 0, prefix
 
 
 def read_loop_md_keys(path):
-    """The key: value lines that open LOOP.md, up to the first blank line after them or the
-    first heading below the title."""
+    """The key: value lines that open LOOP.md, up to the first `## ` heading; the first of a key
+    wins. The value is the rest of the line with surrounding blanks trimmed and nothing removed, so
+    `release-on-push: no (tags only)` is not `no`. The dispatcher's parseLoopMd reads it the same way."""
     keys = {}
     with open(path, encoding="utf-8") as fh:
         for line in fh:
@@ -301,12 +349,13 @@ def do_append(log_path, event, by):
             if not more:
                 break
             data += more
-        seq = _last_seq(data) + 1
+        last, prefix = _tail_state(data)
+        seq = last + 1
         framed = {"v": VERSION, "seq": seq, "ts": utc_now(), "ev": event["ev"], "by": by}
         for key, value in event.items():
             if key not in framed:
                 framed[key] = value
-        line = (json.dumps(framed, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
+        line = prefix + (json.dumps(framed, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
         view = memoryview(line)
         while view:
             written = os.write(fd, view)
@@ -317,13 +366,20 @@ def do_append(log_path, event, by):
     return framed
 
 
+TORN = "torn"
+
+
 def read_events(path, strict):
-    """Yield (lineno, event_or_None, error_or_None) for each non-empty line."""
+    """Yield (lineno, event_or_None, error_or_None) for each non-empty line. A torn line (a write
+    cut short, see `_tail_state`) yields the error TORN."""
     with open(path, "rb") as fh:
         fcntl.flock(fh.fileno(), fcntl.LOCK_SH)
         data = fh.read()
     for lineno, raw in enumerate(data.split(b"\n"), 1):
         if not raw.strip():
+            continue
+        if _is_torn(raw):
+            yield lineno, None, TORN
             continue
         try:
             obj = json.loads(raw.decode("utf-8"))
@@ -334,8 +390,13 @@ def read_events(path, strict):
 
 
 def do_check(path):
+    """The first problem in the log, or None. A torn line is skipped: it held no complete event,
+    and the seq check on the lines around it proves that no event was lost with it."""
     prev = 0
     for lineno, obj, err in read_events(path, True):
+        if err == TORN:
+            sys.stderr.write("loop-state: %s: line %d: skipped a torn line (a cut-short write)\n" % (path, lineno))
+            continue
         if err is None:
             try:
                 validate_event(obj, framed=True)
@@ -400,6 +461,15 @@ def fold(path):
         elif ev == "admit" and isinstance(obj.get("task"), str):
             t = task(obj["task"])
             t.update(state="admitted", dispatched=False, accepted=False, landed=False, parked=None)
+        elif ev == "dispatch" and obj.get("agent") == GATE_AGENT:
+            # A composed gate names its batch (`T2,T3`) as its task. It is a live lane until it
+            # returns, never a task: its result reaches tasks through gate, accept and park.
+            st["lanes"][obj.get("run")] = {
+                "lane": obj.get("lane"),
+                "task": obj.get("task"),
+                "agent": GATE_AGENT,
+                "deadline": obj.get("deadline"),
+            }
         elif ev == "dispatch" and isinstance(obj.get("task"), str):
             t = task(obj["task"])
             lane, run = obj.get("lane"), obj.get("run")
@@ -422,6 +492,8 @@ def fold(path):
         elif ev == "return":
             run, lane = obj.get("run"), obj.get("lane")
             info = st["lanes"].pop(run, None)
+            if info and info.get("agent") == GATE_AGENT:
+                continue
             tid = (info or {}).get("task") or st["lane_task"].get(lane)
             if tid in st["tasks"]:
                 t = st["tasks"][tid]
@@ -541,7 +613,8 @@ def render_digest(st, judgements, task_level):
     out.append(status)
     if st["last_gate"]:
         g = st["last_gate"]
-        out.append("last gate: %s %s exit %s" % (g.get("scope"), _short(g.get("sha")), g.get("exit")))
+        exit_text = "null" if g.get("exit") is None else g.get("exit")
+        out.append("last gate: %s %s exit %s" % (g.get("scope"), _short(g.get("sha")), exit_text))
     out.append("")
     out.append("## Live lanes (%d)" % summary["live_lanes"])
     for run, info in st["lanes"].items():

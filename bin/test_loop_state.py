@@ -224,10 +224,51 @@ class CheckTests(Base):
         self.assertEqual(run("check", self.log).returncode, 1)
 
     def test_append_refuses_a_corrupt_tail(self):
+        # A tail that is not a torn event (no newline, not even an object start) is foreign; refuse.
         with open(self.log, "w", encoding="utf-8") as fh:
-            fh.write('{"seq":1')
+            fh.write("garbage")
         r = self.append("close", "reason=budget", ok=False)
         self.assertEqual(r.returncode, 2)
+        self.assertIn("repair", r.stderr)
+        # So is a complete last line that is not an event.
+        with open(self.log, "w", encoding="utf-8") as fh:
+            fh.write("garbage\n")
+        self.assertEqual(self.append("close", "reason=budget", ok=False).returncode, 2)
+
+    def test_a_torn_trailing_line_is_skipped_and_the_log_goes_on(self):
+        self.seed()
+        with open(self.log, "a", encoding="utf-8") as fh:
+            fh.write('{"v":1,"seq":4,"ts":"2026-10-03T00:00:00Z","ev":"jud')
+        r = self.append("judgement", "text=after the tear")
+        self.assertIn("torn", r.stderr)
+        self.assertEqual(r.stdout.strip(), "seq=4")
+        with open(self.log, encoding="utf-8") as fh:
+            lines = fh.read().split("\n")
+        self.assertTrue(lines[3].endswith('"ev":"jud'), "the torn bytes stay where they were")
+        self.assertEqual(json.loads(lines[4])["text"], "after the tear")
+        self.append("close", "reason=budget")
+        self.assertEqual(run("check", self.log).returncode, 0, run("check", self.log).stderr)
+        self.assertIn("1 unreadable lines", run("digest", self.log).stdout)
+
+    def test_an_unterminated_complete_last_event_is_kept(self):
+        self.seed()
+        with open(self.log, "rb") as fh:
+            data = fh.read()
+        with open(self.log, "wb") as fh:
+            fh.write(data.rstrip(b"\n"))
+        self.assertEqual(self.append("close", "reason=budget").stdout.strip(), "seq=4")
+        self.assertEqual([e["seq"] for e in self.events()], [1, 2, 3, 4])
+        self.assertEqual(run("check", self.log).returncode, 0)
+
+    def test_check_still_fails_when_a_torn_line_hides_a_lost_event(self):
+        self.seed()
+        with open(self.log, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+        lines[1] = lines[1][:20]
+        self.write_lines(lines)
+        r = run("check", self.log)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("line 3", r.stderr)
 
 
 class DigestTests(Base):
@@ -337,6 +378,23 @@ class DigestTests(Base):
     def test_missing_log_exits_1(self):
         r = run("digest", self.log)
         self.assertEqual(r.returncode, 1)
+
+    def test_a_gate_runner_dispatch_is_a_live_lane_not_a_task(self):
+        self.seed()
+        self.append("dispatch", "lane=L5", "task=T1,T2", "agent=gate-runner", "run=r5", "base=b")
+        j = json.loads(self.digest("--json"))
+        self.assertEqual(j["live_lanes"], 1)
+        self.assertEqual(j["admissible"], ["T1", "T2"])
+        self.append("return", "lane=L5", "run=r5", "status=failed", "exit=1")
+        j = json.loads(self.digest("--json"))
+        self.assertEqual(j, {"live_lanes": 0, "open_tasks": 2, "admissible": ["T1", "T2"], "parked": []})
+        self.assertNotIn("T1,T2", self.digest())
+
+    def test_a_gate_exit_may_be_null(self):
+        self.seed()
+        self.append("gate", "scope=composed", "sha=" + "9" * 40, "cmd=c", "exit=null")
+        self.assertIsNone(self.events()[-1]["exit"])
+        self.assertIn("exit null", self.digest())
 
     def test_digest_tolerates_a_bad_line(self):
         self.seed()

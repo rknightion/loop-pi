@@ -45,7 +45,7 @@ Acceptance check, Gate, Landing, Stop rule and Escalation, and may add Deadline.
 Your final message is a few lines of prose, then exactly one block, with nothing after it:
 
 ```lane-return
-{"v":2,"lane":"<id>","status":"complete|partial|blocked|failed","sha":"<full SHA>|null","landed":true|false,
+{"v":2,"lane":"<id>","status":"complete|partial|blocked|failed","sha":"<full>|null","landed":true|false,
  "base":"<full SHA>","check":"<exact command>","exit":<int>|null,"tail":"<last <= 40 lines>",
  "ci":"<run id>|null","coderabbit":{"ran":true|false,"major":<n>,"unreviewed":<n>}|null,
  "questions":["..."]}

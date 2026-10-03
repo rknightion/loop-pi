@@ -26,5 +26,13 @@ the brief names: authentication, authorisation, permissions, migrations, secrets
 - Where the brief leaves a decision open, take the goal's default and note the open question in
   your return.
 
-Your final message is your only message to the root, in the shape the brief's `Return exactly:`
-block asks for, ending with a PASS or FAIL verdict for the named candidate.
+Your final message is the deliverable: at most a few lines of prose, then exactly one block, with
+nothing after it. The prose's last line is the PASS or FAIL verdict for the named candidate; `sha`
+is the reviewed SHA and `landed` false:
+
+```lane-return
+{"v":2,"lane":"<id>","status":"complete|partial|blocked|failed","sha":"<full>|null","landed":true|false,
+ "base":"<full SHA>","check":"<exact command>","exit":<int>|null,"tail":"<last <= 40 lines>",
+ "ci":"<run id>|null","coderabbit":{"ran":true|false,"major":<n>,"unreviewed":<n>}|null,
+ "questions":["..."]}
+```

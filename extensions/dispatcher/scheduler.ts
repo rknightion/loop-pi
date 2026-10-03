@@ -266,15 +266,22 @@ export class Dispatcher {
     if (r.status === "complete" && r.landed && r.sha) {
       t.sha = r.sha;
       t.status = "awaiting-gate";
-      await this.ports.append({
-        ev: "land",
-        task: t.spec.id,
-        sha: r.sha,
-        gate: r.check || t.spec.gate,
-        mode: t.spec.landing === "lands-pre-green" ? "pre-green" : "after-green",
-        lane: lane.lane,
-        ...(r.ci ? { ci: r.ci } : {}),
-      });
+      const land = { ev: "land", task: t.spec.id, sha: r.sha, gate: r.check || t.spec.gate, lane: lane.lane, ...(r.ci ? { ci: r.ci } : {}) };
+      if (t.spec.landing !== "lands-pre-green") {
+        await this.ports.append({ ...land, mode: "after-green" });
+        return;
+      }
+      try {
+        await this.ports.append({ ...land, mode: "pre-green" });
+      } catch (error) {
+        // loop-state found the repo not land-before-green eligible, but the commit is already pushed.
+        // Record it anyway so the log (and every watcher reading it) holds the SHA, park the task for
+        // its owner, and stop new work: further pre-green lanes would push into the same repo.
+        const why = error instanceof Error ? error.message : String(error);
+        await this.ports.append({ ...land, mode: "after-green" });
+        await this.park(t, "owner", `landed pre-green at ${r.sha}, but the pre-green land was refused (${why}); recorded as after-green, never gated`, lane.lane);
+        this.halt();
+      }
       return;
     }
     if (this.halted) return this.park(t, "defect", `lane ${lane.lane} returned ${r.status} after the loop halted`, lane.lane);
@@ -291,15 +298,23 @@ export class Dispatcher {
 
   private async handleGate(lane: Lane, r: LaneReturn): Promise<void> {
     this.gateRunning = false;
-    const exit = r.exit ?? (r.status === "complete" ? 0 : 1);
-    const green = exit === 0 && r.status === "complete";
-    await this.ports.append({ ev: "gate", scope: "composed", sha: lane.sha!, cmd: this.plan.composedGate, exit: green ? 0 : exit || 1, lane: lane.lane });
+    // Green needs a parsed return that says complete, exit 0, and (when it names one) the gated SHA.
+    // The event records what the lane reported: a null exit stays null, and a gate run on another
+    // SHA is recorded against that SHA, never as a gate of this batch's tip.
+    const onTip = r.sha === null || r.sha === lane.sha;
+    const green = r.parsed && r.status === "complete" && r.exit === 0 && onTip;
+    await this.ports.append({ ev: "gate", scope: "composed", sha: r.sha ?? lane.sha!, cmd: this.plan.composedGate, exit: r.exit, lane: lane.lane });
+    const red = !r.parsed
+      ? `composed gate at ${lane.sha} returned no lane-return block`
+      : !onTip
+        ? `composed gate ran on ${r.sha}, not the batch tip ${lane.sha}`
+        : `composed gate red at ${lane.sha} (status ${r.status}, exit ${r.exit === null ? "null" : r.exit})`;
     for (const id of lane.tasks) {
       const t = this.tasks.get(id)!;
       if (green) await this.accept(t, `complete, landed at ${t.sha}, composed gate green at ${lane.sha}`, lane.lane);
       else {
-        await this.ports.append({ ev: "accept", task: id, accepted: false, reason: `composed gate red at ${lane.sha}`, lane: lane.lane });
-        await this.park(t, "defect", `composed gate red at ${lane.sha}`, lane.lane);
+        await this.ports.append({ ev: "accept", task: id, accepted: false, reason: red, lane: lane.lane });
+        await this.park(t, "defect", red, lane.lane);
       }
     }
     if (!green) this.halt();

@@ -26,4 +26,13 @@ state it names (commit SHA or worktree identity).
 - Report skipped or cancelled checks separately from passes. A skip is never a pass.
 - Do not edit source, rerun an unchanged gate to get a different result, commit or push.
 
-Your final message is the deliverable, in the shape the brief's `Return exactly:` block asks for.
+Your final message is the deliverable: at most a few lines of prose, then exactly one block, with
+nothing after it. `check` is the gate command, `exit` its status, `tail` the failing lines and their
+classification, `sha` the tested SHA and `landed` false:
+
+```lane-return
+{"v":2,"lane":"<id>","status":"complete|partial|blocked|failed","sha":"<full>|null","landed":true|false,
+ "base":"<full SHA>","check":"<exact command>","exit":<int>|null,"tail":"<last <= 40 lines>",
+ "ci":"<run id>|null","coderabbit":{"ran":true|false,"major":<n>,"unreviewed":<n>}|null,
+ "questions":["..."]}
+```

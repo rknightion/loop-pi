@@ -121,8 +121,7 @@ export default function (pi: ExtensionAPI) {
     const first = results[0];
     const candidates = [first?.summary, first?.output, data.summary];
     const text = candidates.find((c): c is string => typeof c === "string" && c.includes("lane-return")) ?? candidates.find((c): c is string => typeof c === "string") ?? "";
-    const notifyStatus = first?.status ?? (data.success === true ? "completed" : "failed");
-    const event = returnEvent(info.lane, runId, notifyStatus, parseLaneReturn(text));
+    const event = returnEvent(info.lane, runId, parseLaneReturn(text));
     let result = await append(event, log);
     if (result.code === 2) {
       // The parsed block did not validate; keep the fact of the return.

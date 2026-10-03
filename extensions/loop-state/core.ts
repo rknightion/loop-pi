@@ -59,26 +59,16 @@ export function parseLaneReturn(text: string): Record<string, unknown> | null {
   return last;
 }
 
-/** pi-subagents completion status to a lane-return status. */
-export function mapNotifyStatus(status: unknown): "complete" | "partial" | "failed" {
-  if (status === "completed") return "complete";
-  if (status === "stopped" || status === "paused" || status === "detached") return "partial";
-  return "failed";
-}
-
 const isInt = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v);
 const isStr = (v: unknown): v is string => typeof v === "string" && v !== "";
 
-/** The `return` event for a finished run. Fields of a block that do not fit the schema are dropped. */
-export function returnEvent(
-  lane: string,
-  run: string,
-  notifyStatus: unknown,
-  block: Record<string, unknown> | null,
-): Record<string, unknown> {
+/** The `return` event for a finished run. The status is the block's: a run with no block, or with
+ *  a block whose status is not one of the four, is `failed` whatever pi-subagents reported, as the
+ *  dispatcher's parseLaneReturn reads it. Fields of a block that do not fit the schema are dropped. */
+export function returnEvent(lane: string, run: string, block: Record<string, unknown> | null): Record<string, unknown> {
   const ev: Record<string, unknown> = { ev: "return", lane, run };
   const fromBlock = block && typeof block.status === "string" && STATUSES.has(block.status) ? block.status : null;
-  ev.status = fromBlock ?? mapNotifyStatus(notifyStatus);
+  ev.status = fromBlock ?? "failed";
   if (!block) return ev;
   if (block.sha === null || isStr(block.sha)) ev.sha = block.sha;
   if (typeof block.landed === "boolean") ev.landed = block.landed;

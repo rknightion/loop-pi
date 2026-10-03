@@ -171,7 +171,11 @@ before any `await`. A missing reply means the provider extension is not loaded; 
   `lane-worker-retry-push`, `complex-worker`, `complex-worker-push`, `reviewer`, `reviewer-high`,
   `security-reviewer`, `rescue-sol`, `rescue-astra`, `ops`, `triager`.
 - Every agent file sets `inheritGlobalContext: false`; the installer appends the home's
-  `lane-policy.md` after a `<!-- lane-policy -->` marker instead.
+  `lane-policy.md` after a `<!-- lane-policy -->` marker instead. An overlay may replace
+  `lane-policy.md`, so the return contract is not in it: every agent but `triager` carries the
+  `lane-return` v2 block in its own body, and `triager` its `triage` block.
+- A return with no usable `lane-return` block is `failed`, for the loop-state extension and the
+  dispatcher alike. `loop-state` folds a `gate-runner` dispatch into a live lane only, never a task.
 - Root extensions also include `loop-state/index.ts`: it appends `dispatch` and `return` to
   `codex/state-<stem>-loop<N>.jsonl` (sibling of the report) through `<agentDir>/bin/loop-state`
   for `subagent` calls whose brief starts `Lane: <id> · Task: <id> · Tier: ...`, and injects the
@@ -197,5 +201,9 @@ before any `await`. A missing reply means the provider extension is not loaded; 
   model call. It spawns lanes over the `subagents:rpc:v1` bus with the same identity binding and
   fail-closed child registration, writes every state event itself, and runs `loop-pi-audit
   closeout` and `loopPi.onClose` (argv lists with `{log}` and `{report}`) before it exits.
+  A composed gate is green only for a parsed return with status `complete`, `exit` 0 and a `sha`
+  that is null or the gated tip; the `gate` event records the reported exit (null stays null) and
+  SHA. A pre-green land `loop-state` refuses is recorded as an after-green land plus a park, and
+  stops new work. The dispatcher reads LOOP.md exactly as `loop-state` does (nothing stripped).
 - Runtime entry: each session appends `loop-pi-runtime` `{v:1, variant, models:{<id>:{service_tier}}}`
   at `session_start` (variant from the home receipt's `variant`).

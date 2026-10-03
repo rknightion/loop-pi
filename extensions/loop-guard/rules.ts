@@ -1380,6 +1380,23 @@ function awsServiceCall(rest: string[], service: string, operations: ReadonlySet
   return rest[at + 1];
 }
 
+/** gh's arguments with every `-R X`, `-RX`, `-R=X`, `--repo X` and `--repo=X` removed, so the
+ *  subcommand words match wherever the repository flag sits (`gh -R a/b release delete`,
+ *  `gh workflow --repo a/b run`). */
+function withoutGhRepoFlag(args: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const t = args[i];
+    if (t === "-R" || t === "--repo") {
+      i++;
+      continue;
+    }
+    if (t.startsWith("--repo=") || (t.startsWith("-R") && t.length > 2)) continue;
+    out.push(t);
+  }
+  return out;
+}
+
 /** Releases, workflow dispatch, mutating `gh api`, secret-store writes and credential creation,
  *  blocked for every lane unless an ops grant re-allows the exact command (opsPermits).
  *
@@ -1402,11 +1419,12 @@ export function classifyLaneForbidden(tokens: string[]): ForbiddenCommand | unde
   const rest = tokens.slice(1);
   const found = (label: string, category: ForbiddenCategory): ForbiddenCommand => ({ label, category });
   if (head === "gh") {
-    if (rest[0] === "release" && ["create", "edit", "delete"].includes(rest[1])) return found(`gh release ${rest[1]}`, "release");
-    if (rest[0] === "workflow" && rest[1] === "run") return found("gh workflow run", "workflow");
-    if (rest[0] === "secret" && rest[1] === "set") return found("gh secret set", "secret");
-    if (rest[0] === "api" && isMutatingGhApi(rest.slice(1))) return found("gh api (mutating)", "api");
-    if ((rest[0] === "ssh-key" || rest[0] === "gpg-key") && rest[1] === "add") return found(`gh ${rest[0]} add`, "credential");
+    const words = withoutGhRepoFlag(rest);
+    if (words[0] === "release" && ["create", "edit", "delete"].includes(words[1])) return found(`gh release ${words[1]}`, "release");
+    if (words[0] === "workflow" && words[1] === "run") return found("gh workflow run", "workflow");
+    if (words[0] === "secret" && words[1] === "set") return found("gh secret set", "secret");
+    if (words[0] === "api" && isMutatingGhApi(words.slice(1))) return found("gh api (mutating)", "api");
+    if ((words[0] === "ssh-key" || words[0] === "gpg-key") && words[1] === "add") return found(`gh ${words[0]} add`, "credential");
   }
   if (head === "vault" || head === "bao") {
     if (rest[0] === "write" || (rest[0] === "kv" && rest[1] === "put")) return found(`${head} write`, "secret");

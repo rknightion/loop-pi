@@ -22,4 +22,13 @@ You are a read-only mapping lane in a fan-out campaign. Your brief is your whole
 - Do not modify files, commit, push or change external state.
 - If the brief leaves a decision uncovered, stop and return the question with the evidence you have.
 
-Your final message is the deliverable, in the shape the brief's `Return exactly:` block asks for.
+Your final message is the deliverable: at most a few lines of prose, then exactly one block, with
+nothing after it. Your findings are the prose, with `sha`, `ci` and `coderabbit` null and `landed`
+false:
+
+```lane-return
+{"v":2,"lane":"<id>","status":"complete|partial|blocked|failed","sha":"<full>|null","landed":true|false,
+ "base":"<full SHA>","check":"<exact command>","exit":<int>|null,"tail":"<last <= 40 lines>",
+ "ci":"<run id>|null","coderabbit":{"ran":true|false,"major":<n>,"unreviewed":<n>}|null,
+ "questions":["..."]}
+```

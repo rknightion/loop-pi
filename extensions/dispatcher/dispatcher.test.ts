@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { parseLaneReturn, parseTriage, retryAgent, taskBrief } from "./brief.ts";
 import { globsIntersect, guardedHits, ownedOverlap, ownedWithin } from "./glob.ts";
-import { dispatcherEligible, parseGoal, type TaskSpec } from "./goal.ts";
+import { dispatcherEligible, parseGoal, parseLoopMd, preGreenEligible, type TaskSpec } from "./goal.ts";
 import { backlogTitle, completionText, onCloseCommands } from "./index.ts";
 import { parseLaunch, stateLogFor } from "./launch.ts";
 import { Dispatcher, type Ports } from "./scheduler.ts";
@@ -30,6 +35,19 @@ test("guarded paths are found through globs, and LOOP.md adds its own", () => {
   assert.deepEqual(guardedHits(["vendor/x.ts"], ["vendor/**"]), ["vendor/**"]);
   assert.deepEqual(guardedHits(["src/{auth,util}/**"]), ["**/auth/**"], "a brace alternative is guarded with no files on disk");
   assert.deepEqual(guardedHits(["src/{util,lib}/**"]), []);
+});
+
+test("owned entries are normalised before the guarded and overlap checks; entries leaving the repo fail closed", () => {
+  assert.deepEqual(guardedHits(["src/../.github/workflows/ci.yml"]), [".github/workflows/**"]);
+  assert.deepEqual(guardedHits(["./src//auth/x.ts"]), ["**/auth/**"]);
+  assert.equal(ownedOverlap(["a/../b.ts"], ["b.ts"]), true);
+  assert.equal(ownedOverlap(["src//x.ts"], ["src/x.ts"]), true);
+  assert.equal(ownedWithin("docs/a..b.md", ["docs/**"]), true, "two dots inside a name stay in the repo");
+  for (const bad of ["../x.ts", "a/../../b.ts", "/etc/hosts", "src/{a,../../b}.ts"]) {
+    assert.notDeepEqual(guardedHits([bad]), [], `${bad} is refused by the guarded check`);
+    assert.equal(ownedOverlap([bad], ["unrelated/z.ts"]), true, `${bad} overlaps everything`);
+    assert.equal(ownedWithin(bad, ["**"]), false, `${bad} is inside nothing`);
+  }
 });
 
 test("a split subtask's globs must lie inside the parent's", () => {
@@ -101,6 +119,32 @@ test("dispatcherEligible refuses each failing condition with a reason", () => {
   assert.match(reasons(goalText([...three.slice(0, 2), row("T3", "c/**", "lands-pre-green")]), "tier: routine\nrelease-on-push: yes\n"), /not land-before-green eligible/);
   assert.match(reasons(goalText(three, { header: "| task | owned files | gate |" })), /Envelope columns/);
   assert.match(reasons(goalText([...three.slice(0, 2), "| T3 | x | c/** |"])), /row has 3 cells/);
+});
+
+const LOOP_STATE = fileURLToPath(new URL("../../bin/loop-state", import.meta.url));
+
+test("the dispatcher and loop-state read LOOP.md identically for a pre-green land", () => {
+  const variants = [
+    ROUTINE_LOOP,
+    ROUTINE_LOOP.replace("release-on-push: no", "release-on-push: no (tags only)"),
+    ROUTINE_LOOP.replace("deploy-on-push: no", "deploy-on-push: no  # for now"),
+    ROUTINE_LOOP.replace("tier: routine", "tier : routine"),
+    ROUTINE_LOOP.replace("deploy-on-push: no", "Deploy-On-Push: no"),
+    `${ROUTINE_LOOP}\n## Traps\nrelease-on-push: yes\n`,
+    ROUTINE_LOOP.replace("release-on-push: no", "release-on-push: yes"),
+  ];
+  for (const text of variants) {
+    const repo = mkdtempSync(join(tmpdir(), "loop-md-parity-"));
+    try {
+      mkdirSync(join(repo, "codex"));
+      writeFileSync(join(repo, "LOOP.md"), text);
+      const log = join(repo, "codex", "state-x-loop1.jsonl");
+      const r = spawnSync("python3", [LOOP_STATE, "append", log, "land", "task=T1", "sha=abc", "gate=g", "mode=pre-green"], { encoding: "utf8" });
+      assert.equal(preGreenEligible(parseLoopMd(text)), r.status === 0, `LOOP.md:\n${text}\nloop-state: exit ${r.status} ${r.stderr}`);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  }
 });
 
 // ---------------------------------------------------------------- briefs and returns
@@ -182,8 +226,10 @@ class FakePorts implements Ports {
   calls: string[] = [];
   refuse = new Set<string>();
   notOnMain = new Set<string>();
+  refusePreGreen = false;
   private n = 0;
   async append(event: Record<string, unknown>) {
+    if (this.refusePreGreen && event.ev === "land" && event.mode === "pre-green") throw new Error("loop-state refused land: LOOP.md needs `release-on-push: no`");
     this.events.push(event);
     this.calls.push(`append:${event.ev}`);
   }
@@ -370,6 +416,43 @@ test("a red composed gate rejects its batch, stops new work and closes blocked",
   assert.equal(ports.spawns.some((s) => /Task: T3 /.test(s.brief)), false, "no new work after a red gate");
   assert.deepEqual(ports.done, []);
   assert.deepEqual(ports.ofEv("park").map((e) => e.task), ["T1", "T2"]);
+});
+
+test("a composed gate is green only for a parsed complete return with exit 0 on the gated SHA", SCHED, async () => {
+  const cases: [string, string, unknown, string][] = [
+    ["exit null", ret({ status: "complete", exit: null }), null, "tip"],
+    ["no lane-return block", "The gate passed.", null, "tip"],
+    ["another SHA", ret({ status: "complete", exit: 0, sha: "elsewhere" }), 0, "elsewhere"],
+  ];
+  for (const [name, text, exit, sha] of cases) {
+    const ports = new FakePorts();
+    const d = new Dispatcher(plan([spec("T1", ["a/**"]), spec("T2", ["b/**"]), spec("T3", ["c/**"])], 1), ports);
+    const closed = d.start();
+    await d.settled();
+    await finish(d, ports, "r1", landed("s1"));
+    const gate = ports.spawns.find((s) => s.agent === "gate-runner")!;
+    await finish(d, ports, gate.runId, text);
+    assert.deepEqual(ports.ofEv("accept").map((e) => [e.task, e.accepted]), [["T1", false]], name);
+    assert.deepEqual(ports.ofEv("gate").map((e) => [e.sha, e.exit]), [[sha, exit]], `${name}: the gate event carries what the lane reported`);
+    const t2 = ports.spawns.find((s) => /Task: T2 /.test(s.brief))!;
+    await finish(d, ports, t2.runId, landed("s2"));
+    assert.equal(await closed, "blocked", name);
+    assert.deepEqual(ports.done, [], name);
+  }
+});
+
+test("a pre-green land loop-state refuses is still recorded, as an after-green land plus a park, and stops new work", SCHED, async () => {
+  const ports = new FakePorts();
+  ports.refusePreGreen = true;
+  const d = new Dispatcher(plan([spec("T1", ["a/**"], { landing: "lands-pre-green" }), spec("T2", ["b/**"]), spec("T3", ["c/**"])], 1), ports);
+  const closed = d.start();
+  await d.settled();
+  await finish(d, ports, "r1", landed("s1"));
+  assert.deepEqual(ports.ofEv("land").map((e) => [e.task, e.sha, e.mode]), [["T1", "s1", "after-green"]]);
+  assert.deepEqual(ports.ofEv("park").map((e) => [e.task, e.needs]), [["T1", "owner"]]);
+  assert.match(ports.ofEv("park")[0].reason, /pre-green/);
+  assert.equal(await closed, "blocked");
+  assert.equal(ports.spawns.length, 1, "no new work after the refusal");
 });
 
 test("a refused spawn parks the task; a landed SHA missing from main parks instead of gating", SCHED, async () => {
