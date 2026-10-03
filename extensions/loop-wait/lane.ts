@@ -4,6 +4,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { runWatchProcess } from "./core.ts";
+import { registerRuntimeEntry } from "./runtime-entry.ts";
 
 export const WatchProcessParams = Type.Object({
   command: Type.String({ description: "Shell command to run to completion (never append `&`)." }),
@@ -43,5 +44,6 @@ export function registerWatchProcess(pi: ExtensionAPI): void {
 }
 
 export default function (pi: ExtensionAPI): void {
+  registerRuntimeEntry(pi);
   registerWatchProcess(pi);
 }

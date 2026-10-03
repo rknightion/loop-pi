@@ -2,6 +2,7 @@
 // runtime imports here, so this module (and its reducer) is unit-testable without a live session.
 
 import type { LaunchInfo } from "./launch-detect.ts";
+import type { OpsGrants } from "./ops-grants.ts";
 
 export const STATE_CUSTOM_TYPE = "loop-continuation-state";
 export const NUDGE_CUSTOM_TYPE = "loop-continuation";
@@ -21,7 +22,16 @@ export const MAX_NUDGES = 3;
 export const WAITING_STALE_TOLERANCE_MS = 5000;
 
 /** Why a "nudge" decision was reached, for wording the nudge text. */
-export type NudgeReason = "unmarked" | "stale-waiting";
+export type NudgeReason = "unmarked" | "stale-waiting" | "close-out";
+
+/** The reason on the loop-wait timer this extension arms to back a WAITING deadline. */
+export const AUTO_ARM_REASON = "loop-continuation auto-arm for WAITING deadline";
+
+/** The part of `loop-state digest --json` the close-out check reads. */
+export interface CloseOutDigest {
+  live_lanes: number;
+  admissible: string[];
+}
 
 export interface ContinuationState {
   armed: boolean;
@@ -30,6 +40,10 @@ export interface ContinuationState {
   nudgeCount: number;
   /** Whether the chain-exhausted incident has already been written for this chain. */
   chainIncidentWritten: boolean;
+  /** Absolute path of the ops file named by the launch's `Ops grants:` line; absent without one. */
+  opsPath?: string | null;
+  /** The ops grants frozen at launch. null: no ops line, or one that was rejected. */
+  ops?: OpsGrants | null;
 }
 
 export const INITIAL_STATE: ContinuationState = {
@@ -62,6 +76,17 @@ export interface SettleInput {
   queryTimers: () => ArmedTimer[] | null;
   /** Arms a loop-wait timer at `at`; returns the arming reply, or null when it did not reply. */
   armTimer: (at: string, reason: string) => { id: string; at: string } | null;
+  /**
+   * Close-out inputs, supplied only when a digest could have been read. `digest` is null when
+   * the binary, the log or the output is unusable; `queryWatchers` returns every active
+   * loop-wait watcher, or null when loop-wait did not reply.
+   */
+  closeOut?: { digest: CloseOutDigest | null; queryWatchers: () => unknown[] | null };
+}
+
+/** True when the digest shows no live lane and nothing admissible. */
+export function digestIsDrained(digest: CloseOutDigest | null): boolean {
+  return digest !== null && digest.live_lanes === 0 && digest.admissible.length === 0;
 }
 
 export type SettleDecision =
@@ -92,6 +117,8 @@ function isStaleWaitingDeadline(deadlineIso: string, nowIso: string): boolean {
  *     NOT current: it is never queried or auto-armed, and falls straight into the same nudge path as
  *     an unmarked stop below, with `reason: "stale-waiting"` so the nudge text tells the root its
  *     deadline has passed and it must reconcile;
+ *   - before the WAITING check, close out (`reason: "close-out"`) when the digest is drained and
+ *     nothing but the auto-arm is armed;
  *   - otherwise nudge (`reason: "unmarked"`), up to MAX_NUDGES per chain; the next stop after that
  *     is allowed (release-exhausted) and, the first time in the chain, calls for an incident file.
  * A push-started turn resets the chain before any of the above is evaluated.
@@ -118,6 +145,18 @@ export function evaluateSettle(input: SettleInput): SettleDecision {
       ? isStaleWaitingDeadline(input.waitingDeadline, nowIso)
       : false;
 
+  // Close-out: a WAITING that would be released, or a plain stop that would be nudged, ends the run
+  // instead when the state log shows nothing live and nothing admissible and nothing but this
+  // extension's own auto-arm is armed to wake the session. It still counts as a nudge, so the
+  // strike cap bounds it.
+  if (input.closeOut && state.nudgeCount < MAX_NUDGES && digestIsDrained(input.closeOut.digest)) {
+    const timers = input.queryTimers();
+    const watchers = input.closeOut.queryWatchers();
+    if (timers !== null && watchers !== null && watchers.length === 0 && timers.every((t) => t.reason === AUTO_ARM_REASON)) {
+      return { action: "nudge", newState: { ...state, nudgeCount: state.nudgeCount + 1 }, reason: "close-out" };
+    }
+  }
+
   if (input.marker === "waiting" && input.waitingDeadline && !stale) {
     const timers = input.queryTimers();
     if (timers !== null) {
@@ -129,7 +168,7 @@ export function evaluateSettle(input: SettleInput): SettleDecision {
       if (covered) {
         return { action: "release", newState: released(state) };
       }
-      const armed = input.armTimer(input.waitingDeadline, "loop-continuation auto-arm for WAITING deadline");
+      const armed = input.armTimer(input.waitingDeadline, AUTO_ARM_REASON);
       if (armed) {
         return { action: "release", newState: released(state) };
       }

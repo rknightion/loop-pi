@@ -1,6 +1,5 @@
-// Fixed text of the pi "TURN ENDINGS" block, ~/repos/agent-docs/sources/fan-out-protocol.md
-// Appendix C "Turn endings and the continuation backstop" (lines 3061-3077), verbatim inside its ```text
-// fence. Every loop-pi goal carries that block; this extension re-sends the identical block as the
+// Fixed text of the pi "TURN ENDINGS" block, as carried by sources/loop/harness-pi.md. Every
+// loop-pi root is given that block at launch; this extension re-sends the identical block as the
 // nudge so a root that stops without it gets the same reminder it was given at launch.
 import type { NudgeReason } from "./state.ts";
 
@@ -18,7 +17,7 @@ export const NUDGE_TEXT = [
   "written and pinged, when paused, or when a lane, a `watch_start` watcher or a `wake_at` timer will",
   "wake this session. When waiting, make the last line",
   "`WAITING: <what> until <YYYY-MM-DDTHH:MM[:SS]Z>` with a future deadline; arm `wake_at` for it",
-  "first. When paused (§1), make it `PAUSED: <reason>`. Never poll `subagent` status between wakes.",
+  "first. When paused, make it `PAUSED: <reason>`. Never poll `subagent` status between wakes.",
   "Launch each lane as its own `subagent` call. Give any `bash` call that can run past 15 minutes a",
   "`timeout`, or run it under `watch_start`: the watchdog reads a longer silent turn as stalled.",
   "This does not override confirmation for risky or destructive actions.",
@@ -37,7 +36,11 @@ export const STALE_WAITING_NOTE = [
   "`PAUSED: <reason>` if there is nothing left to wait on.",
 ].join("\n");
 
+/** Sent when the loop state log shows nothing admissible, no live lane and nothing armed to wake. */
+export const CLOSE_OUT_TEXT = "close out: nothing admissible remains; generate the report and end the run";
+
 /** The nudge message body for a given nudge reason. */
 export function nudgeTextFor(reason: NudgeReason): string {
+  if (reason === "close-out") return CLOSE_OUT_TEXT;
   return reason === "stale-waiting" ? `${STALE_WAITING_NOTE}\n\n${NUDGE_TEXT}` : NUDGE_TEXT;
 }

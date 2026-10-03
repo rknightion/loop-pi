@@ -1,0 +1,691 @@
+#!/usr/bin/env python3
+"""loop-state: append-only event log for a fan-out loop, with a recovery digest.
+
+  loop-state append <log> <ev> [k=v ...] [--by root|dispatcher|ext|daemon]
+  loop-state append <log> [--by ...] < event.json
+  loop-state digest <log> [--json]
+  loop-state check <log>
+
+Stdlib only; runs under Python 3.9 (macOS /usr/bin/python3).
+
+Exit codes: 0 ok; 2 append rejected (validation error or ineligible pre-green land) or usage error;
+1 digest/check failure (unreadable log, or the first invalid line for `check`).
+"""
+from __future__ import annotations
+
+import fcntl
+import json
+import os
+import re
+import sys
+from datetime import datetime, timezone
+
+VERSION = 1
+DIGEST_MAX_BYTES = 4096
+JUDGEMENT_MAX_BYTES = 2048
+JUDGEMENTS_IN_DIGEST = 5
+BY_VALUES = ("root", "dispatcher", "ext", "daemon")
+TS_RE = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+
+STR = "str"
+STR_OR_NULL = "str?"
+INT = "int"
+INT_OR_NULL = "int?"
+BOOL = "bool"
+STRLIST = "strlist"
+OWNED = "owned"
+CODERABBIT = "coderabbit"
+
+STATUS = ("complete", "partial", "blocked", "failed")
+TIER = ("routine", "guarded")
+
+# ev -> (required {field: type}, optional {field: type}); a tuple type is an enum of strings.
+SCHEMA = {
+    "open": (
+        {
+            "goal_sha256": STR,
+            "tier": TIER,
+            "root": ("llm", "dispatcher"),
+            "root_model": STR,
+            "envelope": STRLIST,
+        },
+        {},
+    ),
+    "admit": (
+        {"task": STR, "source": ("envelope", "loop-created"), "owned": OWNED, "accept": STR},
+        {"tier": TIER},
+    ),
+    "dispatch": (
+        {"lane": STR, "task": STR, "agent": STR, "run": STR, "base": STR},
+        {"deadline": STR, "model": STR, "effort": STR, "surface": STR},
+    ),
+    "return": (
+        {"lane": STR, "run": STR, "status": STATUS},
+        {
+            "sha": STR_OR_NULL,
+            "landed": BOOL,
+            "check": STR,
+            "exit": INT_OR_NULL,
+            "ci": STR_OR_NULL,
+            "coderabbit": CODERABBIT,
+            "base": STR,
+            "questions": STRLIST,
+        },
+    ),
+    "gate": (
+        {"scope": ("lane", "composed"), "sha": STR, "cmd": STR, "exit": INT},
+        {"lane": STR, "base": STR},
+    ),
+    "accept": ({"task": STR, "accepted": BOOL, "reason": STR}, {"lane": STR}),
+    "park": (
+        {
+            "task": STR,
+            "reason": STR,
+            "needs": ("owner", "authority", "evidence-later", "dependency", "defect"),
+        },
+        {"lane": STR, "until": STR},
+    ),
+    "land": (
+        {"task": STR, "sha": STR, "gate": STR, "mode": ("after-green", "pre-green")},
+        {"lane": STR, "ci": STR},
+    ),
+    "revert": (
+        {"sha": STR, "reverted_by": STR, "reason": ("ci-red", "ci-timeout", "composed-red")},
+        {"task": STR},
+    ),
+    "judgement": ({"text": STR}, {"task": STR, "lane": STR}),
+    "close": (
+        {"reason": ("nothing-admissible", "owner-stop", "blocked", "budget")},
+        {},
+    ),
+}
+
+
+class Rejected(Exception):
+    """An event or an append that must be refused (exit 2 on append)."""
+
+
+def _is_int(v):
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def _check_value(field, kind, value):
+    """Return None when value fits kind, else a message."""
+    if isinstance(kind, tuple):
+        if not isinstance(value, str) or value not in kind:
+            return "%s must be one of %s" % (field, "|".join(kind))
+        return None
+    if kind == STR:
+        if not isinstance(value, str) or value == "":
+            return "%s must be a non-empty string" % field
+    elif kind == STR_OR_NULL:
+        if value is not None and (not isinstance(value, str) or value == ""):
+            return "%s must be a non-empty string or null" % field
+    elif kind == INT:
+        if not _is_int(value):
+            return "%s must be an integer" % field
+    elif kind == INT_OR_NULL:
+        if value is not None and not _is_int(value):
+            return "%s must be an integer or null" % field
+    elif kind == BOOL:
+        if not isinstance(value, bool):
+            return "%s must be true or false" % field
+    elif kind == STRLIST:
+        if not isinstance(value, list) or not all(isinstance(x, str) for x in value):
+            return "%s must be a list of strings" % field
+    elif kind == OWNED:
+        ok = isinstance(value, str) and value != ""
+        ok = ok or (isinstance(value, list) and all(isinstance(x, str) for x in value))
+        if not ok:
+            return "%s must be a string or a list of strings" % field
+    elif kind == CODERABBIT:
+        if value is None:
+            return None
+        if (
+            not isinstance(value, dict)
+            or not isinstance(value.get("ran"), bool)
+            or not _is_int(value.get("major"))
+            or not _is_int(value.get("unreviewed"))
+        ):
+            return "%s must be null or {ran:bool, major:int, unreviewed:int}" % field
+    return None
+
+
+def validate_event(obj, framed=False):
+    """Validate an event body. framed=True also checks v, seq, ts and by (used by `check`)."""
+    if not isinstance(obj, dict):
+        raise Rejected("event must be a JSON object")
+    ev = obj.get("ev")
+    if not isinstance(ev, str) or ev not in SCHEMA:
+        raise Rejected("ev must be one of %s" % "|".join(SCHEMA))
+    required, optional = SCHEMA[ev]
+    envelope = {"ev", "v", "seq", "ts", "by"}
+    for field in obj:
+        if field not in required and field not in optional and field not in envelope:
+            raise Rejected("%s: unknown field %s" % (ev, field))
+    for field, kind in required.items():
+        if field not in obj:
+            raise Rejected("%s: missing required field %s" % (ev, field))
+        msg = _check_value(field, kind, obj[field])
+        if msg:
+            raise Rejected("%s: %s" % (ev, msg))
+    for field, kind in optional.items():
+        if field in obj:
+            msg = _check_value(field, kind, obj[field])
+            if msg:
+                raise Rejected("%s: %s" % (ev, msg))
+    if ev == "judgement" and len(obj["text"].encode("utf-8")) > JUDGEMENT_MAX_BYTES:
+        raise Rejected("judgement: text is over %d bytes" % JUDGEMENT_MAX_BYTES)
+    if framed:
+        if obj.get("v") != VERSION or not _is_int(obj.get("v")):
+            raise Rejected("v must be %d" % VERSION)
+        if not _is_int(obj.get("seq")) or obj["seq"] < 1:
+            raise Rejected("seq must be a positive integer")
+        if not isinstance(obj.get("ts"), str) or not TS_RE.match(obj["ts"]):
+            raise Rejected("ts must be an ISO UTC timestamp ending in Z")
+        if obj.get("by") not in BY_VALUES:
+            raise Rejected("by must be one of %s" % "|".join(BY_VALUES))
+    elif "by" in obj and obj["by"] not in BY_VALUES:
+        raise Rejected("by must be one of %s" % "|".join(BY_VALUES))
+
+
+def _field_kind(ev, field):
+    required, optional = SCHEMA[ev]
+    return required.get(field, optional.get(field))
+
+
+def parse_kv(ev, pairs):
+    """Turn k=v tokens into a dict. Values are JSON-parsed when they parse; a string-typed
+    field keeps its raw text unless it is a JSON string literal, so a numeric-looking run id or
+    SHA stays a string."""
+    out = {"ev": ev}
+    for token in pairs:
+        if "=" not in token:
+            raise Rejected("expected k=v, got %r" % token)
+        key, raw = token.split("=", 1)
+        if not key:
+            raise Rejected("empty key in %r" % token)
+        if key in ("v", "seq", "ts", "ev"):
+            raise Rejected("%s is set by loop-state" % key)
+        if key in out:
+            raise Rejected("duplicate field %s" % key)
+        kind = _field_kind(ev, key) if ev in SCHEMA else None
+        try:
+            parsed = json.loads(raw)
+            parsed_ok = True
+        except ValueError:
+            parsed, parsed_ok = raw, False
+        if kind in (STR, STR_OR_NULL) or isinstance(kind, tuple):
+            if parsed_ok and (isinstance(parsed, str) or (parsed is None and kind == STR_OR_NULL)):
+                out[key] = parsed
+            else:
+                out[key] = raw
+        else:
+            out[key] = parsed
+    return out
+
+
+def utc_now():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _last_seq(data):
+    """Seq of the last non-empty line of the log bytes (0 for an empty log)."""
+    if not data:
+        return 0
+    if not data.endswith(b"\n"):
+        raise Rejected("log does not end with a newline; run `loop-state check` and repair it")
+    lines = data.split(b"\n")
+    for raw in reversed(lines):
+        if raw.strip():
+            try:
+                seq = json.loads(raw.decode("utf-8"))["seq"]
+            except (ValueError, KeyError, TypeError):
+                raise Rejected("last log line is not a valid event; run `loop-state check`")
+            if not _is_int(seq):
+                raise Rejected("last log line has no integer seq")
+            return seq
+    return 0
+
+
+def read_loop_md_keys(path):
+    """The key: value lines that open LOOP.md, up to the first blank line after them or the
+    first heading below the title."""
+    keys = {}
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.rstrip("\n")
+            if line.startswith("## "):
+                break
+            m = re.match(r"^([A-Za-z][A-Za-z0-9_-]*):[ \t]*(.*?)[ \t]*$", line)
+            if m:
+                keys.setdefault(m.group(1), m.group(2))
+    return keys
+
+
+def check_pre_green_eligible(log_path):
+    log_dir = os.path.dirname(os.path.realpath(log_path))
+    if os.path.basename(log_dir) != "codex":
+        raise Rejected("land mode=pre-green: the log must live in <repo>/codex/ to find LOOP.md")
+    loop_md = os.path.join(os.path.dirname(log_dir), "LOOP.md")
+    try:
+        keys = read_loop_md_keys(loop_md)
+    except OSError as exc:
+        raise Rejected("land mode=pre-green refused: cannot read %s (%s)" % (loop_md, exc.strerror))
+    wanted = (("tier", "routine"), ("release-on-push", "no"), ("deploy-on-push", "no"))
+    for key, value in wanted:
+        if keys.get(key) != value:
+            raise Rejected(
+                "land mode=pre-green refused: LOOP.md needs `%s: %s` (found %r)"
+                % (key, value, keys.get(key))
+            )
+
+
+def do_append(log_path, event, by):
+    validate_event(event)
+    event = dict(event)
+    if event["ev"] == "land" and event["mode"] == "pre-green":
+        check_pre_green_eligible(log_path)
+    by = by or event.get("by") or "root"
+    if by not in BY_VALUES:
+        raise Rejected("by must be one of %s" % "|".join(BY_VALUES))
+    parent = os.path.dirname(os.path.abspath(log_path))
+    os.makedirs(parent, exist_ok=True)
+    fd = os.open(log_path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        size = os.fstat(fd).st_size
+        data = os.pread(fd, size, 0) if size else b""
+        while len(data) < size:
+            more = os.pread(fd, size - len(data), len(data))
+            if not more:
+                break
+            data += more
+        seq = _last_seq(data) + 1
+        framed = {"v": VERSION, "seq": seq, "ts": utc_now(), "ev": event["ev"], "by": by}
+        for key, value in event.items():
+            if key not in framed:
+                framed[key] = value
+        line = (json.dumps(framed, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
+        view = memoryview(line)
+        while view:
+            written = os.write(fd, view)
+            view = view[written:]
+        os.fsync(fd)
+    finally:
+        os.close(fd)  # closing releases the flock
+    return framed
+
+
+def read_events(path, strict):
+    """Yield (lineno, event_or_None, error_or_None) for each non-empty line."""
+    with open(path, "rb") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_SH)
+        data = fh.read()
+    for lineno, raw in enumerate(data.split(b"\n"), 1):
+        if not raw.strip():
+            continue
+        try:
+            obj = json.loads(raw.decode("utf-8"))
+        except ValueError as exc:
+            yield lineno, None, "not valid JSON (%s)" % exc
+            continue
+        yield lineno, obj, None
+
+
+def do_check(path):
+    prev = 0
+    for lineno, obj, err in read_events(path, True):
+        if err is None:
+            try:
+                validate_event(obj, framed=True)
+                if obj["seq"] != prev + 1:
+                    raise Rejected("seq %s follows %s; expected %d" % (obj["seq"], prev, prev + 1))
+            except Rejected as exc:
+                err = str(exc)
+        if err is not None:
+            return "%s: line %d: %s" % (path, lineno, err)
+        prev = obj["seq"]
+    return None
+
+
+# ---------------------------------------------------------------------------- digest
+
+
+def fold(path):
+    """Fold the log into a plain state dict. Tolerant: lines that do not parse are counted."""
+    st = {
+        "open": None,
+        "close": None,
+        "tasks": {},
+        "order": [],
+        "lanes": {},  # run -> {lane, task, agent, deadline}
+        "lane_task": {},  # lane -> task
+        "judgements": [],
+        "last_gate": None,
+        "last_seq": 0,
+        "bad": 0,
+    }
+
+    def task(tid):
+        if tid not in st["tasks"]:
+            st["tasks"][tid] = {
+                "id": tid,
+                "state": "admitted",
+                "dispatched": False,
+                "accepted": False,
+                "landed": False,
+                "parked": None,
+                "lane": None,
+                "run": None,
+                "deadline": None,
+                "status": None,
+                "sha": None,
+                "reason": None,
+            }
+            st["order"].append(tid)
+        return st["tasks"][tid]
+
+    for _lineno, obj, err in read_events(path, False):
+        if err is not None or not isinstance(obj, dict) or not isinstance(obj.get("ev"), str):
+            st["bad"] += 1
+            continue
+        ev = obj["ev"]
+        if _is_int(obj.get("seq")):
+            st["last_seq"] = max(st["last_seq"], obj["seq"])
+        if ev == "open":
+            st["open"] = obj
+        elif ev == "close":
+            st["close"] = obj
+        elif ev == "admit" and isinstance(obj.get("task"), str):
+            t = task(obj["task"])
+            t.update(state="admitted", dispatched=False, accepted=False, landed=False, parked=None)
+        elif ev == "dispatch" and isinstance(obj.get("task"), str):
+            t = task(obj["task"])
+            lane, run = obj.get("lane"), obj.get("run")
+            t.update(
+                state="dispatched",
+                dispatched=True,
+                parked=None,
+                lane=lane,
+                run=run,
+                deadline=obj.get("deadline"),
+                status=None,
+            )
+            st["lanes"][run] = {
+                "lane": lane,
+                "task": obj["task"],
+                "agent": obj.get("agent"),
+                "deadline": obj.get("deadline"),
+            }
+            st["lane_task"][lane] = obj["task"]
+        elif ev == "return":
+            run, lane = obj.get("run"), obj.get("lane")
+            info = st["lanes"].pop(run, None)
+            tid = (info or {}).get("task") or st["lane_task"].get(lane)
+            if tid in st["tasks"]:
+                t = st["tasks"][tid]
+                t["status"] = obj.get("status")
+                t["sha"] = obj.get("sha")
+                t["state"] = "returned"
+                t["dispatched"] = obj.get("status") == "complete"
+                if obj.get("landed") is True:
+                    t["landed"] = True
+                    t["state"] = "landed"
+        elif ev == "accept" and isinstance(obj.get("task"), str):
+            t = task(obj["task"])
+            if obj.get("accepted") is True:
+                t.update(accepted=True, state="accepted", reason=obj.get("reason"))
+            else:
+                t.update(accepted=False, dispatched=False, state="rejected", reason=obj.get("reason"))
+        elif ev == "park" and isinstance(obj.get("task"), str):
+            t = task(obj["task"])
+            t.update(parked=obj.get("needs"), state="parked", reason=obj.get("reason"))
+        elif ev == "land" and isinstance(obj.get("task"), str):
+            t = task(obj["task"])
+            t.update(landed=True, state="landed", sha=obj.get("sha"))
+        elif ev == "revert":
+            tid = obj.get("task")
+            if not isinstance(tid, str):
+                tid = next(
+                    (i for i, t in st["tasks"].items() if t["landed"] and t["sha"] == obj.get("sha")),
+                    None,
+                )
+            if tid in st["tasks"]:
+                st["tasks"][tid].update(
+                    landed=False,
+                    accepted=False,
+                    dispatched=False,
+                    state="reverted",
+                    reason=obj.get("reason"),
+                )
+        elif ev == "gate":
+            st["last_gate"] = obj
+        elif ev == "judgement" and isinstance(obj.get("text"), str):
+            st["judgements"].append(obj)
+    return st
+
+
+def classify(st):
+    live = set(i["task"] for i in st["lanes"].values())
+    parked, admissible, open_tasks = [], [], []
+    for tid in st["order"]:
+        t = st["tasks"][tid]
+        if t["parked"]:
+            parked.append(tid)
+            continue
+        if t["landed"] or t["accepted"]:
+            continue
+        open_tasks.append(tid)
+        if not t["dispatched"] and tid not in live:
+            admissible.append(tid)
+    return {
+        "live_lanes": len(st["lanes"]),
+        "open_tasks": len(open_tasks),
+        "admissible": admissible,
+        "parked": parked,
+    }
+
+
+def _clip(text, limit):
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[: max(limit - 3, 0)] + "..."
+
+
+def _short(sha):
+    return sha[:12] if isinstance(sha, str) else str(sha)
+
+
+def _task_line(t, level):
+    if level >= 1:
+        label = t["state"]
+        if t["parked"]:
+            label = "parked:%s" % t["parked"]
+        elif t["status"] and t["state"] == "returned":
+            label = "returned:%s" % t["status"]
+        return "- %s %s" % (t["id"], label)
+    parts = ["- %s: %s" % (t["id"], t["state"])]
+    if t["state"] == "dispatched":
+        parts.append("lane=%s run=%s" % (t["lane"], t["run"]))
+        if t["deadline"]:
+            parts.append("deadline=%s" % t["deadline"])
+    elif t["state"] == "returned":
+        parts.append("status=%s lane=%s run=%s" % (t["status"], t["lane"], t["run"]))
+    elif t["state"] == "parked":
+        parts.append("needs=%s" % t["parked"])
+        if t["reason"]:
+            parts.append("(%s)" % _clip(t["reason"], 80))
+    elif t["state"] == "landed" and t["sha"]:
+        parts.append("sha=%s" % _short(t["sha"]))
+    elif t["state"] in ("accepted", "rejected", "reverted") and t["reason"]:
+        parts.append("(%s)" % _clip(t["reason"], 80))
+    return " ".join(parts)
+
+
+def render_digest(st, judgements, task_level):
+    summary = classify(st)
+    out = ["# Loop state"]
+    op = st["open"]
+    if op:
+        out.append(
+            "goal %s, tier %s, root %s (%s)"
+            % (op.get("goal_sha256"), op.get("tier"), op.get("root"), op.get("root_model"))
+        )
+    else:
+        out.append("goal unknown (no open event)")
+    status = "seq %d" % st["last_seq"]
+    if st["close"]:
+        status += ", closed: %s" % st["close"].get("reason")
+    if st["bad"]:
+        status += ", %d unreadable lines" % st["bad"]
+    out.append(status)
+    if st["last_gate"]:
+        g = st["last_gate"]
+        out.append("last gate: %s %s exit %s" % (g.get("scope"), _short(g.get("sha")), g.get("exit")))
+    out.append("")
+    out.append("## Live lanes (%d)" % summary["live_lanes"])
+    for run, info in st["lanes"].items():
+        line = "- %s task %s run %s" % (info["lane"], info["task"], run)
+        if info["deadline"]:
+            line += " deadline %s" % info["deadline"]
+        out.append(line)
+    out.append("")
+    out.append("## Admissible (%d)" % len(summary["admissible"]))
+    out.append(", ".join(summary["admissible"]) if summary["admissible"] else "none")
+    out.append("")
+    tasks = [st["tasks"][i] for i in st["order"]]
+    if task_level >= 3:
+        out.append("## Tasks (%d, detail omitted)" % len(tasks))
+    else:
+        if task_level == 2:
+            shown = [t for t in tasks if t["state"] not in ("landed", "accepted")]
+            out.append("## Tasks (%d, %d done omitted)" % (len(tasks), len(tasks) - len(shown)))
+        else:
+            shown = tasks
+            out.append("## Tasks (%d)" % len(tasks))
+        for t in shown:
+            out.append(_task_line(t, task_level))
+    out.append("")
+    out.append("## Judgements (last %d)" % len(judgements))
+    for j in judgements:
+        scope = " ".join("%s=%s" % (k, j[k]) for k in ("task", "lane") if j.get(k))
+        out.append("- #%s%s %s" % (j.get("seq"), (" " + scope) if scope else "", _clip(j["text"], 400)))
+    return "\n".join(out) + "\n"
+
+
+def build_digest(st):
+    """At most DIGEST_MAX_BYTES. Over the limit: drop the oldest judgements first, then reduce
+    task detail, then cut."""
+    judgements = st["judgements"][-JUDGEMENTS_IN_DIGEST:]
+    text = ""
+    for task_level in (0, 1, 2, 3):
+        for drop in range(len(judgements) + 1):
+            text = render_digest(st, judgements[drop:], task_level)
+            if len(text.encode("utf-8")) <= DIGEST_MAX_BYTES:
+                return text
+        judgements = []
+    marker = "\n[truncated]\n"
+    cut = text.encode("utf-8")[: DIGEST_MAX_BYTES - len(marker)]
+    return cut.decode("utf-8", "ignore") + marker
+
+
+# ---------------------------------------------------------------------------- CLI
+
+
+def _pop_by(args):
+    by, rest, i = None, [], 0
+    while i < len(args):
+        a = args[i]
+        if a == "--by":
+            if i + 1 >= len(args):
+                raise Rejected("--by needs a value")
+            by = args[i + 1]
+            i += 2
+        elif a.startswith("--by="):
+            by = a[len("--by=") :]
+            i += 1
+        else:
+            rest.append(a)
+            i += 1
+    return by, rest
+
+
+def cmd_append(args):
+    by, rest = _pop_by(args)
+    if not rest:
+        raise Rejected("usage: loop-state append <log> [<ev> k=v ...] [--by ...]")
+    log_path, rest = rest[0], rest[1:]
+    if rest:
+        event = parse_kv(rest[0], rest[1:])
+    else:
+        try:
+            event = json.loads(sys.stdin.read())
+        except ValueError as exc:
+            raise Rejected("stdin is not valid JSON (%s)" % exc)
+        if not isinstance(event, dict):
+            raise Rejected("event must be a JSON object")
+        for key in ("v", "seq", "ts"):
+            if key in event:
+                raise Rejected("%s is set by loop-state" % key)
+    framed = do_append(log_path, event, by)
+    sys.stdout.write("seq=%d\n" % framed["seq"])
+    return 0
+
+
+def cmd_digest(args):
+    as_json = "--json" in args
+    rest = [a for a in args if a != "--json"]
+    if len(rest) != 1:
+        sys.stderr.write("usage: loop-state digest <log> [--json]\n")
+        return 2
+    try:
+        st = fold(rest[0])
+    except OSError as exc:
+        sys.stderr.write("loop-state: cannot read %s: %s\n" % (rest[0], exc.strerror))
+        return 1
+    if as_json:
+        sys.stdout.write(json.dumps(classify(st), separators=(",", ":")) + "\n")
+    else:
+        sys.stdout.write(build_digest(st))
+    return 0
+
+
+def cmd_check(args):
+    if len(args) != 1:
+        sys.stderr.write("usage: loop-state check <log>\n")
+        return 2
+    try:
+        err = do_check(args[0])
+    except OSError as exc:
+        sys.stderr.write("loop-state: cannot read %s: %s\n" % (args[0], exc.strerror))
+        return 1
+    if err:
+        sys.stderr.write("loop-state: %s\n" % err)
+        return 1
+    return 0
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help"):
+        sys.stdout.write(__doc__)
+        return 0 if argv else 2
+    cmd, args = argv[0], argv[1:]
+    try:
+        if cmd == "append":
+            return cmd_append(args)
+        if cmd == "digest":
+            return cmd_digest(args)
+        if cmd == "check":
+            return cmd_check(args)
+    except Rejected as exc:
+        sys.stderr.write("loop-state: %s\n" % exc)
+        return 2
+    except OSError as exc:
+        sys.stderr.write("loop-state: %s\n" % exc)
+        return 1
+    sys.stderr.write("loop-state: unknown command %r\n" % cmd)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -1,6 +1,6 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
-python_tests := "bin.test_loop_pi_install bin.test_loop_pi_preflight bin.test_loop_pi_audit bin.test_leak_scan"
+python_tests := "bin.test_loop_pi_install bin.test_loop_pi_preflight bin.test_loop_pi_audit bin.test_leak_scan bin.test_loop_state"
 
 # List the recipes
 default:
@@ -25,7 +25,7 @@ fmt-check:
 [group('check')]
 lint:
     npx tsc --noEmit -p tsconfig.json
-    python3 -c 'import ast, sys; [ast.parse(open(f).read(), f) for f in sys.argv[1:]]' bin/loop-pi-install bin/loop-pi-preflight bin/loop-pi-audit bin/leak-scan bin/leak-terms-hash
+    python3 -c 'import ast, sys; [ast.parse(open(f).read(), f) for f in sys.argv[1:]]' bin/loop-pi-install bin/loop-pi-preflight bin/loop-pi-audit bin/leak-scan bin/leak-terms-hash bin/loop-state
 
 # Run the extension tests (faux provider, no live model) and the Python tool tests
 [group('check')]

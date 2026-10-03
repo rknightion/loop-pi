@@ -16,6 +16,14 @@ import {
   type WatcherSnapshot,
 } from "./core.ts";
 import { registerWatchProcess } from "./lane.ts";
+import {
+  type AsyncStartedPayload,
+  laneTimerReason,
+  payloadDeadlineMs,
+  runIdFromReason,
+  subagentArgsDeadlineMs,
+} from "./lane-timers.ts";
+import { registerRuntimeEntry } from "./runtime-entry.ts";
 
 interface LoopWaitStateSnapshot {
   timers: TimerSnapshot[];
@@ -67,6 +75,10 @@ export default function (pi: ExtensionAPI): void {
   let deliveryQueue: DeliveryQueue<LoopWaitMessage> | undefined;
   let liveCtx: ExtensionContext | undefined;
   let suppressDelivery = false;
+  // Session identities pi-subagents may stamp on this session's async-started events.
+  let sessionIdentities = new Set<string>();
+  // Deadline from a launching call's brief, by toolCallId, until that call's result names the run.
+  const briefDeadlines = new Map<string, number>();
 
   const persist = () => {
     pi.appendEntry<LoopWaitStateSnapshot>("loop-wait-state", {
@@ -85,6 +97,8 @@ export default function (pi: ExtensionAPI): void {
     deliveryQueue = undefined;
   };
 
+  // Registered first so it runs before this entry's own session_start handler below.
+  registerRuntimeEntry(pi);
   registerWatchProcess(pi);
 
   pi.registerTool({
@@ -252,6 +266,61 @@ export default function (pi: ExtensionAPI): void {
     (data as { reply: (ws: WatcherSnapshot[]) => void }).reply(watchManager?.list() ?? []);
   });
 
+  // Lane deadline timers. Every async lane this session launches gets a loop-wait timer at its
+  // deadline, so the root is woken if the lane never returns. The timer's reason names the run id;
+  // a completion cancels by it, including a wake that already fired but is still queued. Timers
+  // the root armed itself are never touched: only reasons that name a run are matched.
+  const laneTimersFor = (runId: string) => (timerManager?.list() ?? []).filter((t) => runIdFromReason(t.reason) === runId);
+
+  const armLaneTimer = (runId: string, agent: unknown, deadlineMs: number) => {
+    if (!timerManager) return;
+    for (const existing of laneTimersFor(runId)) timerManager.cancel(existing.id);
+    timerManager.arm(new Date(deadlineMs).toISOString(), laneTimerReason(runId, agent));
+    persist();
+  };
+
+  pi.events.on("subagent:async-started", (data) => {
+    const payload = data as AsyncStartedPayload;
+    if (typeof payload.id !== "string" || typeof payload.sessionId !== "string") return;
+    if (!sessionIdentities.has(payload.sessionId)) return;
+    const deadlineMs = payloadDeadlineMs(payload, getAgentDir(), Date.now());
+    if (deadlineMs === null) return;
+    armLaneTimer(payload.id, payload.agent, deadlineMs);
+  });
+
+  pi.events.on("subagent:async-complete", (data) => {
+    const runId = (data as { runId?: unknown }).runId;
+    if (typeof runId !== "string") return;
+    const live = laneTimersFor(runId);
+    for (const timer of live) timerManager?.cancel(timer.id);
+    const queued = (m: LoopWaitMessage) =>
+      m.customType === "loop-wake" && runIdFromReason((m.details as { reason?: string } | undefined)?.reason ?? "") === runId;
+    const dropped = deliveryQueue?.removePending(queued) ?? [];
+    if (live.length > 0 || dropped.length > 0) persist();
+  });
+
+  // The async-started payload redacts the brief, so a `Deadline:` line is read from the launching
+  // call's arguments and applied once that call's result names the run id.
+  pi.on("tool_execution_start", (event) => {
+    if (event.toolName !== "subagent") return;
+    const deadlineMs = subagentArgsDeadlineMs(event.args);
+    if (deadlineMs !== null) briefDeadlines.set(event.toolCallId, deadlineMs);
+  });
+  pi.on("tool_execution_end", (event) => {
+    const deadlineMs = briefDeadlines.get(event.toolCallId);
+    if (deadlineMs === undefined) return;
+    briefDeadlines.delete(event.toolCallId);
+    if (event.isError) return;
+    const details = (event.result as { details?: { runId?: unknown; asyncId?: unknown } } | undefined)?.details;
+    const runId = typeof details?.runId === "string" ? details.runId : details?.asyncId;
+    if (typeof runId !== "string") return;
+    const [existing] = laneTimersFor(runId);
+    // Only a run whose timer was armed (this session's, still running) is re-timed.
+    if (!existing) return;
+    const agent = /^lane run=\S+ agent=(\S+) /.exec(existing.reason)?.[1];
+    armLaneTimer(runId, agent, deadlineMs);
+  });
+
   // session_compact/session_compact_failed fire while the session's own isCompacting flag is
   // still true (it clears immediately afterward, in the same synchronous call), so a same-tick
   // flush can see a false "still busy" reading. Retry on a short backoff instead of trusting the
@@ -288,6 +357,10 @@ export default function (pi: ExtensionAPI): void {
     suppressDelivery = false;
     const agentDir = getAgentDir();
     const sessionId = ctx.sessionManager.getSessionId();
+    sessionIdentities = new Set(
+      [sessionId, ctx.sessionManager.getSessionFile?.()].filter((id): id is string => typeof id === "string" && id !== ""),
+    );
+    briefDeadlines.clear();
     const runDir = runDirFor(agentDir, sessionId);
 
     deliveryQueue = new DeliveryQueue<LoopWaitMessage>({

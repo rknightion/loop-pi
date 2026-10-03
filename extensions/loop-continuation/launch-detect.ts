@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { type OpsLine, parseOpsLine } from "./ops-grants.ts";
 
 // Ported from the author's loop_launch.py (frozen spec: seam v2.1 section 1),
 // restricted to the "v2" (strict) report grammar. loop-pi has no pre-existing ACTIVATED_AT
@@ -18,6 +19,11 @@ export interface LaunchInfo {
   loop: number | null;
   /** ISO timestamp of the launch prompt, used to check the report postdates it. */
   launchTs: string;
+}
+
+/** A recognised launch plus what its text says about ops grants (never persisted as part of LaunchInfo). */
+export interface ParsedLaunch extends LaunchInfo {
+  opsLine: OpsLine;
 }
 
 const MARKER_RE = /\bYou are the (?:campaign )?root\b/;
@@ -144,12 +150,12 @@ export function parseLaunch(
   cwd: string | null,
   launchTs: string,
   readFile: ReadFile = defaultReadFile,
-): LaunchInfo | null {
+): ParsedLaunch | null {
   if (!text) return null;
 
   const direct = recognize(text, cwd || null);
   if (direct !== null) {
-    return { report: direct.report, loop: direct.loop, launchTs };
+    return { report: direct.report, loop: direct.loop, launchTs, opsLine: parseOpsLine(text) };
   }
 
   const candidate = bareCandidatePath(text);
@@ -171,5 +177,5 @@ export function parseLaunch(
   // file must name an absolute report path.
   const inner = recognize(content, codexDirParent(launchPath));
   if (inner === null || !inner.report.startsWith("/")) return null;
-  return { report: inner.report, loop: inner.loop, launchTs };
+  return { report: inner.report, loop: inner.loop, launchTs, opsLine: parseOpsLine(content) };
 }

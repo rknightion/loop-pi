@@ -173,5 +173,61 @@
     "row": 39,
     "tool": "bash",
     "command": "perl -0pi -e \"s/TIPAVIVO\\(c\\.razikino_derob_at,c\\.razikino_started_at,c\\.vokuvin_at,\\)/TIPAVIVO(c.razikino_derob_at,c.razikino_started_at,c.vokuvin_at,'')/\" /home/user/.loop-pi-jeruzofu/cusazoco/--Xunah-qer-repos-kixenuj-lipibuc--/subagent-qefaluhiz/xoloper/3eci2279-xe55-169u-h926-80ba8932w5s2/codex/tuca93-tonucoc/mod-4948-ac2-kazobepe.md; jepico -a 256 /home/user/.loop-pi-jeruzofu/cusazoco/--Xunah-qer-repos-kixenuj-lipibuc--/subagent-qefaluhiz/xoloper/3eci2279-xe55-169u-h926-80ba8932w5s2/codex/tuca93-tonucoc/mod-4948-ac2-kazobepe.md"
+  },
+  {
+    "row": 40,
+    "tool": "bash",
+    "command": "gh release edit v8.2.0 --draft=false --notes-file /tmp/notes.md",
+    "added": true,
+    "lane_blocks": true
+  },
+  {
+    "row": 41,
+    "tool": "bash",
+    "command": "gh release delete v8.1.0 --yes --cleanup-tag",
+    "added": true,
+    "lane_blocks": true
+  },
+  {
+    "row": 42,
+    "tool": "bash",
+    "command": "gh workflow run deploy-worker.yml --ref main -f environment=production",
+    "added": true,
+    "lane_blocks": true
+  },
+  {
+    "row": 43,
+    "tool": "bash",
+    "command": "jq '.ops[0].allow += [\"^.*$\"]' codex/ops-fexo-loop4.json > /tmp/o.json && mv /tmp/o.json codex/ops-fexo-loop4.json",
+    "added": true,
+    "lane_blocks": true
+  },
+  {
+    "row": 44,
+    "tool": "bash",
+    "command": "printf '%s\\n' '{\"v\":1,\"ev\":\"land\",\"task\":\"T-12\"}' >> codex/state-fexo-loop4.jsonl",
+    "added": true,
+    "lane_blocks": true
+  },
+  {
+    "row": 45,
+    "tool": "bash",
+    "command": "tee codex/goal-fexo-loop4.md < /tmp/goal.md",
+    "added": true,
+    "lane_blocks": true
+  },
+  {
+    "row": 46,
+    "tool": "bash",
+    "command": "cat codex/ops-fexo-loop4.json codex/state-fexo-loop4.jsonl | jq -c . | head -20",
+    "added": true,
+    "lane_blocks": false
+  },
+  {
+    "row": 47,
+    "tool": "bash",
+    "command": "gh release view v8.2.0 --json tagName,isDraft && gh workflow list --limit 5",
+    "added": true,
+    "lane_blocks": false
   }
 ]

@@ -127,6 +127,10 @@ before any `await`. A missing reply means the provider extension is not loaded; 
 - `loop-wait:arm-timer` `{ at: string /*ISO*/; reason: string; reply(r: { id: string; at: string }) }`
   - loop-wait root arms a timer exactly as `wake_at` would.
 - `loop-wait:query-watchers` `{ reply(ws: { id: string; label: string; pid: number; phase: string }[]) }`
+- `loop-continuation:query-launch` `{ cwd?: string; reply(r: { reportPath: string; opsPath: string | null; ops: object | null } | null) }`
+  - loop-continuation answers from its frozen launch state. `ops` is the parsed ops file read and
+    hash-checked once at launch detection; a missing, mismatched or invalid file gives `ops: null`
+    and an `incidents/ops/` record. Later edits to the file are ignored.
 - `loop-guard` needs "is any async subagent run active" for its root rule. It owns detecting that
   (pi-subagents public API if one exists, else tracking `subagent` results and `subagent-notify`
   messages). No other extension provides it.
@@ -163,6 +167,35 @@ before any `await`. A missing reply means the provider extension is not loaded; 
   uploads are not serialised across processes.
   Ignore failures. The installer lays the script out only when an overlay provides it.
 - The agent set (the only names the root may spawn): `mapper`, `mapper-deep`, `gate-runner`,
-  `lane-worker`, `lane-worker-push`, `lane-worker-retry`, `lane-worker-retry-push`, `complex-worker`,
-  `complex-worker-push`, `reviewer`,
-  `reviewer-high`, `security-reviewer`, `rescue-sol`, `rescue-astra`.
+  `lane-worker`, `lane-worker-push`, `lane-worker-low`, `lane-worker-low-push`, `lane-worker-retry`,
+  `lane-worker-retry-push`, `complex-worker`, `complex-worker-push`, `reviewer`, `reviewer-high`,
+  `security-reviewer`, `rescue-sol`, `rescue-astra`, `ops`, `triager`.
+- Every agent file sets `inheritGlobalContext: false`; the installer appends the home's
+  `lane-policy.md` after a `<!-- lane-policy -->` marker instead.
+- Root extensions also include `loop-state/index.ts`: it appends `dispatch` and `return` to
+  `codex/state-<stem>-loop<N>.jsonl` (sibling of the report) through `<agentDir>/bin/loop-state`
+  for `subagent` calls whose brief starts `Lane: <id> · Task: <id> · Tier: ...`, and injects the
+  recovery digest (`loop-state-digest`, no turn) after compaction and at session start.
+  pi-subagents' async events carry `sessionId` as the parent's session file path
+  (`getSessionFile() ?? getSessionId()`) and `deadlineAt` in epoch ms.
+- Lane timers: loop-wait root arms a timer on `subagent:async-started` for this session (brief
+  `Deadline:`, else `deadlineAt`, else `timeoutMs`) and cancels it on `subagent:async-complete` by
+  run id.
+- Close-out: at settle, loop-continuation reads `loop-state digest --json`; with no live lanes, no
+  admissible task and nothing else armed it nudges `close-out` instead of releasing a WAITING.
+  WAITING and PAUSED lines are matched after stripping leading `[\s*_`>-]` and trailing
+  `[\s.!*_`)]` decoration.
+- Ops lanes: the root binds `{"loop-pi.guard/1":{"agent":"ops","surface":"<id>","entry":{...}}}`
+  only for a surface in the frozen ops file with no active ops run on it. The lane allows a
+  lane-forbidden command only on a full `^(?:pattern)$` match of `entry.allow`, a secret write only to
+  an exact `entry.secret_paths` member, and credential creation only for kind `credential-create`.
+  Single-flight is a kernel flock under `~/.local/state/loop-pi/ops-locks/<surface>.lock` (override
+  `LOOP_PI_OPS_LOCK_DIR`); coverage is per machine. Every lane is refused writes to `codex/ops-*`,
+  `codex/state-*` and `codex/goal-*`.
+- Dispatcher: `loop-pi-dispatch[-variant]` runs a pi session with only `dispatcher/index.ts` and the
+  in-process `loop-dispatch/idle` model, which answers pi-subagents' completion turns without a
+  model call. It spawns lanes over the `subagents:rpc:v1` bus with the same identity binding and
+  fail-closed child registration, writes every state event itself, and runs `loop-pi-audit
+  closeout` and `loopPi.onClose` (argv lists with `{log}` and `{report}`) before it exits.
+- Runtime entry: each session appends `loop-pi-runtime` `{v:1, variant, models:{<id>:{service_tier}}}`
+  at `session_start` (variant from the home receipt's `variant`).

@@ -25,6 +25,8 @@
 // other stage sees the text; their bodies are then treated by the command that
 // receives them (see parseCommand).
 
+import type { OpsEntry } from "./ops.ts";
+
 export type Role = "root" | "lane";
 
 export interface Decision {
@@ -65,13 +67,19 @@ export const C3_AGENTS: ReadonlySet<string> = new Set([
   "security-reviewer",
   "rescue-sol",
   "rescue-astra",
+  "lane-worker-low",
+  "lane-worker-low-push",
+  "triager",
+  "ops",
 ]);
 
 // ---------------------------------------------------------------------------
 // Lexer
 // ---------------------------------------------------------------------------
 
-type Op = { op: string };
+/** `target` is set on a `redir` op: the word a redirection writes to (`>`, `>>`, `>|`, `&>`,
+ *  `<>`, `N>&M`). Input redirections carry no target. */
+type Op = { op: string; target?: string };
 type Token = string | Op;
 
 function isOp(tok: Token): tok is Op {
@@ -82,9 +90,11 @@ function isOp(tok: Token): tok is Op {
  *
  * Recognises `;`, `&&`, `||`, `|`, `\n`, a bare background `&` and unquoted
  * `(` / `)` (subshells, function definitions, case arms) as operators.
- * Redirect operators (`<`, `>`, `>>`) are consumed and dropped rather than
- * tokenized, and an `&` immediately adjacent to `>` (covers `>&`, `&>`, `N>&M`)
- * is treated as part of a redirect, never as the background operator. Heredocs
+ * Redirect operators (`<`, `>`, `>>`, `>|`, `<>`) and their file word become one
+ * `redir` op (carrying the target for a write), never a command word; an
+ * unquoted all-digit word written right before the operator is its fd number
+ * and is dropped with it. An `&` immediately adjacent to `>` (covers `>&`, `&>`,
+ * `N>&M`) is treated as part of a redirect, never as the background operator. Heredocs
  * and here-strings are replaced by placeholder words in stripHeredocs before
  * this runs; a `<<` that still reaches the lexer means the pre-pass did not
  * recognise it and fails the lex (return null): the caller falls back to the
@@ -95,15 +105,36 @@ function lex(command: string): Token[] | null {
   let word = "";
   let started = false;
   let quote: '"' | "'" | null = null;
+  // Set after a redirection operator: the next word is its file, not a command word.
+  let redirect: "in" | "out" | null = null;
+  // The current word has (or had) quoted characters: never an fd number.
+  let wordQuoted = false;
   let i = 0;
   const n = command.length;
 
   const flush = () => {
     if (started) {
-      tokens.push(word);
+      if (redirect) tokens.push({ op: "redir", ...(redirect === "out" ? { target: word } : {}) });
+      else tokens.push(word);
+      redirect = null;
       word = "";
       started = false;
+      wordQuoted = false;
     }
+  };
+  const pushOp = (op: string) => {
+    redirect = null;
+    tokens.push({ op });
+  };
+  /** At a redirection operator: drop an adjacent unquoted fd number, else end the word. */
+  const startRedirect = (mode: "in" | "out") => {
+    if (started && !wordQuoted && !redirect && /^[0-9]+$/.test(word)) {
+      word = "";
+      started = false;
+    } else {
+      flush();
+    }
+    redirect = mode === "out" || redirect === "out" ? "out" : "in";
   };
 
   while (i < n) {
@@ -131,6 +162,7 @@ function lex(command: string): Token[] | null {
     if (c === "'" || c === '"') {
       quote = c as '"' | "'";
       started = true;
+      wordQuoted = true;
       i++;
       continue;
     }
@@ -140,6 +172,7 @@ function lex(command: string): Token[] | null {
       if (command[i] !== "\n") {
         word += command[i];
         started = true;
+        wordQuoted = true;
       }
       i++;
       continue;
@@ -156,61 +189,62 @@ function lex(command: string): Token[] | null {
     }
     if (c === "\n") {
       flush();
-      tokens.push({ op: "\n" });
+      pushOp("\n");
       i++;
       continue;
     }
     if (c === ";") {
       flush();
-      tokens.push({ op: ";" });
+      pushOp(";");
       i++;
       continue;
     }
     if (c === "(" || c === ")") {
       flush();
-      tokens.push({ op: c });
+      pushOp(c);
       i++;
       continue;
     }
     if (c === "|") {
       flush();
       if (command[i + 1] === "|") {
-        tokens.push({ op: "||" });
+        pushOp("||");
         i += 2;
       } else {
-        tokens.push({ op: "|" });
+        pushOp("|");
         i += 1;
       }
       continue;
     }
     if (c === "&") {
-      flush();
-      if (command[i + 1] === "&") {
-        tokens.push({ op: "&&" });
-        i += 2;
-        continue;
-      }
       const prev = i > 0 ? command[i - 1] : "";
       const next = command[i + 1] ?? "";
-      if (prev === ">" || next === ">") {
-        // Part of a redirect (`>&`, `&>`, `N>&M`), never a background operator.
+      if (prev === ">" || prev === "<" || next === ">") {
+        // Part of a redirect (`>&`, `<&`, `&>`, `N>&M`), never a background operator.
+        if (next === ">") flush();
         i += 1;
         continue;
       }
-      tokens.push({ op: "&" });
+      flush();
+      if (next === "&") {
+        pushOp("&&");
+        i += 2;
+        continue;
+      }
+      pushOp("&");
       i += 1;
       continue;
     }
     if (c === "<") {
       if (command[i + 1] === "<") return null; // heredoc unsupported
-      flush();
+      startRedirect("in");
       i += 1;
       continue;
     }
     if (c === ">") {
-      flush();
+      startRedirect("out");
       i += 1;
-      if (command[i] === ">") i += 1; // >>
+      if (command[i] === ">" || command[i] === "|") i += 1; // >> and >|
       continue;
     }
     word += c;
@@ -219,21 +253,31 @@ function lex(command: string): Token[] | null {
   }
   if (quote) return null; // unterminated quote
   flush();
+  if (redirect) tokens.push({ op: "redir" }); // operator with no file word: keep it out of every segment
   return tokens;
 }
 
 /** Split lexed tokens into segments at `;`, `&&`, `||`, `|`, newline, `&`,
  *  `(` and `)`.
  *  Returns the segments, whether each one pipes its stdout into the next
- *  (`pipesToNext[i]`), and whether a bare background `&` operator occurred. */
-function splitSegments(tokens: Token[]): { segments: string[][]; pipesToNext: boolean[]; hasBackground: boolean } {
+ *  (`pipesToNext[i]`), whether a bare background `&` operator occurred, and
+ *  every file a redirection writes to. */
+function splitSegments(tokens: Token[]): {
+  segments: string[][];
+  pipesToNext: boolean[];
+  hasBackground: boolean;
+  writeTargets: string[];
+} {
   const segments: string[][] = [];
   const pipesToNext: boolean[] = [];
+  const writeTargets: string[] = [];
   let current: string[] = [];
   let hasBackground = false;
   const SEPARATORS = new Set([";", "&&", "||", "|", "\n", "&", "(", ")"]);
   for (const tok of tokens) {
-    if (isOp(tok) && SEPARATORS.has(tok.op)) {
+    if (isOp(tok) && tok.op === "redir") {
+      if (tok.target !== undefined) writeTargets.push(tok.target);
+    } else if (isOp(tok) && SEPARATORS.has(tok.op)) {
       if (tok.op === "&") hasBackground = true;
       if (current.length) {
         segments.push(current);
@@ -248,7 +292,7 @@ function splitSegments(tokens: Token[]): { segments: string[][]; pipesToNext: bo
     segments.push(current);
     pipesToNext.push(false);
   }
-  return { segments, pipesToNext, hasBackground };
+  return { segments, pipesToNext, hasBackground, writeTargets };
 }
 
 // ---------------------------------------------------------------------------
@@ -878,6 +922,8 @@ export interface ParsedCommand {
    *  its script from stdin (`python3 - <<EOF`, `cat <<EOF | node`). Not
    *  blocked as such; evaluateBashCommand gives each the fallback text scan. */
   interpreterScripts: string[];
+  /** Every file an output redirection writes to, nested parses included. */
+  writeTargets: string[];
 }
 
 const MAX_DEPTH = 8;
@@ -919,7 +965,7 @@ export function parseCommand(
   if (role === "lane" && hasUnextractedSubstitution(extracted.text)) return null;
   const tokens = lex(extracted.text);
   if (!tokens) return null;
-  const { segments: rawSegments, pipesToNext, hasBackground } = splitSegments(tokens);
+  const { segments: rawSegments, pipesToNext, hasBackground, writeTargets } = splitSegments(tokens);
 
   const segments: string[][] = [];
   let hasBackgroundOperator = hasBackground;
@@ -929,6 +975,7 @@ export function parseCommand(
     segments.push(...nested.segments);
     hasBackgroundOperator = hasBackgroundOperator || nested.hasBackgroundOperator;
     interpreterScripts.push(...nested.interpreterScripts);
+    writeTargets.push(...nested.writeTargets);
   };
 
   // Pull heredoc placeholders and here-string markers out of every segment,
@@ -1020,7 +1067,7 @@ export function parseCommand(
     absorb(nested);
   }
 
-  return { segments, hasBackgroundOperator, interpreterScripts };
+  return { segments, hasBackgroundOperator, interpreterScripts, writeTargets };
 }
 
 // ---------------------------------------------------------------------------
@@ -1294,40 +1341,394 @@ function isInterpreterHead(head: string): boolean {
   return PYTHON_INTERPRETER.test(head) || ["node", "nodejs", "perl", "ruby", "deno", "bun"].includes(head);
 }
 
-/** Releases, mutating `gh api` and secret-store writes, blocked for lanes.
+export type ForbiddenCategory = "release" | "workflow" | "api" | "secret" | "credential";
+
+export interface ForbiddenCommand {
+  label: string;
+  category: ForbiddenCategory;
+}
+
+/** `gh api` with a mutating method or a request body (`-X/--method POST|PUT|PATCH|DELETE` in any
+ *  spelling, `-f/-F/--field/--raw-field`, `--input`). */
+function isMutatingGhApi(rest: string[]): boolean {
+  for (let i = 0; i < rest.length; i++) {
+    const t = rest[i];
+    let method: string | undefined;
+    if (t === "-X" || t === "--method") method = rest[i + 1];
+    else if (t.startsWith("--method=")) method = t.slice("--method=".length);
+    else if (/^-X./.test(t)) method = t.slice(2);
+    if (method !== undefined && /^(POST|PUT|PATCH|DELETE)$/i.test(method)) return true;
+    if (["-f", "-F", "--field", "--raw-field", "--input"].includes(t)) return true;
+    if (/^-[fF]./.test(t) || /^--(field|raw-field|input)=/.test(t)) return true;
+  }
+  return false;
+}
+
+const AWS_SECRET_WRITES = new Set(["put-secret-value", "create-secret", "update-secret"]);
+const AWS_IAM_CREDENTIALS = new Set([
+  "create-access-key",
+  "create-login-profile",
+  "update-login-profile",
+  "create-service-specific-credential",
+  "reset-service-specific-credential",
+]);
+
+/** The aws `<service> <operation>` pair, found past any global options (`aws --region x iam ...`). */
+function awsServiceCall(rest: string[], service: string, operations: ReadonlySet<string>): string | undefined {
+  const at = rest.indexOf(service);
+  if (at < 0 || !operations.has(rest[at + 1] ?? "")) return undefined;
+  return rest[at + 1];
+}
+
+/** Releases, workflow dispatch, mutating `gh api`, secret-store writes and credential creation,
+ *  blocked for every lane unless an ops grant re-allows the exact command (opsPermits).
  *
- * Design decision: lanes may deploy, change clusters and cloud
- * resources, and ssh. The concrete secret-store commands recognised are `gh secret set`,
- * `vault write` / `vault kv put`, `bao write` / `bao kv put` / `bao secret
- * put`, `op item create|edit`, and `aws secretsmanager put-secret-value|
- * create-secret|update-secret`.
+ * Design decision: lanes may deploy, change clusters and cloud resources, and ssh.
+ * - release: `gh release create|edit|delete`.
+ * - workflow: `gh workflow run`.
+ * - api: mutating `gh api`.
+ * - secret: `gh secret set`, `vault write` / `vault kv put`, `bao write` / `bao kv put` /
+ *   `bao secret put`, `op item create|edit`, `aws secretsmanager put-secret-value|create-secret|
+ *   update-secret`.
+ * - credential: `vault|bao token create`, `aws iam create-access-key|create-login-profile|
+ *   update-login-profile|create-service-specific-credential|reset-service-specific-credential`,
+ *   `gcloud iam service-accounts keys create`, `gh ssh-key|gpg-key add`,
+ *   `az ad sp|app credential reset`, `az ad sp create-for-rbac`, `op service-account create`,
+ *   `op connect token create`.
  */
-function laneForbiddenCommand(tokens: string[]): string | undefined {
+export function classifyLaneForbidden(tokens: string[]): ForbiddenCommand | undefined {
   if (tokens.length === 0) return undefined;
   const head = basename(tokens[0]);
   const rest = tokens.slice(1);
+  const found = (label: string, category: ForbiddenCategory): ForbiddenCommand => ({ label, category });
   if (head === "gh") {
-    if (rest[0] === "release" && rest[1] === "create") return "gh release create";
-    if (rest[0] === "secret" && rest[1] === "set") return "gh secret set";
-    if (rest[0] === "api") {
-      const hasMethod = rest.some(
-        (t, i) => (t === "-X" || t === "--method") && /^(POST|PUT|PATCH|DELETE)$/i.test(rest[i + 1] ?? ""),
-      );
-      const hasField = rest.some((t) => t === "-f" || t === "-F" || t === "--raw-field" || t === "--field");
-      if (hasMethod || hasField) return "gh api (mutating)";
+    if (rest[0] === "release" && ["create", "edit", "delete"].includes(rest[1])) return found(`gh release ${rest[1]}`, "release");
+    if (rest[0] === "workflow" && rest[1] === "run") return found("gh workflow run", "workflow");
+    if (rest[0] === "secret" && rest[1] === "set") return found("gh secret set", "secret");
+    if (rest[0] === "api" && isMutatingGhApi(rest.slice(1))) return found("gh api (mutating)", "api");
+    if ((rest[0] === "ssh-key" || rest[0] === "gpg-key") && rest[1] === "add") return found(`gh ${rest[0]} add`, "credential");
+  }
+  if (head === "vault" || head === "bao") {
+    if (rest[0] === "write" || (rest[0] === "kv" && rest[1] === "put")) return found(`${head} write`, "secret");
+    if (head === "bao" && rest[0] === "secret" && rest[1] === "put") return found("bao write", "secret");
+    if (rest[0] === "token" && rest[1] === "create") return found(`${head} token create`, "credential");
+  }
+  if (head === "op") {
+    if (rest[0] === "item" && ["create", "edit"].includes(rest[1])) return found("op item write", "secret");
+    if (rest[0] === "service-account" && rest[1] === "create") return found("op service-account create", "credential");
+    if (rest[0] === "connect" && rest[1] === "token" && rest[2] === "create") return found("op connect token create", "credential");
+  }
+  if (head === "aws") {
+    if (awsServiceCall(rest, "secretsmanager", AWS_SECRET_WRITES)) return found("aws secretsmanager write", "secret");
+    const iam = awsServiceCall(rest, "iam", AWS_IAM_CREDENTIALS);
+    if (iam) return found(`aws iam ${iam}`, "credential");
+  }
+  if (head === "gcloud") {
+    const at = rest.indexOf("iam");
+    if (at >= 0 && rest[at + 1] === "service-accounts" && rest[at + 2] === "keys" && rest[at + 3] === "create")
+      return found("gcloud iam service-accounts keys create", "credential");
+  }
+  if (head === "az" && rest[0] === "ad") {
+    if ((rest[1] === "sp" || rest[1] === "app") && rest[2] === "credential" && rest[3] === "reset")
+      return found(`az ad ${rest[1]} credential reset`, "credential");
+    if (rest[1] === "sp" && rest[2] === "create-for-rbac") return found("az ad sp create-for-rbac", "credential");
+  }
+  return undefined;
+}
+
+function laneForbiddenCommand(tokens: string[]): string | undefined {
+  return classifyLaneForbidden(tokens)?.label;
+}
+
+const LANE_FORBIDDEN_REASON =
+  "is a release, workflow dispatch, mutating gh api, secret-store write or credential creation, blocked for lanes";
+
+// ---------------------------------------------------------------------------
+// Secret-store write targets. An ops grant lets a secret write through only when the target
+// extracted here equals a member of `entry.secret_paths` exactly. Null means the target cannot be
+// read unambiguously, which refuses the write.
+//
+// - `vault|bao write [flags] <path> ...`: `<path>`.
+// - `vault|bao kv put [flags] <path> ...`, `bao secret put ...`: `<path>`, or `<mount>/<path>` with
+//   `-mount=<mount>`.
+//   Flags before the path must be `-name=value` or one of -force, -f, -non-interactive,
+//   -tls-skip-verify, -no-color; a later token starting with `-` (other than a bare `-`) refuses.
+// - `gh secret set <NAME> [flags]`: `<NAME>`. Exactly one positional; `-f/--env-file` (many names)
+//   or an unknown flag refuses. Repository, org and environment scope are pinned by the allow
+//   pattern, not by the target.
+// - `op item create`: `<vault>/<title>` from `--vault` and `--title`, both required.
+// - `op item edit <item>`: `<vault>/<item>`, `--vault` required.
+// - `aws secretsmanager put-secret-value|update-secret`: the `--secret-id` value;
+//   `create-secret`: the `--name` value. `--cli-input-json` / `--cli-input-yaml` refuses.
+// A flag given twice refuses.
+// ---------------------------------------------------------------------------
+
+const VAULT_BOOL_FLAGS = new Set(["force", "f", "non-interactive", "tls-skip-verify", "no-color"]);
+
+function vaultPathTarget(args: string[], mountAware: boolean): string | null {
+  const flags = new Map<string, string>();
+  let i = 0;
+  for (; i < args.length; i++) {
+    const t = args[i];
+    if (t === "--") {
+      i++;
+      break;
+    }
+    if (!t.startsWith("-") || t === "-") break;
+    const body = t.replace(/^--?/, "");
+    const eq = body.indexOf("=");
+    const name = eq >= 0 ? body.slice(0, eq) : body;
+    if (eq < 0 && !VAULT_BOOL_FLAGS.has(name)) return null;
+    if (flags.has(name)) return null;
+    flags.set(name, eq >= 0 ? body.slice(eq + 1) : "true");
+  }
+  const path = args[i];
+  if (path === undefined || path === "" || path === "-" || path.startsWith("-")) return null;
+  if (args.slice(i + 1).some((t) => t.startsWith("-") && t !== "-")) return null;
+  const mount = flags.get("mount");
+  if (mount !== undefined && !mountAware) return null;
+  if (mount !== undefined) return `${mount.replace(/\/+$/, "")}/${path.replace(/^\/+/, "")}`;
+  return path;
+}
+
+interface FlagSpec {
+  value: ReadonlySet<string>;
+  bool: ReadonlySet<string>;
+}
+
+/** pflag-style parse: `--name value`, `--name=value`, `-x value`, `-xvalue`. Null on an unknown flag
+ *  or a repeated value flag. */
+function parsePflags(args: string[], spec: FlagSpec): { flags: Map<string, string>; positionals: string[] } | null {
+  const flags = new Map<string, string>();
+  const positionals: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const t = args[i];
+    if (t === "--") {
+      positionals.push(...args.slice(i + 1));
+      break;
+    }
+    if (!t.startsWith("-") || t === "-") {
+      positionals.push(t);
+      continue;
+    }
+    let name: string;
+    let value: string | undefined;
+    if (t.startsWith("--")) {
+      const eq = t.indexOf("=");
+      name = eq >= 0 ? t.slice(0, eq) : t;
+      value = eq >= 0 ? t.slice(eq + 1) : undefined;
+    } else {
+      name = t.slice(0, 2);
+      value = t.length > 2 ? t.slice(2).replace(/^=/, "") : undefined;
+    }
+    if (spec.bool.has(name) && value === undefined) {
+      flags.set(name, "true");
+      continue;
+    }
+    if (!spec.value.has(name)) return null;
+    if (value === undefined) {
+      value = args[++i];
+      if (value === undefined) return null;
+    }
+    if (flags.has(name)) return null;
+    flags.set(name, value);
+  }
+  return { flags, positionals };
+}
+
+const GH_SECRET_SET_FLAGS: FlagSpec = {
+  value: new Set(["-b", "--body", "-e", "--env", "-f", "--env-file", "-o", "--org", "-R", "--repo", "-a", "--app", "-v", "--visibility", "-r", "--repos"]),
+  bool: new Set(["-u", "--user", "--no-store", "--no-repos-selected"]),
+};
+
+const OP_ITEM_FLAGS: FlagSpec = {
+  value: new Set([
+    "--vault", "--title", "--category", "--url", "--tags", "--template", "--account", "--session", "--config",
+    "--encoding", "--format", "--generate-password", "--ssh-generate-key",
+  ]),
+  bool: new Set(["--dry-run", "--favorite", "--debug", "--no-color", "--iso-timestamps", "--cache", "--reveal"]),
+};
+
+function awsOptionValue(args: string[], option: string): string | null {
+  let value: string | null = null;
+  for (let i = 0; i < args.length; i++) {
+    const t = args[i];
+    let v: string | undefined;
+    if (t === option) v = args[i + 1];
+    else if (t.startsWith(`${option}=`)) v = t.slice(option.length + 1);
+    if (v === undefined) continue;
+    if (value !== null) return null;
+    value = v;
+  }
+  return value;
+}
+
+export function secretWriteTarget(tokens: string[]): string | null {
+  const head = basename(tokens[0] ?? "");
+  const rest = tokens.slice(1);
+  if (head === "vault" || head === "bao") {
+    if (rest[0] === "write") return vaultPathTarget(rest.slice(1), false);
+    if ((rest[0] === "kv" && rest[1] === "put") || (head === "bao" && rest[0] === "secret" && rest[1] === "put"))
+      return vaultPathTarget(rest.slice(2), true);
+    return null;
+  }
+  if (head === "gh" && rest[0] === "secret" && rest[1] === "set") {
+    const parsed = parsePflags(rest.slice(2), GH_SECRET_SET_FLAGS);
+    if (!parsed || parsed.positionals.length !== 1) return null;
+    if (parsed.flags.has("-f") || parsed.flags.has("--env-file")) return null;
+    return parsed.positionals[0] || null;
+  }
+  if (head === "op" && rest[0] === "item" && (rest[1] === "create" || rest[1] === "edit")) {
+    const parsed = parsePflags(rest.slice(2), OP_ITEM_FLAGS);
+    if (!parsed) return null;
+    const vault = parsed.flags.get("--vault");
+    if (!vault) return null;
+    if (rest[1] === "create") {
+      const title = parsed.flags.get("--title");
+      return title ? `${vault}/${title}` : null;
+    }
+    const item = parsed.positionals[0];
+    return item && !item.includes("=") ? `${vault}/${item}` : null;
+  }
+  if (head === "aws") {
+    const at = rest.indexOf("secretsmanager");
+    const operation = rest[at + 1];
+    if (at < 0 || !AWS_SECRET_WRITES.has(operation ?? "")) return null;
+    const args = rest.slice(at + 2);
+    if (args.some((t) => /^--cli-input-(json|yaml)(=|$)/.test(t))) return null;
+    return awsOptionValue(args, operation === "create-secret" ? "--name" : "--secret-id");
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Ops grants (lane side): a lane-forbidden command passes for agent `ops` only when the whole
+// segment fully matches one of the entry's anchored `allow` patterns, a secret write targets a
+// member of `secret_paths` exactly, and a credential creation is under kind `credential-create`.
+// ---------------------------------------------------------------------------
+
+export interface LaneContext {
+  /** The ops entry bound to this lane by the root (agent `ops` only). */
+  ops?: OpsEntry;
+  /** The lane's working directory, for resolving relative write targets. */
+  cwd?: string;
+}
+
+/** One segment as the allow patterns see it: words joined by single spaces, any word holding
+ *  whitespace or shell syntax single-quoted. */
+export function opsSubject(segment: string[]): string {
+  return segment.map((w) => (/^[A-Za-z0-9_@%+=:,./^-]+$/.test(w) ? w : `'${w.replace(/'/g, `'\\''`)}'`)).join(" ");
+}
+
+function fullMatch(pattern: string, subject: string): boolean {
+  try {
+    return new RegExp(`^(?:${pattern})$`).test(subject);
+  } catch {
+    return false;
+  }
+}
+
+/** Null when the ops entry permits this forbidden segment, else the reason it does not. */
+function opsRefusal(segment: string[], stripped: string[], forbidden: ForbiddenCommand, entry: OpsEntry): string | null {
+  const subject = opsSubject(segment);
+  const surface = entry.surface;
+  if (!entry.allow.some((pattern) => pattern.startsWith("^") && fullMatch(pattern, subject))) {
+    return `'${forbidden.label}' does not fully match any allow pattern of ops surface '${surface}' (matched text: ${subject}).`;
+  }
+  if (forbidden.category === "credential" && entry.kind !== "credential-create") {
+    return `'${forbidden.label}' creates a credential; ops surface '${surface}' is kind '${entry.kind}', not credential-create.`;
+  }
+  if (forbidden.category === "secret") {
+    const target = secretWriteTarget(stripped);
+    if (target === null) return `the target of '${forbidden.label}' cannot be read unambiguously, so ops surface '${surface}' cannot grant it.`;
+    if (!(entry.secret_paths ?? []).includes(target)) {
+      return `'${forbidden.label}' writes '${target}', which is not in secret_paths of ops surface '${surface}'.`;
     }
   }
-  if (head === "vault" && (rest[0] === "write" || (rest[0] === "kv" && rest[1] === "put"))) return "vault write";
-  if (head === "bao" && (rest[0] === "write" || (rest[0] === "kv" && rest[1] === "put") || (rest[0] === "secret" && rest[1] === "put")))
-    return "bao write";
-  if (head === "op" && rest[0] === "item" && ["create", "edit"].includes(rest[1])) return "op item write";
-  if (
-    head === "aws" &&
-    rest[0] === "secretsmanager" &&
-    ["put-secret-value", "create-secret", "update-secret"].includes(rest[1])
-  )
-    return "aws secretsmanager write";
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Loop control files. Every lane is refused writes into `codex/ops-*`, `codex/state-*` and
+// `codex/goal-*` (and the `codex` directory itself for removal-shaped commands). Edit and write
+// tool paths are checked exactly (lane.ts); for bash this is best effort: redirection targets and
+// the path arguments of common file-writing commands.
+// ---------------------------------------------------------------------------
+
+const LOOP_CONTROL_FILE = /(?:^|\/)codex\/(?:ops|state|goal)-[^/]*$/i;
+const LOOP_CONTROL_DIR = /(?:^|\/)codex$/i;
+const LOOP_CONTROL_SAMPLES = ["ops-c-loop1.json", "state-c-loop1.jsonl", "goal-c-loop1.md"];
+
+function normalisePosix(path: string, cwd?: string): string {
+  let p = path;
+  if (cwd && !p.startsWith("/") && !p.startsWith("~") && !p.startsWith("$")) p = `${cwd.replace(/\/+$/, "")}/${p}`;
+  const parts: string[] = [];
+  for (const part of p.split("/")) {
+    if (part === "" || part === ".") continue;
+    if (part === "..") parts.pop();
+    else parts.push(part);
+  }
+  return (p.startsWith("/") ? "/" : "") + parts.join("/");
+}
+
+function globToRegExp(glob: string): RegExp | null {
+  let out = "";
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === "*") out += "[^/]*";
+    else if (c === "?") out += "[^/]";
+    else if (c === "[") {
+      const end = glob.indexOf("]", i + 1);
+      if (end < 0) return null;
+      out += `[${glob.slice(i + 1, end).replace(/^!/, "^").replace(/\\/g, "\\\\")}]`;
+      i = end;
+    } else out += c.replace(/[.+^${}()|\\]/g, "\\$&");
+  }
+  try {
+    return new RegExp(`^${out}$`, "i");
+  } catch {
+    return null;
+  }
+}
+
+/** True when `path` names a loop control file, or a glob in a `codex` directory that could. */
+export function isLoopControlPath(path: string, cwd?: string): boolean {
+  const p = normalisePosix(path.replace(/^file:\/\//, "").replace(/^@/, ""), cwd);
+  if (LOOP_CONTROL_FILE.test(p)) return true;
+  const slash = p.lastIndexOf("/");
+  const dir = slash >= 0 ? p.slice(0, slash) : "";
+  const name = p.slice(slash + 1);
+  if (/[*?[]/.test(name) && (LOOP_CONTROL_DIR.test(dir) || (dir === "" && LOOP_CONTROL_DIR.test(cwd ?? "")))) {
+    const re = globToRegExp(name);
+    return re === null || LOOP_CONTROL_SAMPLES.some((s) => re.test(s));
+  }
+  return false;
+}
+
+const WRITE_ALL_ARGS = new Set(["tee", "touch", "truncate", "rm", "unlink", "shred", "mv", "cp", "ln", "install", "rsync", "rmdir"]);
+const REMOVES_DIRS = new Set(["rm", "mv", "rmdir", "rsync"]);
+
+/** The loop control path a file-writing command touches, if any. */
+function loopControlWrite(stripped: string[], cwd?: string): string | undefined {
+  if (stripped.length === 0) return undefined;
+  const head = basename(stripped[0]);
+  const args = stripped.slice(1);
+  let candidates: string[] = [];
+  if (WRITE_ALL_ARGS.has(head)) candidates = args.map((a) => a.replace(/^--?[A-Za-z-]+=/, ""));
+  else if (head === "dd") candidates = args.filter((a) => a.startsWith("of=")).map((a) => a.slice(3));
+  else if (head === "sed" || head === "perl" || head === "ruby") {
+    const inPlace = args.some((a) => a.startsWith("--in-place") || (/^-[A-Za-z]/.test(a) && !a.startsWith("--") && a.slice(1).includes("i")));
+    if (inPlace) candidates = args;
+  } else if (head === "loop-state" && args[0] === "append") candidates = args.slice(1);
+  for (const c of candidates) {
+    if (isLoopControlPath(c, cwd)) return c;
+    if (REMOVES_DIRS.has(head) && LOOP_CONTROL_DIR.test(normalisePosix(c, cwd))) return c;
+  }
   return undefined;
+}
+
+function loopControlReason(path: string): string {
+  return `loop-guard: lanes may not write '${path}': codex/ops-*, codex/state-* and codex/goal-* belong to the root.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1400,7 +1801,9 @@ function fallbackLaneCheck(segment: string[]): string | undefined {
   return undefined;
 }
 
-export function fallbackScan(text: string, role: Role, depth = 0, pushGranted = true): Decision {
+const FALLBACK_REDIRECT = />{1,2}\|?[ \t]*([^\s;&|()<>]+)/g;
+
+export function fallbackScan(text: string, role: Role, depth = 0, pushGranted = true, lane: LaneContext = {}): Decision {
   const clean = text.replace(/[\\'"]/g, "");
   if (FALLBACK_BACKGROUND.test(clean)) {
     return block(
@@ -1422,10 +1825,10 @@ export function fallbackScan(text: string, role: Role, depth = 0, pushGranted = 
       if (literal) return block(fallbackReason(literal.reason ?? ""));
       const resolved = resolveGitArguments(tokens);
       if (resolved.shellCommand !== undefined && depth < MAX_FALLBACK_DEPTH) {
-        const nested = fallbackScan(resolved.shellCommand, role, depth + 1, pushGranted);
+        const nested = fallbackScan(resolved.shellCommand, role, depth + 1, pushGranted, lane);
         if (nested.block) return nested;
       } else if (resolved.aliasText !== undefined && depth < MAX_FALLBACK_DEPTH) {
-        const nested = fallbackScan(resolved.aliasText, role, depth + 1, pushGranted);
+        const nested = fallbackScan(resolved.aliasText, role, depth + 1, pushGranted, lane);
         if (nested.block) return nested;
       } else {
         const expanded = checkGitPushAddCommit(resolved.args, pushGranted);
@@ -1435,8 +1838,16 @@ export function fallbackScan(text: string, role: Role, depth = 0, pushGranted = 
     if (role === "lane") {
       const forbidden = fallbackLaneCheck(segment);
       if (forbidden) {
-        return block(fallbackReason(`'${forbidden}' is a release, mutating gh api or secret-store write, blocked for lanes.`));
+        // An ops grant never applies here: input the parser cannot read stays refused.
+        return block(fallbackReason(`'${forbidden}' ${LANE_FORBIDDEN_REASON}.`));
       }
+      const control = loopControlWrite(stripWrappers(stripReservedWords(segment)), lane.cwd);
+      if (control) return block(fallbackReason(loopControlReason(control)));
+    }
+  }
+  if (role === "lane") {
+    for (const m of clean.matchAll(FALLBACK_REDIRECT)) {
+      if (isLoopControlPath(m[1], lane.cwd)) return block(fallbackReason(loopControlReason(m[1])));
     }
   }
   return allow();
@@ -1446,12 +1857,18 @@ export function fallbackScan(text: string, role: Role, depth = 0, pushGranted = 
 // Public: evaluateBashCommand
 // ---------------------------------------------------------------------------
 
-export function evaluateBashCommand(command: string, role: Role, gitAliasDepth = 0, pushGranted = true): Decision {
+export function evaluateBashCommand(
+  command: string,
+  role: Role,
+  gitAliasDepth = 0,
+  pushGranted = true,
+  lane: LaneContext = {},
+): Decision {
   if (command.includes(NUL)) {
     return block("loop-guard: a NUL character cannot appear in a command");
   }
   const parsed = parseCommand(command, role);
-  if (!parsed) return fallbackScan(command, role, 0, pushGranted);
+  if (!parsed) return fallbackScan(command, role, 0, pushGranted, lane);
 
   if (parsed.hasBackgroundOperator) {
     return block(
@@ -1488,13 +1905,13 @@ export function evaluateBashCommand(command: string, role: Role, gitAliasDepth =
         // alias cycle; past the bound the alias text gets the fallback scan.
         const aliasDecision =
           gitAliasDepth >= MAX_GIT_ALIAS_DEPTH
-            ? fallbackScan(resolved.shellCommand, role, 0, pushGranted)
-            : evaluateBashCommand(resolved.shellCommand, role, gitAliasDepth + 1, pushGranted);
+            ? fallbackScan(resolved.shellCommand, role, 0, pushGranted, lane)
+            : evaluateBashCommand(resolved.shellCommand, role, gitAliasDepth + 1, pushGranted, lane);
         if (aliasDecision.block) return aliasDecision;
       } else if (resolved.unparseable) {
         // The alias's own body could not be lexed (e.g. an unterminated
         // quote): never treat it as an inert literal subcommand string.
-        const aliasDecision = fallbackScan(resolved.aliasText ?? rawSegment.join(" "), role, 0, pushGranted);
+        const aliasDecision = fallbackScan(resolved.aliasText ?? rawSegment.join(" "), role, 0, pushGranted, lane);
         if (aliasDecision.block) return aliasDecision;
       } else {
         const aliasExpandedDecision = checkGitPushAddCommit(resolved.args, pushGranted);
@@ -1507,21 +1924,31 @@ export function evaluateBashCommand(command: string, role: Role, gitAliasDepth =
       // each argument gets the fallback text scan so a dangerous command
       // spelled out in the code still blocks.
       for (const arg of stripped.slice(1)) {
-        const decision = fallbackScan(arg, role, 0, pushGranted);
+        const decision = fallbackScan(arg, role, 0, pushGranted, lane);
         if (decision.block) return decision;
       }
     }
 
     if (role === "lane") {
-      const forbidden = laneForbiddenCommand(stripped);
+      const control = loopControlWrite(stripped, lane.cwd);
+      if (control) return block(loopControlReason(control));
+      const forbidden = classifyLaneForbidden(stripped);
       if (forbidden) {
-        return block(`loop-guard: '${forbidden}' is a release, mutating gh api or secret-store write, blocked for lanes.`);
+        if (!lane.ops) return block(`loop-guard: '${forbidden.label}' ${LANE_FORBIDDEN_REASON}.`);
+        const refusal = opsRefusal(rawSegment, stripped, forbidden, lane.ops);
+        if (refusal) return block(`loop-guard (ops): ${refusal}`);
       }
     }
   }
 
+  if (role === "lane") {
+    for (const target of parsed.writeTargets) {
+      if (isLoopControlPath(target, lane.cwd)) return block(loopControlReason(target));
+    }
+  }
+
   for (const script of parsed.interpreterScripts) {
-    const decision = fallbackScan(script, role, 0, pushGranted);
+    const decision = fallbackScan(script, role, 0, pushGranted, lane);
     if (decision.block) return decision;
   }
 

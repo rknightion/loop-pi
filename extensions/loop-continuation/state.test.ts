@@ -4,7 +4,7 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { evaluateSettle, INITIAL_STATE, MAX_NUDGES, type ContinuationState } from "./state.ts";
+import { AUTO_ARM_REASON, evaluateSettle, INITIAL_STATE, MAX_NUDGES, type ContinuationState } from "./state.ts";
 import type { LaunchInfo } from "./launch-detect.ts";
 
 const LAUNCH: LaunchInfo = { report: "codex/report-x-loop1.md", loop: 1, launchTs: "2026-09-25T00:00:00Z" };
@@ -311,5 +311,170 @@ describe("evaluateSettle: nudge and strike cap", () => {
       armTimer: noArm,
     });
     assert.equal((decision as { newState: ContinuationState }).newState.chainIncidentWritten, false);
+  });
+});
+
+describe("evaluateSettle: close-out", () => {
+  const FUTURE = "2099-01-01T00:00:00Z";
+  const drained = { live_lanes: 0, admissible: [] as string[] };
+  const base = {
+    outcome: "completed" as const,
+    pushDetected: false,
+    reportCounted: false,
+    now: "2026-10-01T00:00:00Z",
+  };
+
+  test("a drained digest with nothing armed turns a WAITING release into a close-out nudge", () => {
+    let armed = 0;
+    const decision = evaluateSettle({
+      ...base,
+      state: armedState(),
+      marker: "waiting",
+      waitingDeadline: FUTURE,
+      queryTimers: () => [],
+      armTimer: () => {
+        armed += 1;
+        return { id: "t", at: FUTURE };
+      },
+      closeOut: { digest: drained, queryWatchers: () => [] },
+    });
+    assert.equal(decision.action, "nudge");
+    assert.equal((decision as { reason: string }).reason, "close-out");
+    assert.equal((decision as { newState: ContinuationState }).newState.nudgeCount, 1);
+    assert.equal(armed, 0, "nothing is auto-armed for a WAITING that is being closed out");
+  });
+
+  test("a drained digest turns a plain stop into a close-out nudge instead of an unmarked one", () => {
+    const decision = evaluateSettle({
+      ...base,
+      state: armedState(),
+      marker: null,
+      waitingDeadline: null,
+      queryTimers: () => [],
+      armTimer: noArm,
+      closeOut: { digest: drained, queryWatchers: () => [] },
+    });
+    assert.equal((decision as { reason: string }).reason, "close-out");
+  });
+
+  test("the continuation's own auto-arm does not block the close-out", () => {
+    const decision = evaluateSettle({
+      ...base,
+      state: armedState(),
+      marker: "waiting",
+      waitingDeadline: FUTURE,
+      queryTimers: () => [{ id: "t", at: FUTURE, reason: AUTO_ARM_REASON }],
+      armTimer: noArm,
+      closeOut: { digest: drained, queryWatchers: () => [] },
+    });
+    assert.equal((decision as { reason: string }).reason, "close-out");
+  });
+
+  test("a timer the root armed blocks the close-out and the WAITING releases as before", () => {
+    const decision = evaluateSettle({
+      ...base,
+      state: armedState(),
+      marker: "waiting",
+      waitingDeadline: FUTURE,
+      queryTimers: () => [{ id: "t", at: FUTURE, reason: "root wake" }],
+      armTimer: noArm,
+      closeOut: { digest: drained, queryWatchers: () => [] },
+    });
+    assert.equal(decision.action, "release");
+  });
+
+  test("an active watcher blocks the close-out", () => {
+    const decision = evaluateSettle({
+      ...base,
+      state: armedState(),
+      marker: "waiting",
+      waitingDeadline: FUTURE,
+      queryTimers: () => [],
+      armTimer: () => ({ id: "t", at: FUTURE }),
+      closeOut: { digest: drained, queryWatchers: () => [{ id: "w" }] },
+    });
+    assert.equal(decision.action, "release");
+  });
+
+  test("a live lane or an admissible task blocks the close-out", () => {
+    for (const digest of [
+      { live_lanes: 1, admissible: [] as string[] },
+      { live_lanes: 0, admissible: ["T-1"] },
+    ]) {
+      const decision = evaluateSettle({
+        ...base,
+        state: armedState(),
+        marker: null,
+        waitingDeadline: null,
+        queryTimers: () => [],
+        armTimer: noArm,
+        closeOut: { digest, queryWatchers: () => [] },
+      });
+      assert.equal((decision as { reason: string }).reason, "unmarked");
+    }
+  });
+
+  test("no digest (missing binary or log) keeps today's behaviour", () => {
+    const decision = evaluateSettle({
+      ...base,
+      state: armedState(),
+      marker: "waiting",
+      waitingDeadline: FUTURE,
+      queryTimers: () => [],
+      armTimer: () => ({ id: "t", at: FUTURE }),
+      closeOut: { digest: null, queryWatchers: () => [] },
+    });
+    assert.equal(decision.action, "release");
+  });
+
+  test("loop-wait not replying keeps today's behaviour", () => {
+    const decision = evaluateSettle({
+      ...base,
+      state: armedState(),
+      marker: null,
+      waitingDeadline: null,
+      queryTimers: () => null,
+      armTimer: noArm,
+      closeOut: { digest: drained, queryWatchers: () => null },
+    });
+    assert.equal((decision as { reason: string }).reason, "unmarked");
+  });
+
+  test("a PAUSED stop and a counted report still release without a close-out nudge", () => {
+    const closeOut = { digest: drained, queryWatchers: () => [] };
+    const paused = evaluateSettle({
+      ...base, state: armedState(), marker: "paused", waitingDeadline: null, queryTimers: () => [], armTimer: noArm, closeOut,
+    });
+    assert.equal(paused.action, "release");
+    const counted = evaluateSettle({
+      ...base, state: armedState(), reportCounted: true, marker: null, waitingDeadline: null, queryTimers: () => [], armTimer: noArm, closeOut,
+    });
+    assert.equal(counted.action, "release");
+  });
+
+  test("the strike cap still bounds close-out nudges", () => {
+    const decision = evaluateSettle({
+      ...base,
+      state: armedState({ nudgeCount: MAX_NUDGES }),
+      marker: null,
+      waitingDeadline: null,
+      queryTimers: () => [],
+      armTimer: noArm,
+      closeOut: { digest: drained, queryWatchers: () => [] },
+    });
+    assert.equal(decision.action, "release-exhausted");
+  });
+
+  test("a stale WAITING is closed out too when the digest is drained", () => {
+    const decision = evaluateSettle({
+      ...base,
+      state: armedState(),
+      marker: "waiting",
+      waitingDeadline: "2026-09-01T00:00:00Z",
+      queryTimers: () => [],
+      armTimer: noArm,
+      closeOut: { digest: drained, queryWatchers: () => [] },
+    });
+    assert.equal((decision as { reason: string }).reason, "close-out");
   });
 });

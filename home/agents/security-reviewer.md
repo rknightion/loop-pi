@@ -2,14 +2,14 @@
 name: security-reviewer
 description: SECURITY lane: read-only review of auth, permissions, migrations, secrets and data loss.
 advertise: true
-model: openai/gpt-6-astra
-thinking: medium
+model: openai/gpt-6.1-sol
+thinking: high
 tools: read, grep, find, ls, bash
 extensions:
 systemPromptMode: append
 defaultContext: fresh
 inheritProjectContext: true
-inheritGlobalContext: true
+inheritGlobalContext: false
 inheritSkills: false
 async: true
 timeoutMs: 7200000

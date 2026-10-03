@@ -9,11 +9,16 @@ rendered templates; `auth.json`, sessions and every other unmanaged file are nev
 `--check` reports drift and writes nothing.
 
 An optional overlay directory customises a build without editing the source:
-  overlay/home/**           replaces or adds home template files
+  overlay/home/**           replaces or adds home template files (home/lane-policy.md included)
   overlay/home/settings.json  is deep-merged over home/settings.json (the overlay wins)
   overlay/policy.md         is appended to the rendered AGENTS.md after home/policy-header.md
   overlay/scripts/*         land in <home>/scripts/ (guard and hook scripts)
 Templates render {{HOME}}, {{PREFIX}}, {{USER_HOME}} and every `--var KEY=VALUE`.
+
+The installed home's `lane-policy.md` is appended, after a `<!-- lane-policy -->` marker line, to
+the body of every agent file whose frontmatter says `inheritGlobalContext: false`. When the build
+carries `bin/loop-state` it is installed into `<home>/bin/`. `--variant NAME` is recorded in the
+home receipt so each session can name the variant it ran with.
 """
 from __future__ import annotations
 
@@ -41,23 +46,30 @@ PI_CLI = f"node_modules/{PI_PACKAGE}/dist/bundle/cli.js"
 BUILD_MANIFEST = ".loop-pi-build.json"
 HOME_MANIFEST = ".loop-pi-managed.json"
 # Root-only extensions, loaded by launcher flags, never by settings packages.
-ROOT_EXTENSIONS = ("loop-guard/root.ts", "loop-wait/root.ts", "loop-continuation/index.ts")
+ROOT_EXTENSIONS = ("loop-guard/root.ts", "loop-wait/root.ts", "loop-continuation/index.ts", "loop-state/index.ts")
+# The dispatcher host loads only its own entry: it registers the lane children itself and answers
+# pi-subagents' completion turns with an in-process idle model (extensions/dispatcher).
+DISPATCH_EXTENSIONS = ("dispatcher/index.ts",)
 # Lane entries, registered by the root guard as required child extensions.
 LANE_EXTENSIONS = ("loop-guard/lane.ts", "loop-wait/lane.ts")
 # Operator and root CLIs from bin/, installed next to the launcher.
 CLI_TOOLS = ("loop-pi-preflight", "loop-pi-audit")
+# Installed into <home>/bin/ (not next to the launcher) when the source carries it.
+HOME_TOOLS = ("loop-state",)
+LANE_POLICY = "lane-policy.md"
+LANE_POLICY_MARKER = "<!-- lane-policy -->"
 NEVER_MANAGED = {"auth.json"}
 MIN_NODE = (22, 19, 0)
 # Fixed discovery order, independent of the installing shell (Homebrew first).
 NODE_CANDIDATES = ("/opt/homebrew/bin/node", "/usr/local/bin/node", "/usr/bin/node")
-AGENT_SET = {"mapper", "mapper-deep", "gate-runner", "lane-worker", "lane-worker-push", "lane-worker-retry",
-             "lane-worker-retry-push", "complex-worker",
+AGENT_SET = {"mapper", "mapper-deep", "gate-runner", "lane-worker", "lane-worker-push", "lane-worker-low",
+             "lane-worker-low-push", "lane-worker-retry", "lane-worker-retry-push", "complex-worker",
              "complex-worker-push", "reviewer", "reviewer-high", "security-reviewer", "rescue-sol",
-             "rescue-astra"}
+             "rescue-astra", "ops", "triager"}
 SMOKE_COMMAND = "loop-closeout"
 # Defaults for settings.json `loopPi`; the extensions use the same ones (model-family.ts).
 DEFAULT_FAMILY = {"provider": "openai", "pattern": r"^gpt-6(\.[0-9]+)?(-[a-z0-9]+)+$", "name": "gpt-6"}
-DEFAULT_ROOT_ROUTE = {"provider": "openai", "model": "gpt-6.1-sol", "thinking": "medium"}
+DEFAULT_ROOT_ROUTE = {"provider": "openai", "model": "gpt-6.1-sol", "thinking": "low"}
 EXCLUDED_PARTS = {"node_modules", "__tests__", "test-support", "fixtures"}
 
 
@@ -95,6 +107,7 @@ def source_files(src: Path = SRC, overlay: Optional[Path] = None) -> List[Tuple[
     files = [("package.json", src / "package.json"), ("package-lock.json", src / "package-lock.json")]
     files += _tree(src / "extensions", "extensions") + _tree(src / "home", "home")
     files += [(f"bin/{name}", src / "bin" / name) for name in CLI_TOOLS]
+    files += [(f"bin/{name}", src / "bin" / name) for name in HOME_TOOLS if (src / "bin" / name).is_file()]
     if overlay is not None:
         if not overlay.is_dir():
             raise InstallError(f"overlay {overlay} is not a directory")
@@ -193,7 +206,8 @@ def node_binary(explicit: Optional[str] = None, home: Optional[Path] = None) -> 
 
 
 def missing_extensions(prefix: Path) -> List[str]:
-    return [rel for rel in ROOT_EXTENSIONS + LANE_EXTENSIONS if not (prefix / "extensions" / rel).is_file()]
+    return [rel for rel in ROOT_EXTENSIONS + LANE_EXTENSIONS + DISPATCH_EXTENSIONS
+            if not (prefix / "extensions" / rel).is_file()]
 
 
 def render(text: str, variables: Dict[str, str]) -> str:
@@ -227,11 +241,23 @@ def same_json(target: Path, data: bytes) -> bool:
         return False
 
 
+def append_lane_policy(text: str, policy: str) -> str:
+    """Append `policy` after the marker line to an agent file that sets `inheritGlobalContext: false`.
+    Idempotent: anything already after the marker is replaced. Other files come back unchanged."""
+    front = re.match(r"---\n(.*?)\n---\n", text, re.DOTALL)
+    if not front or not re.search(r"^inheritGlobalContext:\s*false\s*$", front.group(1), re.MULTILINE):
+        return text
+    head = text.partition("\n" + LANE_POLICY_MARKER)[0]
+    return head.rstrip("\n") + "\n\n" + LANE_POLICY_MARKER + "\n" + policy.strip("\n") + "\n"
+
+
 def home_plan(prefix: Path, home: Path, variables: Dict[str, str]) -> Dict[str, bytes]:
     """Managed home files, rendered for this home and prefix."""
     plan: Dict[str, bytes] = {}
     template = prefix / "home"
     values = template_vars(home, prefix, variables)
+    policy_file = template / LANE_POLICY
+    policy = render(policy_file.read_text(), values) if policy_file.is_file() else None
     for path in sorted(template.rglob("*")):
         if path.is_dir() or "__pycache__" in path.parts:
             continue
@@ -243,7 +269,12 @@ def home_plan(prefix: Path, home: Path, variables: Dict[str, str]) -> Dict[str, 
             data = render(data.decode(), values).encode()
         except UnicodeDecodeError:
             pass
+        if policy is not None and rel.startswith("agents/") and rel.endswith(".md"):
+            data = append_lane_policy(data.decode(), policy).encode()
         plan[rel] = data
+    for name in HOME_TOOLS:
+        if (prefix / "bin" / name).is_file():
+            plan[f"bin/{name}"] = (prefix / "bin" / name).read_bytes()
     return plan
 
 
@@ -263,9 +294,16 @@ def root_route(prefix: Path) -> Tuple[str, str, str]:
     return route["provider"], route["model"], route["thinking"]
 
 
-def launcher_text(prefix: Path, home: Path, node: str, manifest: dict, name: str, generated_by: str) -> str:
+def dispatch_launcher_name(launcher: str) -> str:
+    """loop-pi -> loop-pi-dispatch, loop-pi-burn -> loop-pi-dispatch-burn; other names get a -dispatch suffix."""
+    if launcher == "loop-pi" or launcher.startswith("loop-pi-"):
+        return "loop-pi-dispatch" + launcher[len("loop-pi"):]
+    return launcher + "-dispatch"
+
+
+def launcher_preamble(prefix: Path, home: Path, node: str, generated_by: str) -> List[str]:
     pi = prefix / PI_CLI
-    lines = [
+    return [
         "#!/bin/sh",
         f"# Generated by {generated_by}. Do not edit; re-run the installer.",
         "set -eu",
@@ -278,12 +316,62 @@ def launcher_text(prefix: Path, home: Path, node: str, manifest: dict, name: str
         f"  --version|-v) exec '{node}' '{pi}' --version ;;",
         "esac",
     ]
+
+
+def loop_run_lines(prefix: Path, home: Path, name: str, indent: str, hint: str = "") -> List[str]:
+    """Run dir, preflight and audit snapshot for a loop start in "$repo"."""
+    lines = [
+        f"mkdir -p '{home}/runs'",
+        f'run_dir=$(mktemp -d "{home}/runs/$(date -u +%Y%m%dT%H%M%SZ)-$(basename "$repo")-XXXXXX")',
+        f"if ! '{prefix}/bin/loop-pi-preflight' \"$repo\" >&2; then",
+        '  rmdir "$run_dir"',
+        f'  echo "{name}: preflight refused $repo.{hint}" >&2',
+        "  exit 78",
+        "fi",
+        'export LOOP_PI_RUN_DIR="$run_dir" LOOP_PI_REPO="$repo"',
+        f"if ! '{prefix}/bin/loop-pi-audit' begin \"$repo\" >&2; then",
+        '  rm -f "$run_dir/.audit.lock" "$run_dir/audit-before.json"',
+        '  rmdir "$run_dir" 2>/dev/null || true',
+        f'  echo "{name}: cannot take the audit snapshot of $repo; not starting." >&2',
+        "  exit 78",
+        "fi",
+        f'echo "{name}: run dir $run_dir" >&2',
+    ]
+    return [indent + line for line in lines]
+
+
+def incomplete_lines(manifest: dict, name: str) -> List[str]:
+    missing = ", ".join(manifest["missing_extensions"])
+    return [f"echo '{name}: build {manifest['label']} is incomplete (missing: {missing}); only --version runs.' >&2",
+            "exit 78"]
+
+
+def dispatch_launcher_text(prefix: Path, home: Path, node: str, manifest: dict, name: str,
+                           generated_by: str) -> str:
+    """The thin dispatcher: always a loop run, no LLM root (extensions/dispatcher)."""
+    pi = prefix / PI_CLI
+    lines = launcher_preamble(prefix, home, node, generated_by)
     if manifest["missing_extensions"]:
-        missing = ", ".join(manifest["missing_extensions"])
+        lines += incomplete_lines(manifest, name)
+    else:
+        flags = " ".join(f"--extension '{prefix / 'extensions' / rel}'" for rel in DISPATCH_EXTENSIONS)
         lines += [
-            f"echo '{name}: build {manifest['label']} is incomplete (missing: {missing}); only --version runs.' >&2",
-            "exit 78",
+            "unset LOOP_PI_RUN_DIR LOOP_PI_REPO",
+            'if ! repo=$(git rev-parse --show-toplevel 2>/dev/null); then',
+            f'  echo "{name}: run it inside the loop repository." >&2',
+            "  exit 78",
+            "fi",
+            *loop_run_lines(prefix, home, name, ""),
+            f"exec '{node}' '{pi}' -p --no-tools --provider loop-dispatch --model idle {flags} \"$@\"",
         ]
+    return "\n".join(lines) + "\n"
+
+
+def launcher_text(prefix: Path, home: Path, node: str, manifest: dict, name: str, generated_by: str) -> str:
+    pi = prefix / PI_CLI
+    lines = launcher_preamble(prefix, home, node, generated_by)
+    if manifest["missing_extensions"]:
+        lines += incomplete_lines(manifest, name)
     else:
         flags = " ".join(f"--extension '{prefix / 'extensions' / rel}'" for rel in ROOT_EXTENSIONS)
         provider, model, thinking = root_route(prefix)
@@ -294,21 +382,7 @@ def launcher_text(prefix: Path, home: Path, node: str, manifest: dict, name: str
             "plain=0",
             'if [ "${1-}" = "--plain" ]; then plain=1; shift; fi',
             'if [ "$plain" = 0 ] && repo=$(git rev-parse --show-toplevel 2>/dev/null); then',
-            f"  mkdir -p '{home}/runs'",
-            f'  run_dir=$(mktemp -d "{home}/runs/$(date -u +%Y%m%dT%H%M%SZ)-$(basename "$repo")-XXXXXX")',
-            f"  if ! '{prefix}/bin/loop-pi-preflight' \"$repo\" >&2; then",
-            '    rmdir "$run_dir"',
-            f'    echo "{name}: preflight refused $repo. Fix it, or run {name} --plain for a non-loop session." >&2',
-            "    exit 78",
-            "  fi",
-            '  export LOOP_PI_RUN_DIR="$run_dir" LOOP_PI_REPO="$repo"',
-            f"  if ! '{prefix}/bin/loop-pi-audit' begin \"$repo\" >&2; then",
-            '    rm -f "$run_dir/.audit.lock" "$run_dir/audit-before.json"',
-            '    rmdir "$run_dir" 2>/dev/null || true',
-            f'    echo "{name}: cannot take the audit snapshot of $repo; not starting." >&2',
-            "    exit 78",
-            "  fi",
-            f'  echo "{name}: run dir $run_dir" >&2',
+            *loop_run_lines(prefix, home, name, "  ", f" Fix it, or run {name} --plain for a non-loop session."),
             "fi",
         ]
         # subagent is loaded up front and bg_wait is never declared: some OpenAI-compatible proxies
@@ -409,6 +483,7 @@ def validate(prefix: Path, pin: Dict[str, str], node: str, allow_missing: bool) 
     if not missing:
         smoke_extensions(prefix, node, ROOT_EXTENSIONS)
         smoke_extensions(prefix, node, LANE_EXTENSIONS)
+        smoke_extensions(prefix, node, DISPATCH_EXTENSIONS)
     return missing
 
 
@@ -471,8 +546,9 @@ class Target:
     """One home and its launcher: everything `drift` needs besides the build."""
 
     def __init__(self, home: Path, bin_dir: Path, launcher: str, variables: Optional[Dict[str, str]] = None,
-                 generated_by: str = "loop-pi-install", external: Tuple[str, ...] = ()):
+                 generated_by: str = "loop-pi-install", external: Tuple[str, ...] = (), variant: str = ""):
         self.home, self.bin_dir, self.launcher = home, bin_dir, launcher
+        self.variant = variant
         self.variables = dict(variables or {})
         self.generated_by = generated_by
         self.external = tuple(external)
@@ -486,7 +562,7 @@ def drift(prefix: Path, target: Target, node: str,
     plan = home_plan(prefix, home, target.variables)
     for rel, data in plan.items():
         path = home / rel
-        mode = 0o755 if rel.startswith("scripts/") else 0o644
+        mode = 0o755 if rel.startswith(("scripts/", "bin/")) else 0o644
         if rel == "settings.json":
             data = keep_runtime_settings(data, path)
             if same_json(path, data):
@@ -494,6 +570,8 @@ def drift(prefix: Path, target: Target, node: str,
         if not path.is_file() or path.read_bytes() != data:
             changes.append((path, data, mode))
     receipt = {"label": manifest["label"], "files": sorted(set(plan) | set(target.external))}
+    if target.variant:
+        receipt["variant"] = target.variant
     if version is not None:
         receipt["node"] = {"path": node, "version": version}
     record = json.dumps(receipt, indent=2).encode() + b"\n"
@@ -504,10 +582,12 @@ def drift(prefix: Path, target: Target, node: str,
         path = target.bin_dir / name
         if not path.is_file() or path.read_bytes() != data:
             changes.append((path, data, 0o755))
-    launcher = launcher_text(prefix, home, node, manifest, target.launcher, target.generated_by).encode()
-    path = target.bin_dir / target.launcher
-    if not path.is_file() or path.read_bytes() != launcher:
-        changes.append((path, launcher, 0o755))
+    dispatch = dispatch_launcher_name(target.launcher)
+    for name, text in ((target.launcher, launcher_text), (dispatch, dispatch_launcher_text)):
+        launcher = text(prefix, home, node, manifest, name, target.generated_by).encode()
+        path = target.bin_dir / name
+        if not path.is_file() or path.read_bytes() != launcher:
+            changes.append((path, launcher, 0o755))
     return changes
 
 
@@ -542,6 +622,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                         help="named in the AGENTS.md banner as what to edit instead")
     parser.add_argument("--external-managed", action="append", default=[], metavar="REL",
                         help="home file another tool writes; recorded as managed, never written or reported stale")
+    parser.add_argument("--variant", default="", help="home variant name, recorded in the home receipt")
     parser.add_argument("--source-repo", default="", help="recorded in the build manifest")
     parser.add_argument("--overlay-commit", default="", help="recorded in the build manifest")
     parser.add_argument("--node", help="absolute node executable (overrides LOOP_PI_NODE and recorded node)")
@@ -552,9 +633,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         if not re.fullmatch(r"[A-Za-z0-9._-]+", args.launcher):
             raise InstallError("--launcher must be a plain file name")
+        if args.variant and not re.fullmatch(r"[A-Za-z0-9._-]+", args.variant):
+            raise InstallError("--variant must be a plain name")
         variables = parse_vars(args.var)
         target = Target(args.home.expanduser(), args.bin.expanduser(), args.launcher, variables,
-                        args.generated_by, tuple(args.external_managed))
+                        args.generated_by, tuple(args.external_managed), args.variant)
         pin = pins()
         files = source_files(SRC, args.overlay)
         label = build_label(files, pin, f"{args.policy_source}\0{args.generated_by}")

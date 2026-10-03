@@ -10,7 +10,8 @@ check is a model call, and over a long run those calls add up. pi gives an exten
 hold a root idle until something actually happens.
 
 The loop contract itself (run contract, lane briefs, waits, closeout) is the
-[fan-out protocol](https://github.com/rknightion/fan-out-protocol); its Appendix C covers pi.
+[fan-out protocol](https://github.com/rknightion/fan-out-protocol): `loop/contract.md`, with pi in
+`loop/harness-pi.md`.
 
 ## What is in it
 

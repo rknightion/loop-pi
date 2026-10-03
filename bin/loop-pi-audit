@@ -23,8 +23,18 @@ a snapshot. The run dir comes from `--run-dir` or `LOOP_PI_RUN_DIR`:
 - `begin REPO` writes `<run-dir>/audit-before.json`, refusing (exit 1, no
   file) if any remote, tag list or release list cannot be read;
 - `add REPO` adds another repository to that before-snapshot, same rule;
-- `closeout [--grants FILE]` snapshots every repo in it to
+- `closeout [--grants FILE] [--ops FILE]` snapshots every repo in it to
   `<run-dir>/audit-after.json` and compares.
+
+`--ops FILE` (compare and closeout) is the loop's frozen ops grant file,
+`{"v": 1, "ops": [{"surface", "kind", "allow", "secret_paths"?}, ...]}`, kept at
+`<repo>/codex/ops-*.json`. When it holds an entry of kind `release`, a tag (remote
+or local) or a GitHub release that was added during the run is covered (marked
+`GRANTED ops release`) even without a ref grant, but only in the repository that
+holds the ops file (realpath of the `codex/` directory's parent, compared with
+the realpath of each snapshot repository key). An ops file outside a `codex/`
+directory covers no repository. No other kind covers anything, and moved or
+deleted tags and releases still need a ref grant. The `--grants` file is unchanged.
 
 Stdlib only.
 """
@@ -279,17 +289,43 @@ def cmd_closeout(args: argparse.Namespace) -> int:
     run_dir = run_dir_of(args)
     with open(os.path.join(run_dir, ".audit.lock"), "w", encoding="utf-8") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        return closeout_locked(run_dir, args.grants)
+        return closeout_locked(run_dir, args.grants, args.ops)
 
 
-def closeout_locked(run_dir: str, grants: str | None) -> int:
+OPS_KINDS = {"deploy", "probe", "release", "secret-write", "credential-create"}
+
+
+def load_ops_release(path: str | None) -> set[str]:
+    """Realpaths of the repositories a release-kind entry covers: at most the one holding the ops file.
+    Raises ValueError on a malformed file."""
+    if path is None:
+        return set()
+    with open(path, "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+    if not isinstance(data, dict) or data.get("v") != 1 or not isinstance(data.get("ops"), list):
+        raise ValueError('expected {"v": 1, "ops": [...]}')
+    for entry in data["ops"]:
+        if not isinstance(entry, dict) or not isinstance(entry.get("surface"), str) or entry.get("kind") not in OPS_KINDS:
+            raise ValueError(f"malformed ops entry: {entry!r}")
+    if not any(entry["kind"] == "release" for entry in data["ops"]):
+        return set()
+    # A release grant covers only the repository holding the ops file, `<repo>/codex/ops-*.json`.
+    codex = os.path.realpath(os.path.dirname(os.path.abspath(path)))
+    if os.path.basename(codex) != "codex":
+        print(f"loop-pi-audit: ops file {path} is not in a codex/ directory; its release entry covers no repository.",
+              file=sys.stderr)
+        return set()
+    return {os.path.dirname(codex)}
+
+
+def closeout_locked(run_dir: str, grants: str | None, ops: str | None = None) -> int:
     before_path = os.path.join(run_dir, "audit-before.json")
     with open(before_path, "r", encoding="utf-8") as fh:
         repos = sorted(json.load(fh)["repos"])
     after_path = os.path.join(run_dir, "audit-after.json")
     write_json(after_path, {"taken_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                             "repos": {repo: snapshot_repo(repo) for repo in repos}})
-    return cmd_compare(argparse.Namespace(before=before_path, after=after_path, grants=grants))
+    return cmd_compare(argparse.Namespace(before=before_path, after=after_path, grants=grants, ops=ops))
 
 
 def diff_ref_map(before: dict, after: dict) -> list[tuple[str, str, str, str]]:
@@ -500,7 +536,7 @@ def shared_remote_grants(before_repos: dict, after_repos: dict, grants_by_repo: 
 
 def compare_repo(name: str, before: dict, after: dict, grants: list[str] | dict, report: list[str],
                  times: tuple[str, str] = ("", ""), shared: dict | None = None,
-                 seen_granted: set | None = None) -> bool:
+                 seen_granted: set | None = None, ops_release: bool = False) -> bool:
     """Returns True if changes are granted or foreign automation."""
     automation = grants.get("automation", []) if isinstance(grants, dict) else []
     rewrites = set(grants.get("allow_non_fast_forward", [])) if isinstance(grants, dict) else set()
@@ -556,6 +592,10 @@ def compare_repo(name: str, before: dict, after: dict, grants: list[str] | dict,
                 if ref.startswith("refs/tags/") and ref.endswith("^{}"):
                     target = ref[:-3]
                 covered = target in remote_grants
+                if (not covered and ops_release and change == "added" and ref.startswith("refs/tags/")):
+                    report.append(f"[{name}] remote '{remote}' ref {change}: {ref} "
+                                  f"({before_sha[:12] or '-'} -> {after_sha[:12] or '-'}) [GRANTED ops release]")
+                    continue
                 if change == "moved" and ref == target:
                     mark, contributes_covered = moved_ref_mark(
                         name, remote, ref, before_sha, after_sha, covered,
@@ -585,6 +625,10 @@ def compare_repo(name: str, before: dict, after: dict, grants: list[str] | dict,
     else:
         for change, ref, before_sha, after_sha in diff_ref_map(before_tags.get("tags", {}), after_tags.get("tags", {})):
             covered = ref in grants
+            if not covered and ops_release and change == "added":
+                report.append(f"[{name}] tag {change}: {ref} ({before_sha[:12] or '-'} -> {after_sha[:12] or '-'}) "
+                              f"[GRANTED ops release]")
+                continue
             all_covered = all_covered and covered
             mark = "GRANTED" if covered else "UNGRANTED"
             report.append(f"[{name}] tag {change}: {ref} ({before_sha[:12] or '-'} -> {after_sha[:12] or '-'}) [{mark}]")
@@ -603,6 +647,9 @@ def compare_repo(name: str, before: dict, after: dict, grants: list[str] | dict,
         after_tags_set = {r["tagName"] for r in after_releases.get("releases", []) if "tagName" in r}
         for tag in sorted(after_tags_set - before_tags_set):
             covered = tag in grants or f"refs/tags/{tag}" in grants
+            if not covered and ops_release:
+                report.append(f"[{name}] release added: {tag} [GRANTED ops release]")
+                continue
             all_covered = all_covered and covered
             mark = "GRANTED" if covered else "UNGRANTED"
             report.append(f"[{name}] release added: {tag} [{mark}]")
@@ -631,6 +678,11 @@ def cmd_compare(args: argparse.Namespace) -> int:
     except (ValueError, AttributeError) as exc:
         print(f"loop-pi-audit: invalid grants: {exc}", file=sys.stderr)
         return 2
+    try:
+        ops_release_repos = load_ops_release(getattr(args, "ops", None))
+    except (OSError, ValueError) as exc:
+        print(f"loop-pi-audit: invalid ops file: {exc}", file=sys.stderr)
+        return 2
 
     before_repos = before.get("repos", {})
     after_repos = after.get("repos", {})
@@ -656,7 +708,8 @@ def cmd_compare(args: argparse.Namespace) -> int:
         a = after_repos[name]
         pre_len = len(report)
         covered = compare_repo(name, b, a, grants_by_repo.get(name, []), report,
-                               (before.get("taken_at", ""), after.get("taken_at", "")), shared, seen_granted)
+                               (before.get("taken_at", ""), after.get("taken_at", "")), shared, seen_granted,
+                               os.path.realpath(name) in ops_release_repos)
         if len(report) > pre_len:
             any_change = True
         all_ok = all_ok and covered
@@ -688,6 +741,7 @@ def main() -> int:
     comp.add_argument("before", help="Path to the before snapshot JSON.")
     comp.add_argument("after", help="Path to the after snapshot JSON.")
     comp.add_argument("--grants", help="Path to a grants JSON file: {\"<repo>\": [\"refs/heads/main\", ...]}.")
+    comp.add_argument("--ops", help="Path to the loop's frozen ops grant file; a release-kind entry covers added tags and releases in the repo holding it.")
     comp.set_defaults(func=cmd_compare)
 
     for name, func, text in (("begin", cmd_begin, "Start a run's before-snapshot with REPO."),
@@ -700,6 +754,7 @@ def main() -> int:
     close = sub.add_parser("closeout", help="Snapshot the run's repos again and compare.")
     close.add_argument("--run-dir", help="Run directory (default: $LOOP_PI_RUN_DIR).")
     close.add_argument("--grants", help="Path to a grants JSON file, keyed by the repo paths in the run.")
+    close.add_argument("--ops", help="Path to the loop's frozen ops grant file; a release-kind entry covers added tags and releases in the repo holding it.")
     close.set_defaults(func=cmd_closeout)
 
     args = parser.parse_args()

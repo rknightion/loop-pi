@@ -9,7 +9,7 @@ extensions:
 systemPromptMode: append
 defaultContext: fresh
 inheritProjectContext: true
-inheritGlobalContext: true
+inheritGlobalContext: false
 inheritSkills: false
 async: true
 timeoutMs: 5400000

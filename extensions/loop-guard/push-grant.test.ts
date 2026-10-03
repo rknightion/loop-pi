@@ -114,11 +114,11 @@ test("a lane's model cannot forge nested launch bindings", { timeout: 60_000 }, 
   } finally { await session.close(); }
 });
 
-test("push identity accepts only the three granted agents and fails closed on invalid bindings", () => {
-  for (const agent of ["lane-worker-push", "lane-worker-retry-push", "complex-worker-push"]) {
+test("push identity accepts only the four granted agents and fails closed on invalid bindings", () => {
+  for (const agent of ["lane-worker-push", "lane-worker-retry-push", "complex-worker-push", "lane-worker-low-push"]) {
     assert.equal(hasLanePushGrant(JSON.stringify({ "loop-pi.guard/1": { agent } })), true);
   }
-  for (const raw of [undefined, "", "{", "null", "{}", JSON.stringify({ "loop-pi.guard/1": { agent: "unknown-push" } }), JSON.stringify({ "loop-pi.guard/1": { agent: "lane-worker" } })]) {
+  for (const raw of [undefined, "", "{", "null", "{}", JSON.stringify({ "loop-pi.guard/1": { agent: "unknown-push" } }), JSON.stringify({ "loop-pi.guard/1": { agent: "lane-worker" } }), JSON.stringify({ "loop-pi.guard/1": { agent: "ops" } }), JSON.stringify({ "loop-pi.guard/1": { agent: "lane-worker-low" } })]) {
     assert.equal(hasLanePushGrant(raw), false, String(raw));
   }
 });

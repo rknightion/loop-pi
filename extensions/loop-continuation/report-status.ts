@@ -16,6 +16,8 @@ const REQUIRED_SECTIONS = [
   "## Tokens and wakeups",
 ];
 
+const LEADING_DECORATION_RE = /^[\s*_`>-]+/;
+const TRAILING_DECORATION_RE = /[\s.!*_`)]+$/;
 const PAUSED_RE = /^PAUSED: .+$/;
 const WAITING_RE = /^WAITING: .+ until (\d{4}-\d\d-\d\dT\d\d:\d\d(?::\d\d)?Z)$/;
 
@@ -125,28 +127,31 @@ export function reportCounts(launch: LaunchInfo | null, cwd: string | null): boo
 
 export type FinalMarker = "paused" | "waiting" | null;
 
+/**
+ * The last non-empty line of `lastMessage` with markdown decoration removed: leading
+ * `[\s*_`>-]+` and trailing `[\s.!*_`)]+`. A root that bolds, bullets or punctuates its marker
+ * line still has it read as the marker.
+ */
+function lastMarkerLine(lastMessage: string | null): string | null {
+  if (!lastMessage) return null;
+  const lines = lastMessage.split(/\r\n|\r|\n/).filter((line) => line.trim().length > 0);
+  if (!lines.length) return null;
+  return lines[lines.length - 1].replace(LEADING_DECORATION_RE, "").replace(TRAILING_DECORATION_RE, "");
+}
+
 /** Section 4: the marker on the last non-empty line of `lastMessage`, or null. */
 export function finalMarker(lastMessage: string | null): FinalMarker {
-  if (!lastMessage) return null;
-  const lines = lastMessage
-    .split(/\r\n|\r|\n/)
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0);
-  if (!lines.length) return null;
-  const lastLine = lines[lines.length - 1];
-  if (PAUSED_RE.test(lastLine)) return "paused";
-  if (WAITING_RE.test(lastLine)) return "waiting";
+  const line = lastMarkerLine(lastMessage);
+  if (line === null) return null;
+  if (PAUSED_RE.test(line)) return "paused";
+  if (WAITING_RE.test(line)) return "waiting";
   return null;
 }
 
 /** The UTC deadline captured from a current `WAITING: … until <deadline>` last line, or null. */
 export function waitingDeadline(lastMessage: string | null): string | null {
-  if (!lastMessage) return null;
-  const lines = lastMessage
-    .split(/\r\n|\r|\n/)
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0);
-  if (!lines.length) return null;
-  const m = WAITING_RE.exec(lines[lines.length - 1]);
+  const line = lastMarkerLine(lastMessage);
+  if (line === null) return null;
+  const m = WAITING_RE.exec(line);
   return m ? m[1] : null;
 }

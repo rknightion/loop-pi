@@ -14,7 +14,23 @@ import { hookScriptsToRun, runHookScripts } from "./hooks.ts";
 import { installModelFamily, subagentOverrideBlock } from "./model-family.ts";
 import { installRequestCeiling } from "../request-ceiling/index.ts";
 import { bindLaneIdentity } from "./push-grant.ts";
+import { evaluateOpsLaunch, QUERY_LAUNCH_EVENT } from "./ops.ts";
 import { evaluateBashCommand, evaluateBgWait, evaluateSubagentCall, evaluateWatchProcess, isAsyncSubagentLaunch } from "./rules.ts";
+
+const ASYNC_COMPLETE_EVENT = "subagent:async-complete";
+
+/** The run id of an async launch from its tool result (pi-subagents 0.75.0): `details.runId`, else
+ *  `details.asyncId`, else the `Async: <agent> [<id>]` text. */
+export function launchedRunId(result: unknown): string | undefined {
+  const r = result as { details?: { runId?: unknown; asyncId?: unknown }; content?: { type?: string; text?: unknown }[] } | undefined;
+  if (typeof r?.details?.runId === "string" && r.details.runId) return r.details.runId;
+  if (typeof r?.details?.asyncId === "string" && r.details.asyncId) return r.details.asyncId;
+  for (const part of r?.content ?? []) {
+    const m = typeof part?.text === "string" ? /Async: \S+ \[([^\]\s]+)\]/.exec(part.text) : null;
+    if (m) return m[1];
+  }
+  return undefined;
+}
 
 export default function (pi: ExtensionAPI) {
   let asyncRunsActive = 0;
@@ -27,6 +43,33 @@ export default function (pi: ExtensionAPI) {
   // `extensions: []`, so every subsequent `subagent` launch is blocked for
   // the rest of this session rather than merely logged and allowed through.
   let childRegistrationFailed = false;
+
+  // Ops runs active in this session, by surface: launches between tool_call and the end of their
+  // tool execution (by tool call id), then started runs (by run id) until `subagent:async-complete`.
+  const pendingOps = new Map<string, { surface: string; async: boolean }>();
+  const runningOps = new Map<string, string>();
+  const completedRuns = new Set<string>();
+  const isSurfaceActive = (surface: string) =>
+    [...pendingOps.values()].some((p) => p.surface === surface) || [...runningOps.values()].includes(surface);
+
+  /** The frozen ops grants from loop-continuation, or undefined when nothing answers. */
+  const queryFrozenOps = (): unknown => {
+    let ops: unknown;
+    pi.events.emit(QUERY_LAUNCH_EVENT, {
+      reply: (launch: { ops?: unknown } | null | undefined) => {
+        ops = launch?.ops ?? null;
+      },
+    });
+    return ops;
+  };
+
+  pi.events.on(ASYNC_COMPLETE_EVENT, (data) => {
+    const event = data as { runId?: unknown; id?: unknown } | null;
+    const runId = typeof event?.runId === "string" ? event.runId : typeof event?.id === "string" ? event.id : undefined;
+    if (!runId) return;
+    completedRuns.add(runId);
+    runningOps.delete(runId);
+  });
 
   pi.on("session_start", (_event, ctx: ExtensionContext) => {
     const sessionId = ctx.sessionManager.getSessionId();
@@ -77,6 +120,19 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("tool_execution_end", (event) => {
+    const pending = pendingOps.get(event.toolCallId);
+    if (pending !== undefined) {
+      const surface = pending.surface;
+      pendingOps.delete(event.toolCallId);
+      const runId = launchedRunId(event.result);
+      if (runId !== undefined) {
+        if (!completedRuns.has(runId)) runningOps.set(runId, surface);
+      } else if (!event.isError && pending.async) {
+        // An async launch that reported no run id can never be seen completing: keep the
+        // surface active for the rest of the session rather than lose track of it.
+        runningOps.set(`call:${event.toolCallId}`, surface);
+      }
+    }
     if (!pendingAsyncLaunches.delete(event.toolCallId)) return;
     if (event.isError) asyncRunsActive = Math.max(0, asyncRunsActive - 1);
   });
@@ -154,8 +210,16 @@ export default function (pi: ExtensionAPI) {
       if (decision.block) {
         return { block: true, reason: decision.reason };
       }
+      const ops = evaluateOpsLaunch(input, queryFrozenOps(), isSurfaceActive);
+      if (ops.block) {
+        return { block: true, reason: ops.reason };
+      }
       if (input.action === undefined && typeof input.agent === "string" && typeof input.task === "string") {
-        bindLaneIdentity(input);
+        bindLaneIdentity(input, input.agent, ops.entry);
+        if (ops.entry) pendingOps.set(event.toolCallId, { surface: ops.entry.surface, async: isAsyncSubagentLaunch(input) });
+      } else {
+        // Only a single launch is bound; a model-supplied binding never reaches any other shape.
+        delete input.extensionBindings;
       }
       return;
     }

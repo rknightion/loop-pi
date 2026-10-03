@@ -2,14 +2,14 @@
 name: gate-runner
 description: GATE lane: runs one named gate once against one state and classifies failures.
 advertise: true
-model: openai/gpt-6-luna
-thinking: high
+model: openai/gpt-6.1-sol
+thinking: low
 tools: read, bash, watch_process
 extensions:
 systemPromptMode: append
 defaultContext: fresh
 inheritProjectContext: true
-inheritGlobalContext: true
+inheritGlobalContext: false
 inheritSkills: false
 async: true
 timeoutMs: 7200000

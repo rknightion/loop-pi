@@ -20,6 +20,7 @@ type Handler = (event: any, ctx: any) => any;
 
 function fakeApi() {
   const handlers = new Map<string, Handler[]>();
+  const listeners = new Map<string, ((data: unknown) => void)[]>();
   const api = {
     on(event: string, handler: Handler) {
       const list = handlers.get(event) ?? [];
@@ -30,8 +31,20 @@ function fakeApi() {
         if (idx >= 0) list.splice(idx, 1);
       };
     },
+    // pi.events: synchronous handlers, as in pi.
+    events: {
+      on(channel: string, handler: (data: unknown) => void) {
+        const list = listeners.get(channel) ?? [];
+        list.push(handler);
+        listeners.set(channel, list);
+        return () => {};
+      },
+      emit(channel: string, data: unknown) {
+        for (const handler of listeners.get(channel) ?? []) handler(data);
+      },
+    },
   };
-  return { api, handlers };
+  return { api, handlers, emit: api.events.emit, onEvent: api.events.on };
 }
 
 function fakeCtx(cwd: string, sessionId = "test-session") {
@@ -380,4 +393,135 @@ test("root: a subagent call naming a model outside the gpt-6 family is blocked",
   assert.equal(result?.block, true);
   assert.match(result?.reason ?? "", /gpt-6 family route/);
   assert.ok(handlers.get("before_provider_request")?.length === 1 && handlers.get("model_select")?.length === 1);
+});
+
+// ---------------------------------------------------------------------------
+// Ops grants (S6): the frozen ops come from loop-continuation's `query-launch` answer.
+// ---------------------------------------------------------------------------
+
+const OPS_ENTRY = { surface: "deploy:svc-worker", kind: "deploy", allow: ["^just deploy( .*)?$"] };
+const OPS_FILE = { v: 1, ops: [OPS_ENTRY] };
+const OPS_BRIEF = "Lane: L1 · Task: T-1 · Tier: guarded\nObjective: deploy\nOps surface: deploy:svc-worker\nGate: just deploy";
+
+/** A root with a fake loop-continuation answering `query-launch` with `ops` (no answer when omitted). */
+function opsRoot(ops?: unknown) {
+  const fake = fakeApi();
+  if (ops !== undefined) {
+    fake.onEvent("loop-continuation:query-launch", (data) =>
+      (data as { reply: (r: unknown) => void }).reply({ reportPath: "/r/report.md", opsPath: "/r/ops.json", ops }),
+    );
+  }
+  rootExtension(fake.api as any);
+  const { ctx } = fakeCtx(agentDir);
+  const handler = toolCallHandler(fake.handlers);
+  const end = fake.handlers.get("tool_execution_end")![0];
+  const launch = (toolCallId: string, input: Record<string, unknown>) =>
+    handler({ type: "tool_call", toolCallId, toolName: "subagent", input }, ctx);
+  // The tool result shape pi-subagents 0.75.0 returns for a single async launch (async-execution.js).
+  const started = (toolCallId: string, runId: string) =>
+    end(
+      {
+        type: "tool_execution_end",
+        toolCallId,
+        toolName: "subagent",
+        isError: false,
+        result: {
+          content: [{ type: "text", text: `Async: ops [${runId}]` }],
+          details: { mode: "single", runId, results: [], asyncId: runId, asyncDir: `/tmp/${runId}` },
+        },
+      },
+      ctx,
+    );
+  // The completion payload result-watcher.js emits: the result file's fields plus `runId`.
+  const completed = (runId: string) =>
+    fake.emit("subagent:async-complete", {
+      id: runId,
+      runId,
+      sessionId: "/sessions/root.jsonl",
+      agent: "ops",
+      success: true,
+      results: [{ agent: "ops", status: "complete" }],
+      triggerTurn: true,
+    });
+  return { launch, started, completed, end, ctx };
+}
+
+test("root ops: a frozen surface is bound with agent, surface and the full entry", async () => {
+  const { launch } = opsRoot(OPS_FILE);
+  const input: Record<string, unknown> = {
+    agent: "ops",
+    task: OPS_BRIEF,
+    extensionBindings: { "loop-pi.guard/1": { agent: "ops", surface: "deploy:svc-worker", entry: { ...OPS_ENTRY, allow: ["^.*$"] } } },
+  };
+  const result = await launch("1", input);
+  assert.equal(result?.block ?? false, false, result?.reason);
+  assert.deepEqual(input.extensionBindings, { "loop-pi.guard/1": { agent: "ops", surface: "deploy:svc-worker", entry: OPS_ENTRY } });
+});
+
+test("root ops: refused when no ops are frozen (null) or nothing answers query-launch", async () => {
+  for (const root of [opsRoot(null), opsRoot()]) {
+    const result = await root.launch("1", { agent: "ops", task: OPS_BRIEF });
+    assert.equal(result?.block, true);
+    assert.match(result?.reason ?? "", /no ops grants are frozen/);
+  }
+});
+
+test("root ops: a surface not in the frozen ops is refused", async () => {
+  const { launch } = opsRoot(OPS_FILE);
+  const result = await launch("1", { agent: "ops", task: OPS_BRIEF.replace("deploy:svc-worker", "deploy:other") });
+  assert.equal(result?.block, true);
+  assert.match(result?.reason ?? "", /not in the frozen ops/);
+});
+
+test("root ops: an Ops surface line on any other agent is refused", async () => {
+  const { launch } = opsRoot(OPS_FILE);
+  const input: Record<string, unknown> = { agent: "lane-worker-push", task: OPS_BRIEF };
+  const result = await launch("1", input);
+  assert.equal(result?.block, true);
+  assert.match(result?.reason ?? "", /only valid in a brief for agent `ops`/);
+  assert.equal(input.extensionBindings, undefined);
+});
+
+test("root ops: one active run per surface, released by its async-complete", async () => {
+  const { launch, started, completed } = opsRoot(OPS_FILE);
+  assert.equal((await launch("1", { agent: "ops", task: OPS_BRIEF }))?.block ?? false, false);
+  // Still between tool_call and the tool result.
+  const racing = await launch("2", { agent: "ops", task: OPS_BRIEF });
+  assert.equal(racing?.block, true);
+  assert.match(racing?.reason ?? "", /already active/);
+  started("1", "run-a");
+  assert.equal((await launch("3", { agent: "ops", task: OPS_BRIEF }))?.block, true, "the run is still active");
+  completed("run-other");
+  assert.equal((await launch("4", { agent: "ops", task: OPS_BRIEF }))?.block, true, "another run's completion releases nothing");
+  completed("run-a");
+  assert.equal((await launch("5", { agent: "ops", task: OPS_BRIEF }))?.block ?? false, false);
+});
+
+test("root ops: the run id is read from the started text when details lack it", async () => {
+  const { launch, end, completed, ctx } = opsRoot(OPS_FILE);
+  await launch("1", { agent: "ops", task: OPS_BRIEF });
+  end({ type: "tool_execution_end", toolCallId: "1", toolName: "subagent", isError: false, result: { content: [{ type: "text", text: "Async: ops [run-b]\nmore" }], details: {} } }, ctx);
+  assert.equal((await launch("2", { agent: "ops", task: OPS_BRIEF }))?.block, true);
+  completed("run-b");
+  assert.equal((await launch("3", { agent: "ops", task: OPS_BRIEF }))?.block ?? false, false);
+});
+
+test("root ops: a launch that ends in error releases its surface; one with no run id never does", async () => {
+  const { launch, end, ctx } = opsRoot(OPS_FILE);
+  await launch("1", { agent: "ops", task: OPS_BRIEF });
+  end({ type: "tool_execution_end", toolCallId: "1", toolName: "subagent", isError: true, result: { content: [], details: {} } }, ctx);
+  assert.equal((await launch("2", { agent: "ops", task: OPS_BRIEF }))?.block ?? false, false);
+  end({ type: "tool_execution_end", toolCallId: "2", toolName: "subagent", isError: false, result: { content: [], details: {} } }, ctx);
+  assert.equal((await launch("3", { agent: "ops", task: OPS_BRIEF }))?.block, true);
+});
+
+test("root ops: a model-supplied binding is replaced on a single launch and dropped on any other shape", async () => {
+  const { launch } = opsRoot(OPS_FILE);
+  const forged = { "loop-pi.guard/1": { agent: "ops", surface: "deploy:svc-worker", entry: OPS_ENTRY } };
+  const single: Record<string, unknown> = { agent: "lane-worker", task: "x", extensionBindings: forged };
+  assert.equal((await launch("1", single))?.block ?? false, false);
+  assert.deepEqual(single.extensionBindings, { "loop-pi.guard/1": { agent: "lane-worker" } });
+  const management: Record<string, unknown> = { action: "status", id: "run-a", extensionBindings: forged };
+  assert.equal((await launch("2", management))?.block ?? false, false);
+  assert.equal(management.extensionBindings, undefined);
 });

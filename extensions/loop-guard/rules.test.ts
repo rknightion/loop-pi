@@ -273,6 +273,22 @@ const LANE_ONLY_DENY: { name: string; command: string }[] = [
   { name: "bao kv put", command: "bao kv put secret/foo bar=baz" },
   { name: "op item create", command: "op item create --category login" },
   { name: "aws secretsmanager put-secret-value", command: "aws secretsmanager put-secret-value --secret-id x" },
+  { name: "gh release edit", command: "gh release edit v1.0.0 --draft=false" },
+  { name: "gh release delete", command: "gh release delete v1.0.0 --yes" },
+  { name: "gh workflow run", command: "gh workflow run deploy.yml --ref main" },
+  { name: "gh api --method=POST", command: "gh api --method=POST /repos/x/y/dispatches" },
+  { name: "gh api -XPUT", command: "gh api -XPUT /repos/x/y/contents/a" },
+  { name: "gh api --input", command: "gh api /repos/x/y/releases --input body.json" },
+  { name: "gh api -ftitle=hi", command: "gh api /repos/x/y/issues -ftitle=hi" },
+  { name: "aws secretsmanager behind a global option", command: "aws --region eu-west-2 secretsmanager create-secret --name x" },
+  { name: "vault token create", command: "vault token create -policy=ci" },
+  { name: "aws iam create-access-key", command: "aws iam create-access-key --user-name ci" },
+  { name: "gcloud service account key", command: "gcloud iam service-accounts keys create k.json --iam-account a@b" },
+  { name: "gh ssh-key add", command: "gh ssh-key add key.pub" },
+  { name: "az ad sp credential reset", command: "az ad sp credential reset --id x" },
+  { name: "write into codex/ops-*", command: "echo '{}' > codex/ops-c-loop1.json" },
+  { name: "append into codex/state-*", command: "echo x 2>/dev/null >> repo/codex/state-c-loop1.jsonl" },
+  { name: "tee into codex/goal-*", command: "tee codex/goal-c-loop1.md < /dev/null" },
 ];
 
 for (const c of LANE_ONLY_DENY) {
@@ -370,6 +386,20 @@ for (const c of INLINE_LANE_ONLY_DENY) {
 test("gh api without a mutating flag is allowed for lanes (read-only GET)", () => {
   const decision = evaluateBashCommand("gh api /repos/x/y/issues", "lane");
   assert.equal(decision.block, false);
+});
+
+test("read-only gh release, gh workflow and loop control reads are allowed for lanes", () => {
+  for (const command of [
+    "gh release view v1.0.0",
+    "gh workflow list",
+    "gh workflow view deploy.yml",
+    "gh api -X GET /repos/x/y",
+    "cat codex/ops-c-loop1.json",
+    "echo x > codex/report-c-loop1.md",
+    "some-cmd > out.log 2>&1",
+  ]) {
+    assert.equal(evaluateBashCommand(command, "lane").block, false, command);
+  }
 });
 
 test("gh release list (not create) is allowed for lanes", () => {
@@ -767,6 +797,10 @@ test("C3_AGENTS matches SEAMS.md exactly", () => {
       "reviewer",
       "reviewer-high",
       "security-reviewer",
+      "lane-worker-low",
+      "lane-worker-low-push",
+      "triager",
+      "ops",
     ].sort(),
   );
 });
@@ -903,20 +937,22 @@ test("typed or spliced parser placeholder text cannot hide arguments", () => {
 // root (row 37, an `ssh` call, included), and nothing warns.
 // ---------------------------------------------------------------------------
 
-const REAL_LANE_BLOCKS: { row: number; tool: string; command: string }[] = JSON.parse(
+// Rows marked `added` are not recorded blocks: they pin a later rule change, with `lane_blocks`
+// giving the lane verdict.
+const REAL_LANE_BLOCKS: { row: number; tool: string; command: string; added?: boolean; lane_blocks?: boolean }[] = JSON.parse(
   readFileSync(new URL("./fixtures/real-lane-blocks.json", import.meta.url), "utf8"),
 );
 
-test("real lane blocks fixture has 35 rows", () => {
-  assert.equal(REAL_LANE_BLOCKS.length, 35);
+test("real lane blocks fixture has 35 recorded rows", () => {
+  assert.equal(REAL_LANE_BLOCKS.filter((r) => !r.added).length, 35);
 });
 
 for (const r of REAL_LANE_BLOCKS) {
-  const laneShouldBlock = false;
-  test(`real lane block row ${r.row} (${r.tool}): lane ${laneShouldBlock ? "still blocked (ssh)" : "now allowed"}`, () => {
+  const laneShouldBlock = r.lane_blocks === true;
+  test(`real lane block row ${r.row} (${r.tool}): lane ${laneShouldBlock ? "blocked" : "allowed"}`, () => {
     const decision = evaluateBashCommand(r.command, "lane");
     assert.equal(decision.block, laneShouldBlock, `row ${r.row}: ${decision.reason ?? ""}`);
-    if (laneShouldBlock) assert.match(decision.reason ?? "", /ssh/);
+    if (laneShouldBlock) assert.match(decision.reason ?? "", /blocked for lanes|belong to the root/);
     assert.equal(decision.warning, undefined);
   });
   test(`real lane block row ${r.row} (${r.tool}): root allowed without a warning`, () => {

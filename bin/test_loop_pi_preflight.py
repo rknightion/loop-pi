@@ -22,6 +22,8 @@ C3_AGENTS = [
     "gate-runner",
     "lane-worker",
     "lane-worker-push",
+    "lane-worker-low",
+    "lane-worker-low-push",
     "lane-worker-retry",
     "lane-worker-retry-push",
     "complex-worker",
@@ -31,6 +33,8 @@ C3_AGENTS = [
     "security-reviewer",
     "rescue-sol",
     "rescue-astra",
+    "ops",
+    "triager",
 ]
 
 

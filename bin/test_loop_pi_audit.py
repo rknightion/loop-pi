@@ -781,5 +781,131 @@ class AutomationTests(unittest.TestCase):
         self.assertEqual(self.compare([self.activity(ref=other)], ref=other, items=[item]).returncode, 1)
 
 
+class OpsReleaseTests(unittest.TestCase):
+    """`--ops`: a release-kind ops entry covers tags and releases added during the run, nothing else."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="loop-pi-audit-ops-test-")
+        self.repo, self.remote = init_repo_with_remote(self.tmp, "repo")
+        self.gh_bin = make_bin_with_gh_stub(self.tmp, '[{"tagName": "v8"}]')
+        self.before = os.path.join(self.tmp, "before.json")
+        snapshot(self.before, self.repo, env_overrides={"PATH": self.gh_bin})
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def set_releases(self, releases_json):
+        with open(os.path.join(self.gh_bin, "gh"), "w", encoding="utf-8") as fh:
+            fh.write(f"#!/bin/sh\necho '{releases_json}'\n")
+
+    def ops_file(self, *kinds, raw=None, holder=None):
+        """The ops file at `<holder>/codex/ops-c-loop1.json` (default holder: this suite's repo);
+        `holder=False` writes it outside any codex/ directory."""
+        if holder is False:
+            path = os.path.join(self.tmp, "ops.json")
+        else:
+            codex = os.path.join(self.repo if holder is None else holder, "codex")
+            os.makedirs(codex, exist_ok=True)
+            path = os.path.join(codex, "ops-c-loop1.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            if raw is not None:
+                fh.write(raw)
+            else:
+                json.dump({"v": 1, "ops": [{"surface": f"{k}:svc", "kind": k, "allow": ["^x$"]} for k in kinds]}, fh)
+        return path
+
+    def release_v9(self):
+        """A run that pushed tag v9 and published its release (v8 stays)."""
+        git(self.repo, "tag", "v9")
+        git(self.repo, "push", "-q", "origin", "v9")
+        self.set_releases('[{"tagName": "v8"}, {"tagName": "v9"}]')
+        after = os.path.join(self.tmp, "after.json")
+        snapshot(after, self.repo, env_overrides={"PATH": self.gh_bin})
+        return after
+
+    def test_new_tag_and_release_without_ops_are_ungranted(self):
+        result = run_audit("compare", self.before, self.release_v9())
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("refs/tags/v9", result.stdout)
+        self.assertIn("release added: v9 [UNGRANTED]", result.stdout)
+
+    def test_ops_without_a_release_entry_covers_nothing(self):
+        result = run_audit("compare", self.before, self.release_v9(), "--ops", self.ops_file("deploy", "secret-write"))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn("GRANTED ops release", result.stdout)
+
+    def test_release_entry_covers_the_new_tag_and_release(self):
+        result = run_audit("compare", self.before, self.release_v9(), "--ops", self.ops_file("deploy", "release"))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("ref added: refs/tags/v9", result.stdout)
+        self.assertIn("release added: v9 [GRANTED ops release]", result.stdout)
+        self.assertNotIn("UNGRANTED", result.stdout)
+
+    def test_release_entry_does_not_cover_a_removed_release_or_a_branch(self):
+        git(self.repo, "push", "-q", "origin", "HEAD:refs/heads/stray")
+        self.set_releases("[]")
+        after = os.path.join(self.tmp, "after.json")
+        snapshot(after, self.repo, env_overrides={"PATH": self.gh_bin})
+        result = run_audit("compare", self.before, after, "--ops", self.ops_file("release"))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("release removed: v8 [UNGRANTED]", result.stdout)
+        self.assertIn("refs/heads/stray", result.stdout)
+
+    def test_release_entry_covers_only_the_ops_files_own_repo(self):
+        other, _ = init_repo_with_remote(self.tmp, "other")
+        before = os.path.join(self.tmp, "before-two.json")
+        snapshot(before, self.repo, other, env_overrides={"PATH": self.gh_bin})
+        for repo in (self.repo, other):
+            git(repo, "tag", "v9")
+            git(repo, "push", "-q", "origin", "v9")
+        self.set_releases('[{"tagName": "v8"}, {"tagName": "v9"}]')
+        after = os.path.join(self.tmp, "after-two.json")
+        snapshot(after, self.repo, other, env_overrides={"PATH": self.gh_bin})
+        result = run_audit("compare", before, after, "--ops", self.ops_file("release"))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(f"[{self.repo}] release added: v9 [GRANTED ops release]", result.stdout)
+        self.assertIn(f"[{other}] release added: v9 [UNGRANTED]", result.stdout)
+        self.assertIn(f"[{other}] remote 'origin' ref added: refs/tags/v9", result.stdout)
+        other_lines = [line for line in result.stdout.splitlines() if line.startswith(f"[{other}]")]
+        self.assertTrue(other_lines)
+        self.assertFalse([line for line in other_lines if "GRANTED ops release" in line], other_lines)
+
+    def test_release_entry_outside_codex_covers_nothing(self):
+        result = run_audit("compare", self.before, self.release_v9(), "--ops", self.ops_file("release", holder=False))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn("GRANTED ops release", result.stdout)
+        self.assertIn("release added: v9 [UNGRANTED]", result.stdout)
+        self.assertIn("not in a codex/ directory", result.stderr)
+
+    def test_malformed_ops_file_is_a_usage_error(self):
+        after = self.release_v9()
+        for raw in ('{"v": 2, "ops": []}', '{"v": 1, "ops": [{"surface": "x", "kind": "anything"}]}', "not json"):
+            result = run_audit("compare", self.before, after, "--ops", self.ops_file(raw=raw))
+            self.assertEqual(result.returncode, 2, raw + result.stdout + result.stderr)
+            self.assertIn("invalid ops file", result.stderr)
+
+    def test_grants_schema_is_unchanged_alongside_ops(self):
+        grants = os.path.join(self.tmp, "grants.json")
+        with open(grants, "w", encoding="utf-8") as fh:
+            json.dump({self.repo: ["refs/tags/v9"]}, fh)
+        result = run_audit("compare", self.before, self.release_v9(), "--grants", grants, "--ops", self.ops_file("deploy"))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("release added: v9 [GRANTED]", result.stdout)
+
+    def test_closeout_passes_ops_through(self):
+        run_dir = os.path.join(self.tmp, "run")
+        os.makedirs(run_dir)
+        env = {"PATH": self.gh_bin, "LOOP_PI_RUN_DIR": run_dir}
+        self.assertEqual(run_audit("begin", self.repo, env_overrides=env).returncode, 0)
+        git(self.repo, "tag", "v9")
+        git(self.repo, "push", "-q", "origin", "v9")
+        self.set_releases('[{"tagName": "v8"}, {"tagName": "v9"}]')
+        without = run_audit("closeout", env_overrides=env)
+        self.assertEqual(without.returncode, 1, without.stdout + without.stderr)
+        result = run_audit("closeout", "--ops", self.ops_file("release"), env_overrides=env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("GRANTED ops release", result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

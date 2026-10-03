@@ -118,6 +118,31 @@ describe("finalMarker", () => {
   test("no message at all is null", () => {
     assert.equal(finalMarker(null), null);
   });
+
+  test("a trailing period after the deadline still reads as WAITING", () => {
+    assert.equal(finalMarker("Notes.\nWAITING: lane 3 CI until 2026-09-27T12:00:30Z."), "waiting");
+  });
+
+  test("a bolded WAITING line reads as WAITING", () => {
+    assert.equal(finalMarker("**WAITING: lane 3 CI until 2026-09-27T12:00Z**"), "waiting");
+  });
+
+  test("a bulleted or quoted WAITING line reads as WAITING", () => {
+    assert.equal(finalMarker("- WAITING: lane 3 CI until 2026-09-27T12:00Z"), "waiting");
+    assert.equal(finalMarker("> `WAITING: lane 3 CI until 2026-09-27T12:00Z`"), "waiting");
+  });
+
+  test("a decorated PAUSED line reads as PAUSED", () => {
+    assert.equal(finalMarker("**PAUSED: waiting on the owner.**"), "paused");
+  });
+
+  test("prose that merely mentions WAITING is not a marker", () => {
+    assert.equal(finalMarker("I will end with WAITING: x until 2026-09-27T12:00Z soon."), null);
+  });
+
+  test("a deadline with trailing text other than decoration is not a marker", () => {
+    assert.equal(finalMarker("WAITING: lane 3 CI until 2026-09-27T12:00Z please"), null);
+  });
 });
 
 describe("waitingDeadline", () => {
@@ -127,6 +152,11 @@ describe("waitingDeadline", () => {
 
   test("extracts a deadline that carries seconds", () => {
     assert.equal(waitingDeadline("WAITING: lane 3 CI until 2026-09-27T12:00:30Z"), "2026-09-27T12:00:30Z");
+  });
+
+  test("extracts the deadline from a decorated WAITING: line", () => {
+    assert.equal(waitingDeadline("**WAITING: lane 3 CI until 2026-09-27T12:00Z**."), "2026-09-27T12:00Z");
+    assert.equal(waitingDeadline("- WAITING: lane 3 CI until 2026-09-27T12:00:30Z."), "2026-09-27T12:00:30Z");
   });
 
   test("null when the last line is not a WAITING: marker", () => {
