@@ -16,8 +16,11 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
+import { isContextOverflow, isRetryableAssistantError, retryDelayMs } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { backoffConfig, classifyRetryError, extraRetryDelayMs, retryPolicy } from "./backoff.ts";
 import {
   type CeilingConfig,
   EMPTY_LENGTH_ERROR,
@@ -29,12 +32,16 @@ import {
   writeRequestIncident,
 } from "./core.ts";
 
-function loadConfig(): CeilingConfig {
+function readSettings(): unknown {
   try {
-    return ceilingConfig(JSON.parse(readFileSync(join(getAgentDir(), "settings.json"), "utf8")));
+    return JSON.parse(readFileSync(join(getAgentDir(), "settings.json"), "utf8"));
   } catch {
-    return ceilingConfig({});
+    return {};
   }
+}
+
+function loadConfig(): CeilingConfig {
+  return ceilingConfig(readSettings());
 }
 
 export function installRequestCeiling(pi: ExtensionAPI, config: CeilingConfig = loadConfig()): void {
@@ -123,7 +130,65 @@ export function installRequestCeiling(pi: ExtensionAPI, config: CeilingConfig = 
   });
 }
 
-// Standalone entry for tests; installed homes reach it through the loop-guard entries.
+/**
+ * Retry backoff (SEAMS.md "Retry backoff"): jitter on 5xx retries and a flat wait on 429, added in
+ * front of pi's own agent-level retry wait. pi awaits `agent_end` handlers before it decides to
+ * retry and sleeps its own `retryDelayMs`, so a wait here delays the retry without touching pi's
+ * policy. Without this extension pi's backoff is unchanged.
+ *
+ * The attempt number mirrors pi's counter: pi retries a run whose last assistant message is a
+ * retryable error (not a context overflow) while attempts remain, resets on any non-error
+ * assistant message, and is always back at zero once the run settles.
+ */
+export function installRetryBackoff(pi: ExtensionAPI, loadSettings: () => unknown = readSettings): void {
+  let attempt = 0;
+
+  pi.on("session_start", () => {
+    attempt = 0;
+  });
+
+  pi.on("message_end", (event) => {
+    const message = event.message as { role?: string; stopReason?: string };
+    if (message.role === "assistant" && message.stopReason !== "error") attempt = 0;
+  });
+
+  pi.on("agent_settled", () => {
+    attempt = 0;
+  });
+
+  pi.on("agent_end", async (event, ctx: ExtensionContext) => {
+    const last = [...event.messages].reverse().find((m) => (m as { role?: string }).role === "assistant") as
+      | AssistantMessage
+      | undefined;
+    if (!last || last.stopReason !== "error") return;
+    const settings = loadSettings();
+    const policy = retryPolicy(settings);
+    if (!policy.enabled) return;
+    if (!isRetryableAssistantError(last) || isContextOverflow(last, ctx.model?.contextWindow ?? 0)) return;
+    if (attempt + 1 > policy.maxRetries) return;
+    attempt++;
+    const extra = extraRetryDelayMs(classifyRetryError(last.errorMessage), retryDelayMs(policy, attempt), backoffConfig(settings));
+    if (extra > 0) await abortableSleep(extra, ctx.signal);
+  });
+}
+
+function abortableSleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) return resolve();
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+// Standalone entry for tests; installed homes reach both through the loop-guard entries.
 export default function (pi: ExtensionAPI) {
   installRequestCeiling(pi);
+  installRetryBackoff(pi);
 }

@@ -30,6 +30,7 @@ Three pi extensions, a home template and an installer:
 - `extensions/request-ceiling` bounds each model request in the root and every lane by wall-clock
   time, and turns an output-budget stop with no output into an incident. Either one sends the
   session a follow-up message that starts its next turn, a bounded number of times in a row.
+  It also adds jitter to pi's retry wait after a 5xx and holds a 429 retry to a flat 60 s.
 - `home/` holds the twelve agent files (mapper, lane-worker, reviewer and so on), the pi settings
   and the policy header for the dedicated loop home.
 - `bin/loop-pi-install` builds a pinned runtime, validates it, installs one pi home and writes a

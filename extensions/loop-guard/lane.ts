@@ -16,7 +16,7 @@ import type { ExtensionAPI, ExtensionContext, ToolCallEvent, ToolCallEventResult
 import { getAgentDir, isToolCallEventType } from "@earendil-works/pi-coding-agent";
 import { hookScriptsToRun, runHookScripts } from "./hooks.ts";
 import { installModelFamily, subagentOverrideBlock } from "./model-family.ts";
-import { installRequestCeiling } from "../request-ceiling/index.ts";
+import { installRequestCeiling, installRetryBackoff } from "../request-ceiling/index.ts";
 import { evaluateBashCommand, isLoopControlPath } from "./rules.ts";
 import { hasLanePushGrant } from "./push-grant.ts";
 import { parseLaneBinding } from "./ops.ts";
@@ -158,4 +158,5 @@ export default function (pi: ExtensionAPI) {
 
   installModelFamily(pi);
   installRequestCeiling(pi);
+  installRetryBackoff(pi);
 }

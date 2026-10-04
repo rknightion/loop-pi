@@ -103,6 +103,28 @@ set per model in the home's `models.json` `modelOverrides`.
   chain. Past the limit the message is appended without a turn and the `-exhausted` incident is
   written; the session then stops for the watchdog to see.
 
+## Retry backoff
+
+`installRetryBackoff` (in `extensions/request-ceiling/`, `backoff.ts` for the pure delay function)
+is installed by both loop-guard entries next to `installRequestCeiling`. pi 1.0.1's agent-level
+retry waits `retryDelayMs(settings.retry, attempt)` (`pi-ai` `utils/retry.js`): `baseDelayMs *
+2^(n-1)` capped at `maxAgentDelayMs`, no jitter and no split by status. That wait cannot be replaced
+from an extension, so the extension adds a wait in front of it.
+
+- Seam: pi awaits extension `agent_end` handlers before `_handlePostAgentRun` decides to retry and
+  sleeps its own delay, and `ctx.signal` is the live run's signal there, so an abort ends the wait.
+  The retry decision uses pi-ai's public `isRetryableAssistantError`, `isContextOverflow` and
+  `retryDelayMs`. pi's attempt counter is private; the extension mirrors it (increment per retried
+  error, reset on any non-error assistant `message_end` and at `agent_settled`, when pi's is zero).
+- Totals: a 429 (`429`, `rate limit`, `too many requests` in the error text) waits a flat
+  `loopPi.retryBackoff.rateLimitDelayMs` (default 60000) including pi's delay. A 5xx (a `5xx`
+  status, `overloaded`, `service unavailable`, `server error`, `internal error`, `bad gateway`)
+  waits pi's delay plus a random extra in `[0, 0.5 * pi's delay)`. Every other retryable error keeps
+  pi's delay. Errors pi does not retry get no wait. `settings.retry` and `httpIdleTimeoutMs` stay
+  pi's own; without the extension pi's backoff is unchanged.
+- pi's `auto_retry_start` event still reports only pi's own `delayMs`, and is emitted after the
+  extension's wait.
+
 ## Test harness
 
 - Tests live beside the code as `*.test.ts`, run with `node --test` from the repository root (Node 26 strips

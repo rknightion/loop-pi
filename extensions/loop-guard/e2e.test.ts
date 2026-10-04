@@ -155,8 +155,15 @@ test(
       );
 
       const sessionsDir = join(agentDir, "sessions");
-      const childSessionPath = await waitForCondition(() => findChildSessionFile(sessionsDir), 20_000, 300);
-      const childSessionText = readTextFile(childSessionPath);
+      // The child appends its session file as it runs, so the file can exist (and already hold
+      // the forced-push tool call) before the tool result is written. Poll until a complete bash
+      // toolResult line is present; the assertions below then judge what that result says.
+      const { path: childSessionPath, text: childSessionText } = await waitForCondition(() => {
+        const path = findChildSessionFile(sessionsDir);
+        if (!path) return undefined;
+        const text = readTextFile(path);
+        return hasBashToolResult(text) ? { path, text } : undefined;
+      }, 30_000, 300);
 
       assert.match(
         childSessionText,
@@ -297,6 +304,19 @@ test("a required lane guard throwing at session_start refuses the child before i
     await session.close();
   }
 });
+
+/** True once a complete JSONL line records a bash tool result. A trailing line still being
+ *  written fails to parse and is skipped until a later poll. */
+function hasBashToolResult(text: string): boolean {
+  return text.split("\n").some((line) => {
+    try {
+      const message = JSON.parse(line)?.message;
+      return message?.role === "toolResult" && message?.toolName === "bash";
+    } catch {
+      return false;
+    }
+  });
+}
 
 /** Recursively find a pi-subagents child's `session.jsonl` (or `run-N/session.jsonl`)
  *  under the parent's `sessions/` dir, once it has at least one line. */
