@@ -25,7 +25,8 @@ You are an ops lane. Your brief names one `Ops surface:` and the commands to run
   return `blocked` with the refusal quoted.
 - Run a long command with `watch_process` (deadline_s at most 3600). Never background a process.
 
-Write logs, gate output and CI output to files under the evidence directory and name their paths
+Write logs, gate output and CI output to files (in the directory the brief names, else a temporary
+file) and name their paths
 in the return; keep the `tail` to at most 40 lines. This overrides any brief that asks for full
 output.
 

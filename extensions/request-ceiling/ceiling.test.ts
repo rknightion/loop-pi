@@ -18,13 +18,14 @@ import {
   writeFauxScript,
 } from "../loop-guard/rpc-test-helpers.ts";
 import { DEFAULT_WALL_CLOCK_MS, EMPTY_LENGTH_ERROR, ceilingConfig, isEmptyLengthStop } from "./core.ts";
+import { cleanupFixtures, loopFixture } from "../loop-continuation/test-fixture.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CEILING_EXTENSION = join(HERE, "index.ts");
 const CONTINUATION_EXTENSION = join(HERE, "..", "loop-continuation", "index.ts");
-const LAUNCH = "You are the root. Report at codex/report-x-loop1.md when finished.";
 
 after(cleanupAll);
+after(cleanupFixtures);
 
 test("an empty length stop is recognised; a truncated answer or tool call is not", () => {
   const base = { role: "assistant", stopReason: "length" };
@@ -49,17 +50,22 @@ interface Run {
 
 async function runRoot(rules: FauxRule[], ceiling: Record<string, number>, settledCount: number): Promise<Run> {
   const home = freshDir("request-ceiling-home-");
-  const cwd = freshDir("request-ceiling-cwd-");
   mkdirSync(home, { recursive: true });
   writeFileSync(join(home, "settings.json"), JSON.stringify({ loopPi: { requestCeiling: ceiling } }));
+  // A launch loop-continuation arms (S3): a git repository holding the goal, and a run dir.
+  const loop = loopFixture({ agentDir: home });
+  const previous = process.env.LOOP_PI_RUN_DIR;
+  process.env.LOOP_PI_RUN_DIR = loop.runDir;
   const session = startPiRpc({
     extensions: [FAUX_EXTENSION, CEILING_EXTENSION, CONTINUATION_EXTENSION],
     fauxScriptPath: writeFauxScript(rules),
     agentDir: home,
     subagentTempRoot: freshDir("request-ceiling-tmp-"),
-    cwd,
+    cwd: loop.repo,
   });
-  session.send({ id: "launch", type: "prompt", message: LAUNCH });
+  if (previous === undefined) delete process.env.LOOP_PI_RUN_DIR;
+  else process.env.LOOP_PI_RUN_DIR = previous;
+  session.send({ id: "launch", type: "prompt", message: loop.launch });
   let seen = 0;
   await session.waitFor((e) => e.type === "agent_settled" && ++seen >= settledCount, 30_000);
   return { home, events: session.events, close: session.close };

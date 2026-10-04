@@ -26,7 +26,8 @@ the brief names: authentication, authorisation, permissions, migrations, secrets
 - Where the brief leaves a decision open, take the goal's default and note the open question in
   your return.
 
-Write logs, gate output and CI output to files under the evidence directory and name their paths
+Write logs, gate output and CI output to files (in the directory the brief names, else a temporary
+file) and name their paths
 in the return; keep the `tail` to at most 40 lines. This overrides any brief that asks for full
 output.
 

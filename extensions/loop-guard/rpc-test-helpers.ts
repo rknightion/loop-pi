@@ -94,10 +94,14 @@ export interface StartPiOptions {
   extraArgs?: string[];
   /** Default: --no-session. Pass [] to let pi create a real session file (needed for children). */
   sessionArgs?: string[];
-  /** Extra environment. `LOOP_PI_RUN_DIR` is dropped unless given here, so a test run inside a
-   *  loop never hands its own run dir to the pi it spawns. */
+  /** Extra environment. The `LOOP_PI_RUN_DIR` this test process started with is dropped, so a test
+   *  run inside a loop never hands its own run dir to the pi it spawns; a value a test set itself
+   *  (in `process.env` or here) is passed through. */
   env?: Record<string, string | undefined>;
 }
+
+// The run dir this test process inherited (a test run from inside a live loop), captured at load.
+const AMBIENT_RUN_DIR = process.env.LOOP_PI_RUN_DIR;
 
 export function startPiRpc(opts: StartPiOptions): PiRpcSession {
   const extensionArgs = opts.extensions.flatMap((path) => ["--extension", path]);
@@ -121,7 +125,7 @@ export function startPiRpc(opts: StartPiOptions): PiRpcSession {
       PI_SKIP_VERSION_CHECK: "1",
       PI_TELEMETRY: "0",
       LOOP_PI_FAUX_SCRIPT: opts.fauxScriptPath,
-      LOOP_PI_RUN_DIR: undefined,
+      LOOP_PI_RUN_DIR: process.env.LOOP_PI_RUN_DIR !== AMBIENT_RUN_DIR ? process.env.LOOP_PI_RUN_DIR : undefined,
       ...opts.env,
     }),
     stdio: ["pipe", "pipe", "pipe"],

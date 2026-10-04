@@ -191,7 +191,7 @@ before any `await`. A missing reply means the provider extension is not loaded; 
 - The agent set (the only names the root may spawn): `mapper`, `mapper-deep`, `gate-runner`,
   `lane-worker`, `lane-worker-push`, `lane-worker-low`, `lane-worker-low-push`, `lane-worker-retry`,
   `lane-worker-retry-push`, `complex-worker`, `complex-worker-push`, `reviewer`, `reviewer-high`,
-  `security-reviewer`, `rescue-sol`, `rescue-astra`, `ops`, `triager`.
+  `security-reviewer`, `rescue-sol`, `rescue-astra`, `ops`, `ops-probe`, `triager`.
 - Every agent file sets `inheritGlobalContext: false`; the installer appends the home's
   `lane-policy.md` after a `<!-- lane-policy -->` marker instead. An overlay may replace
   `lane-policy.md`, so the return contract is not in it: every agent but `triager` carries the
@@ -212,12 +212,13 @@ before any `await`. A missing reply means the provider extension is not loaded; 
   WAITING and PAUSED lines are matched after stripping leading `[\s*_`>-]` and trailing
   `[\s.!*_`)]` decoration.
 - Ops lanes: the root binds `{"loop-pi.guard/1":{"agent":"ops","surface":"<id>","entry":{...}}}`
-  only for a surface in the frozen ops file with no active ops run on it. The lane allows a
+  only for a surface in the frozen ops file with no active ops run on it. `ops-probe` binds the same
+  way, only to a `kind: probe` entry. Allow patterns need no leading `^`: the lane full-matches. The lane allows a
   lane-forbidden command only on a full `^(?:pattern)$` match of `entry.allow`, a secret write only to
   an exact `entry.secret_paths` member, and credential creation only for kind `credential-create`.
   Single-flight is a kernel flock under `~/.local/state/loop-pi/ops-locks/<surface>.lock` (override
   `LOOP_PI_OPS_LOCK_DIR`); coverage is per machine. Every lane is refused writes to `codex/ops-*`,
-  `codex/state-*` and `codex/goal-*`.
+  `codex/state-*` and `codex/goal-*`, and under protocol 2 `codex/grants-*`.
 - Dispatcher: `loop-pi-dispatch[-variant]` runs a pi session with only `dispatcher/index.ts` and the
   in-process `loop-dispatch/idle` model, which answers pi-subagents' completion turns without a
   model call. It spawns lanes over the `subagents:rpc:v1` bus with the same identity binding and
@@ -239,13 +240,68 @@ before any `await`. A missing reply means the provider extension is not loaded; 
   - `loop-state` (model roots) records a failed run's return as failed but keeps the block's
     `landed`, `sha` and other fields, so its digest never re-admits a task whose lane may already
     have pushed, and shows such a task as `landed:<status>` rather than a clean `landed`.
-  A pre-green land `loop-state` refuses is recorded as an after-green land plus a park, and
-  stops new work. The dispatcher reads LOOP.md exactly as `loop-state` does (nothing stripped).
+  Every land is `mode=after-green`; there is no land before green. The dispatcher reads LOOP.md exactly as `loop-state` does (nothing stripped).
 - Red baseline: LOOP.md may carry `baseline-red: <TASK-ID> - <reason>` (main is known red; the named
-  task owns making it green). `loop-state` refuses `land mode=pre-green` in that repo, and the
-  dispatcher predicate refuses it before `open`, so only an LLM root runs it. That root's composed
+  task owns making it green). The dispatcher predicate refuses that repo before `open`, so only an
+  LLM root runs it. That root's composed
   gate runs on the batch's base SHA and on the integrated SHA, counts as green when every check or
   test failing on the integrated SHA also fails on the base SHA, and records both failing lists in a
   `judgement` event. `gate-runner` gates both SHAs when the brief's Gate line names a base.
 - Runtime entry: each session appends `loop-pi-runtime` `{v:1, variant, models:{<id>:{service_tier}}}`
   at `session_start` (variant from the home receipt's `variant`).
+
+## Protocol 2
+
+A root armed by this build writes `$LOOP_PI_RUN_DIR/loop-pi-proto` (`2\n`). Every new refusal and
+newly required artifact below applies only when that marker exists, so a root armed by an older
+build keeps its old behaviour after an install. Arm-time refusals cannot be gated (arming writes
+the marker). The threat model is a mistaken root or lane, not an adversarial one: edit and write
+paths are exact, bash write detection is best-effort.
+
+- **Arming** happens in the `input` hook: "You are the root" plus one report path, or a bare
+  `launch-*` path. It refuses (returns `handled`, no model turn) with no run dir, a cwd whose git
+  toplevel is not the goal's repository, a goal `## Run` `host:` other than this machine, or a
+  missing goal; incident `incidents/root/<sid>-<UTC>-arm-refused.json`. A first input naming a
+  `codex/goal-*.md` path that does not arm gets a visible relaunch warning. On success it writes the
+  marker, freezes `Ops grants:` and the optional `Audit grants: <abs> sha256=<hex>` (copy at
+  `<run dir>/audit-grants.json`; a bad hash gives none and an `incidents/ops/` record of class
+  `loop-audit-grants-rejected`), and appends `open` `--by ext` when the log has none.
+  `loop-continuation:query-launch` adds optional `auditGrantsPath` and `auditGrantsSha256`.
+- **Run-dir files** (root and lanes may not write them, except inside `worktrees/<lane>/`):
+  `loop-pi-proto`; `harness-facts.jsonl`
+  `{v:1, ts, kind: compaction-failed|quota-exhausted|context-overflow, session, detail}`;
+  `push-log.jsonl` `{v:1, ts, actor: root|lane, agent, lane, repo, remote, ref, old, new}` written
+  by loop-guard after every successful push (`old` from `ls-remote` before it); `audit-grants.json`;
+  `returns/<runId>.md`; `worktrees/<lane-id>/`. The lane binding carries optional `runDir`.
+- **Return cap** (loop-state, `message_end`, plus the `context` hook for already-stored messages): a
+  `subagent-notify` message over 16,384 bytes becomes its first 6,144 bytes, an omission line naming
+  the full copy, its last 8,192 bytes and the `lane-return` block if it is not in the tail. The
+  `return` event is parsed from the uncapped payload. With no run dir it is left uncapped. The
+  dispatcher's RPC completion path applies the same cap.
+- **Closeout**: `/loop-closeout` (loop-wait) emits `pi.events.emit("loop-closeout", {lines, pending})`
+  after its sweep; loop-continuation runs
+  `loop-pi-audit closeout --run-dir <rd> [--grants <rd>/audit-grants.json --grants-sha256 <hex>] --push-log <rd>/push-log.jsonl`,
+  lane-worktrees adds its sweep, and the root gets one `loop-closeout-audit` custom message (a push
+  that resets the nudge chain).
+- **Incidents**: `incidents/root/<sid>-<UTC>-context-overflow.json`
+  `{v, session, class: loop-root-context-overflow, at, home, cwd, live_runs, detail}`, once per
+  overflow episode while a lane is live. `loopPi.onIncident` (argv list, `{file}` replaced) runs
+  detached for root incidents; failures are ignored.
+- **Lane worktrees** (`lane-worktrees/`, root only): a `subagent` call with `isolation: "worktree"`
+  and a brief `Landing: returns candidate` or `pushes branch` runs in `<rd>/worktrees/<lane-id>` on
+  branch `loop/<run-dir basename>/<lane-id>`, created at `tool_call` and undone if the launch fails.
+  A root `land` or `park` for that task (read from the state log) removes it once the lane's run has
+  ended; a merged branch is deleted, an unmerged one kept. The closeout sweep and pi quit remove the
+  rest. State entry type `lane-worktrees-state`.
+- **loop-guard, root**: refuses `loop-state` with `--by ext|daemon|dispatcher` or a stdin `by`
+  field, edit/write into the run dir or `~/repos/agent-docs/authority/`, a second `subagent` status
+  for the same target with no wake since (a return, `loop-watch`, `loop-wake`, input, session start
+  or compaction), and `bash` timeouts over 900 s. **Lanes**: `codex/grants-*` and authority writes,
+  `gh pr merge` outside an ops `release` surface.
+- **loop-state**: `land` is `after-green` only (legacy `pre-green` lines still check and digest);
+  `revert` by root with `reason=root-decision`; `park needs=budget`; `close reason=budget` needs a
+  `compaction-failed` or `quota-exhausted` fact; judgements up to 4 KB; one `open` per log.
+- **loop-pi-audit**: under the marker a default-branch move is granted only when every commit in
+  `before..after` lies in a push-log `old..new` range for that repo and ref, touches only
+  `backlog/`, or has a declared `bot_actors` author or committer. A default-branch grant entry is
+  ignored with a warning.

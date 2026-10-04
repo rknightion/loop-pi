@@ -117,6 +117,12 @@ class InstalledLoopSmoke(unittest.TestCase):
             def tool(name, **args):
                 return {'name': name, 'args': args}
             report = 'codex/report-smoke-loop1.md'
+            # loop-continuation arms only a launch whose goal is in this repository (S3).
+            (repo / 'codex').mkdir(exist_ok=True)
+            (repo / 'codex/goal-smoke-loop1.md').write_text(
+                '# Goal: smoke loop1\n## Run\ntier: routine\nroot: llm - smoke\nroot-model: openai/gpt-6.1-sol\n'
+                '## Envelope\n| task | acceptance check | owned files | gate | landing | agent | tier |\n'
+                '|---|---|---|---|---|---|---|\n| SMOKE-1 | smoke | x | true | lands-after-green | lane-worker-push | routine |\n')
             report_body = '# Loop: smoke loop1 · Goal: ' + '0' * 64 + '\n\n'
             report_body += '\n\n'.join(section + '\nSmoke complete.' for section in (
                 '## Outcome', '## Evidence', '## Pending', '## Questions',
@@ -128,7 +134,8 @@ class InstalledLoopSmoke(unittest.TestCase):
                 {'match': r'^\[main .*\] (denied|granted)', 'once': True, 'toolCalls': [tool('bash', command='git push origin main')]},
                 {'match': 'SMOKE_SPAWN_DENIED', 'once': True, 'toolCalls': [tool('subagent', agent='lane-worker', task='SMOKE_DENIED_CHILD', async_=True)]},
                 {'match': 'SMOKE_SPAWN_GRANTED', 'once': True, 'toolCalls': [tool('subagent', agent='lane-worker-push', task='SMOKE_GRANTED_CHILD', async_=True)]},
-                {'match': '^## TURN ENDINGS', 'once': True, 'toolCalls': [tool('write', path=report, content=report_body)]},
+                # The armed launch now opens a state log, so the one nudge is the close-out one.
+                {'match': '^## TURN ENDINGS|^close out:', 'once': True, 'toolCalls': [tool('write', path=report, content=report_body)]},
                 {'match': 'Successfully wrote', 'text': 'Smoke report is written.'},
                 {'match': 'completed|Completed|finished', 'text': 'The child returned; work is still owed.'},
                 {'match': '.*', 'text': 'PAUSED: waiting for the smoke child'},

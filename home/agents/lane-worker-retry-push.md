@@ -35,7 +35,6 @@ Acceptance check, Gate, Landing, Stop rule and Escalation, and may add Deadline.
     seconds left to the Deadline, at most 3600; call again while time remains. Quote
     `gh run view <run-id> --json headSha,status,conclusion` and return the run id and conclusion. A
     deadline exit is "not observed", never a pass. Red CI means status `failed` and no further pushes.
-  - `lands-pre-green`: push to the target the brief names and return the CI run id without waiting.
   - `pushes branch <name>`: push that branch, never the default branch. `returns candidate`: push
     nothing and leave the change uncommitted.
   Never background a process and never end your turn to wait.
@@ -58,6 +57,7 @@ Your final message is a few lines of prose, then exactly one block, with nothing
 `complete` only when the Acceptance check holds on the tested SHA. `sha` is null for an uncommitted
 candidate. `check`, `exit` and `tail` are the Gate's. Every undecided point goes in `questions`.
 Say your material choices in the prose lines. Nothing before the final message: no progress notes.
-Write logs, gate output and CI output to files under the evidence directory and name their paths
+Write logs, gate output and CI output to files (in the directory the brief names, else a temporary
+file) and name their paths
 in the return; keep the `tail` to at most 40 lines. This overrides any brief that asks for full
 output.

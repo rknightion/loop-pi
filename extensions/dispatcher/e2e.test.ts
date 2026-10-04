@@ -203,7 +203,9 @@ test("the dispatcher runs three disjoint tasks through RPC lanes, a composed gat
   const sessions = walk(join(agentDir, "sessions")).filter((p) => p.endsWith(".jsonl"));
   const t1 = sessions.find((p) => p.endsWith("session.jsonl") && readFileSync(p, "utf8").includes("printenv PI_SUBAGENT_EXTENSION_BINDINGS"));
   assert.ok(t1, "T1's lane session exists");
-  assert.match(readFileSync(t1!, "utf8"), /\\"loop-pi\.guard\/1\\":\{\\"agent\\":\\"lane-worker-push\\"\}/, "the push identity reached the lane");
+  const t1Text = readFileSync(t1!, "utf8");
+  assert.match(t1Text, /\\"loop-pi\.guard\/1\\":\{\\"agent\\":\\"lane-worker-push\\",\\"runDir\\":\\"[^"\\]+\\"\}/, "the push identity and run dir reached the lane");
+  assert.ok(t1Text.includes(runDir.replace(/^\/private/, "")), "the bound run dir is this run's");
   const parent = sessions.find((p) => !p.includes("/run-") && !p.includes("subagent-artifacts"));
   assert.ok(parent, "the dispatcher's own session exists");
   const turns = readFileSync(parent!, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l).message).filter((m) => m?.role === "assistant");

@@ -30,7 +30,8 @@ When the brief's Gate line names a base SHA as well as the candidate, run the ga
 first, each in a clean checkout of that SHA. In the prose, list the failing checks or tests on each.
 `exit` stays the integrated run's real exit status.
 
-Write logs, gate output and CI output to files under the evidence directory and name their paths
+Write logs, gate output and CI output to files (in the directory the brief names, else a temporary
+file) and name their paths
 in the return; keep the `tail` to at most 40 lines. This overrides any brief that asks for full
 output.
 

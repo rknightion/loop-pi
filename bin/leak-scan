@@ -295,6 +295,8 @@ def scan_path(scanner: Scanner, target: Path) -> str:
         for name in sorted(filenames):
             path = Path(dirpath) / name
             rel = path.relative_to(target).as_posix()
+            if name == ".git" and path.is_file():
+                continue  # a linked worktree's gitdir pointer, not repository content
             if path.is_symlink():
                 scanner.scan_name(rel)
                 scanner.scan_text(rel, os.readlink(path))

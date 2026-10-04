@@ -4,12 +4,12 @@
 import { bindLaneIdentity } from "../loop-guard/push-grant.ts";
 import { evaluateSubagentCall } from "../loop-guard/rules.ts";
 
-type Bind = (input: Record<string, unknown>, agent: string, opsEntry?: Record<string, unknown>) => void;
+type Bind = (input: Record<string, unknown>, agent: string, opsEntry?: Record<string, unknown>, options?: { runDir?: string }) => void;
 
 /** Checks and binds one spawn's params in place. Returns the refusal reason, if any. */
 export function guardSpawn(params: Record<string, unknown>, agent: string): string | undefined {
   const decision = evaluateSubagentCall(params);
   if (decision.block) return decision.reason ?? "loop-guard refused the subagent call";
-  (bindLaneIdentity as unknown as Bind)(params, agent);
+  (bindLaneIdentity as unknown as Bind)(params, agent, undefined, { runDir: process.env.LOOP_PI_RUN_DIR });
   return undefined;
 }

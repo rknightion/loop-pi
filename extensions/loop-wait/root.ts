@@ -239,11 +239,14 @@ export default function (pi: ExtensionAPI): void {
         note: "async subagent runs are not stopped here; stop those through the subagent tool.",
       };
       pi.appendEntry("loop-wait-closeout", summary);
-      ctx.ui.notify(
+      const sweepLine =
         `loop-closeout: stopped ${stoppedWatchers.length} watcher(s), cancelled ${cancelledTimers.length} timer(s). ` +
-          "Async subagent runs are not covered here.",
-        "info",
-      );
+        "Async subagent runs are not covered here.";
+      ctx.ui.notify(sweepLine, "info");
+      // The rest of the closeout belongs to other root extensions (SEAMS.md "loop-closeout"):
+      // loop-continuation runs the closeout audit and reports to the root, lane-worktrees sweeps
+      // the lane worktrees. They add summary lines to `lines` and their work to `pending`.
+      pi.events.emit("loop-closeout", { lines: [sweepLine], pending: [] });
     },
   });
 

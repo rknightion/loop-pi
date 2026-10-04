@@ -22,7 +22,8 @@ You are a read-only mapping lane in a fan-out campaign. Your brief is your whole
 - Do not modify files, commit, push or change external state.
 - If the brief leaves a decision uncovered, stop and return the question with the evidence you have.
 
-Write logs, gate output and CI output to files under the evidence directory and name their paths
+Write logs, gate output and CI output to files (in the directory the brief names, else a temporary
+file) and name their paths
 in the return; keep the `tail` to at most 40 lines. This overrides any brief that asks for full
 output.
 
