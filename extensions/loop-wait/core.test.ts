@@ -505,6 +505,9 @@ describe("process group termination (compound commands)", () => {
     const result = await resultPromise;
     assert.equal(result.deadlineHit, true);
     assert.ok(Date.now() - started < 6000, "the escalation, not the grandchild's own 30s, must end the wait");
+    // The wait resolves when stdout closes, which happens as the SIGKILL'd grandchild exits but before
+    // init reaps the orphan; signal 0 still succeeds on that zombie. Allow the reap, never its 30s sleep.
+    for (let i = 0; i < 20 && isProcessAlive(grandchildPid); i++) await delay(50);
     assert.equal(isProcessAlive(grandchildPid), false, "the escalation's SIGKILL must still reach it via the group, not the (already-dead) leader");
   });
 

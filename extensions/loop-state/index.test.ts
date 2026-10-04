@@ -175,7 +175,7 @@ test("a run pi-subagents calls completed but that returned no lane-return block 
   assert.equal(log[1].status, "failed");
 });
 
-test("a run that failed or timed out is recorded failed and unlanded whatever its lane-return block says", async () => {
+test("a run that failed or timed out is recorded failed whatever its lane-return block says, keeping its landed claim", async () => {
   const r = makeRepo();
   const h = harness({ reportPath: r.report, cwd: r.repo });
   h.start();
@@ -186,8 +186,10 @@ test("a run that failed or timed out is recorded failed and unlanded whatever it
   const log = await until(() => events(r.log).length >= 2 && events(r.log));
   assert.equal(log[1].ev, "return");
   assert.equal(log[1].status, "failed");
-  assert.equal(log[1].landed, false);
+  assert.equal(log[1].landed, true, "the landed claim stays, so the digest does not re-admit the task");
   assert.equal(log[1].sha, "abc1234", "the reported SHA stays as evidence");
+  const digest = JSON.parse(execFileSync(BIN, ["digest", r.log, "--json"], { encoding: "utf8" }));
+  assert.equal(digest.admissible.includes("T1"), false, "a task whose failed lane may have pushed is not admissible again");
 });
 
 test("invalid lane-return fields are dropped and the rest recorded", async () => {

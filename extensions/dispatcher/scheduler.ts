@@ -267,8 +267,13 @@ export class Dispatcher {
       // The lane may have pushed before it failed: that commit is ungated, and a retry or an overlapping
       // task would build on it. A parked task holds no files, so stop new work as a refused pre-green land does.
       t.lastReturn = lastReturnBlock(text);
-      const tip = await this.ports.remoteSha();
-      const where = (await this.ports.isAncestor(reported.sha, tip)) ? `on main at ${tip}` : `not on main at ${tip}`;
+      let where = "main not checked";
+      try {
+        const tip = await this.ports.remoteSha();
+        where = (await this.ports.isAncestor(reported.sha, tip)) ? `on main at ${tip}` : `not on main at ${tip}`;
+      } catch (error) {
+        where = `main not checked: ${error instanceof Error ? error.message : String(error)}`;
+      }
       await this.park(t, "owner", `lane ${lane.lane} failed or timed out after reporting landed at ${reported.sha} (${where}); never gated`, lane.lane);
       this.halt();
       return;

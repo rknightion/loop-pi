@@ -68,10 +68,11 @@ export function runFailed(data: Record<string, unknown>): boolean {
   return data.success === false || first?.success === false || first?.timedOut === true || first?.outputPartial === true;
 }
 
-/** A failed run's block is evidence only: never complete and never landed. */
+/** A failed run's block is evidence only: never complete. Its `landed` claim is kept, so the digest never
+ *  re-admits a task whose lane may already have pushed. */
 export function failedRunBlock(block: Record<string, unknown> | null): Record<string, unknown> | null {
   if (!block) return block;
-  return { ...block, status: block.status === "complete" ? "failed" : block.status, landed: false };
+  return { ...block, status: block.status === "complete" ? "failed" : block.status };
 }
 
 /** The `return` event for a finished run. The status is the block's: a run with no block, or with

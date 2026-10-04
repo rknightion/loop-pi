@@ -231,7 +231,8 @@ before any `await`. A missing reply means the provider extension is not loaded; 
   whatever its lane-return block says; the dispatcher records its gate exit as null, parks the task of a failed triager, and parks a failed
   work lane that reports a landed SHA for its owner and stops new work (never gated, never retried,
   closes `blocked`), and `loop-state`
-  records the return as failed and unlanded with the block's other fields kept as evidence.
+  records the return as failed, keeping the block's `landed`, `sha` and other fields as evidence, so its
+  digest never re-admits a task whose lane may already have pushed.
   A pre-green land `loop-state` refuses is recorded as an after-green land plus a park, and
   stops new work. The dispatcher reads LOOP.md exactly as `loop-state` does (nothing stripped).
 - Red baseline: LOOP.md may carry `baseline-red: <TASK-ID> - <reason>` (main is known red; the named

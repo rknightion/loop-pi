@@ -533,6 +533,16 @@ test("a failed run that reports a landed SHA parks for its owner: never gated, n
   assert.match(String(ports.ofEv("park")[0].reason), /s1/);
   assert.equal(ports.spawns.some((s) => s.agent === "triager"), false, "no triager or retry onto the same files");
   assert.match(String(ports.ofEv("park")[0].reason), /\(on main at tip\)/);
+
+  const ghost = new FakePorts();
+  ghost.notOnMain.add("s9");
+  const g = new Dispatcher(plan([spec("T1", ["a/**"])], 1), ghost);
+  g.start();
+  await g.settled();
+  ghost.live.delete("r1");
+  g.complete("r1", landed("s9"), true);
+  await g.settled();
+  assert.match(String(ghost.ofEv("park")[0].reason), /\(not on main at tip\)/);
 });
 
 test("an owner park after a failed landed lane stops new work, so no overlapping task builds on the ungated commit", SCHED, async () => {
