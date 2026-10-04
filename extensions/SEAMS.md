@@ -226,8 +226,10 @@ before any `await`. A missing reply means the provider extension is not loaded; 
   A composed gate is green only for a parsed return with status `complete`, `exit` 0 and a `sha`
   that is null or the gated tip; the `gate` event records the reported exit (null stays null) and
   SHA. A run pi-subagents reports failed or timed out (`success: false` at the top level or on
-  `results[0]`, `results[0].timedOut` or `results[0].outputPartial`) never counts as complete or landed,
-  whatever its lane-return block says; the dispatcher records its gate exit as null and parks the task of a failed triager, and `loop-state`
+  `results[0]`, `results[0].timedOut`, or `results[0].outputPartial`, which pi-subagents emits from the release after
+  0.75.0) never counts as complete or landed,
+  whatever its lane-return block says; the dispatcher records its gate exit as null, parks the task of a failed triager, and parks a failed
+  work lane that reports a landed SHA for its owner (never gated, never retried), and `loop-state`
   records the return as failed and unlanded with the block's other fields kept as evidence.
   A pre-green land `loop-state` refuses is recorded as an after-green land plus a park, and
   stops new work. The dispatcher reads LOOP.md exactly as `loop-state` does (nothing stripped).

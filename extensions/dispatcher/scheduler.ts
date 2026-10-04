@@ -258,10 +258,16 @@ export class Dispatcher {
 
   private async handleReturn(runId: string, lane: Lane, text: string, failed = false): Promise<void> {
     this.lanes.delete(runId);
-    const r = failed ? failedRunReturn(parseLaneReturn(text)) : parseLaneReturn(text);
+    const reported = parseLaneReturn(text);
+    const r = failed ? failedRunReturn(reported) : reported;
     await this.ports.append(returnEvent(lane.lane, runId, r));
     if (lane.kind === "gate") return this.handleGate(lane, r);
     const t = this.tasks.get(lane.tasks[0])!;
+    if (failed && lane.kind === "work" && reported.landed && reported.sha) {
+      // The lane may have pushed before it failed: that commit is ungated, and a retry would build on it.
+      t.lastReturn = lastReturnBlock(text);
+      return this.park(t, "owner", `lane ${lane.lane} failed or timed out after reporting landed at ${reported.sha}; never gated`, lane.lane);
+    }
     if (lane.kind === "triage") {
       // A failed or timed-out triager's decision block may be unfinished: park rather than act on it.
       if (failed) return this.park(t, "defect", `triager ${lane.lane} failed or timed out`, lane.lane);

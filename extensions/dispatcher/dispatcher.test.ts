@@ -491,7 +491,7 @@ test("a run that failed or timed out never counts as complete, even with a compl
   w.start();
   await w.settled();
   work.live.delete("r1");
-  w.complete("r1", landed("s1"), true);
+  w.complete("r1", ret({ status: "complete" }), true);
   await w.settled();
   assert.deepEqual(work.ofEv("land"), [], "no land from a failed run");
   assert.equal(work.spawns[1].agent, "triager");
@@ -518,6 +518,30 @@ test("a run that failed or timed out never counts as complete, even with a compl
   await finish(d, ports, t2.runId, landed("s2"));
   assert.equal(await closed, "blocked");
   assert.deepEqual(ports.done, []);
+});
+
+test("a failed run that reports a landed SHA parks for its owner: never gated, never retried", SCHED, async () => {
+  const ports = new FakePorts();
+  const d = new Dispatcher(plan([spec("T1", ["a/**"]), spec("T2", ["b/**"])], 1), ports);
+  d.start();
+  await d.settled();
+  ports.live.delete("r1");
+  d.complete("r1", landed("s1"), true);
+  await d.settled();
+  assert.deepEqual(ports.ofEv("land"), []);
+  assert.deepEqual(ports.ofEv("park").map((e) => [e.task, e.needs]), [["T1", "owner"]]);
+  assert.match(String(ports.ofEv("park")[0].reason), /s1/);
+  assert.equal(ports.spawns.some((s) => s.agent === "triager"), false, "no triager or retry onto the same files");
+});
+
+test("a failed completion that arrives before its spawn reply keeps its failure", SCHED, async () => {
+  const ports = new FakePorts();
+  const d = new Dispatcher(plan([spec("T1", ["a/**"]), spec("T2", ["b/**"]), spec("T3", ["c/**"])], 1), ports);
+  d.complete("r1", ret({ status: "complete" }), true);
+  d.start();
+  await d.settled();
+  assert.deepEqual(ports.ofEv("land"), []);
+  assert.equal(ports.ofEv("return")[0].status, "failed");
 });
 
 test("a completion that arrives before its spawn reply is kept and handled", SCHED, async () => {

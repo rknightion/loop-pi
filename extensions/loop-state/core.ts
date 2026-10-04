@@ -62,9 +62,6 @@ export function parseLaneReturn(text: string): Record<string, unknown> | null {
 const isInt = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v);
 const isStr = (v: unknown): v is string => typeof v === "string" && v !== "";
 
-/** The `return` event for a finished run. The status is the block's: a run with no block, or with
- *  a block whose status is not one of the four, is `failed` whatever pi-subagents reported, as the
- *  dispatcher's parseLaneReturn reads it. Fields of a block that do not fit the schema are dropped. */
 /** True when pi-subagents reports the run failed, timed out or ended mid-reply (async-complete payload). */
 export function runFailed(data: Record<string, unknown>): boolean {
   const first = Array.isArray(data.results) ? (data.results[0] as Record<string, unknown> | undefined) : undefined;
@@ -77,6 +74,9 @@ export function failedRunBlock(block: Record<string, unknown> | null): Record<st
   return { ...block, status: block.status === "complete" ? "failed" : block.status, landed: false };
 }
 
+/** The `return` event for a finished run. The status is the block's: a run with no block, or with
+ *  a block whose status is not one of the four, is `failed` whatever pi-subagents reported, as the
+ *  dispatcher's parseLaneReturn reads it. Fields of a block that do not fit the schema are dropped. */
 export function returnEvent(lane: string, run: string, block: Record<string, unknown> | null): Record<string, unknown> {
   const ev: Record<string, unknown> = { ev: "return", lane, run };
   const fromBlock = block && typeof block.status === "string" && STATUSES.has(block.status) ? block.status : null;

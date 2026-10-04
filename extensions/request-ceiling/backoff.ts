@@ -54,7 +54,7 @@ export interface RetryPolicySettings {
   maxAgentDelayMs: number;
 }
 
-/** pi's `settings.retry` with pi's own defaults (pi 1.0.1 SettingsManager.getRetrySettings). */
+/** pi's `settings.retry` with pi's own defaults (pi 1.0.2 SettingsManager.getRetrySettings). */
 export function retryPolicy(settings: unknown): RetryPolicySettings {
   const raw = ((settings as { retry?: Record<string, unknown> } | undefined)?.retry ?? {}) as Record<string, unknown>;
   const num = (value: unknown, fallback: number) => (typeof value === "number" && Number.isFinite(value) ? value : fallback);
