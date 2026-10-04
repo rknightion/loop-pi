@@ -10,6 +10,7 @@ import { globsIntersect, guardedHits, ownedOverlap, ownedWithin } from "./glob.t
 import { dispatcherEligible, parseGoal, parseLoopMd, preGreenEligible, type TaskSpec } from "./goal.ts";
 import { backlogTitle, completionText, onCloseCommands } from "./index.ts";
 import { parseLaunch, stateLogFor } from "./launch.ts";
+import { parseBrief } from "../loop-state/core.ts";
 import { Dispatcher, type Ports } from "./scheduler.ts";
 
 // ---------------------------------------------------------------- globs
@@ -100,6 +101,16 @@ test("the Envelope table parses into tasks; an escaped pipe stays in its cell", 
     agent: "lane-worker-push",
     tier: "routine",
   });
+});
+
+test("a titled task cell keeps the bare id and puts the title in the brief header", () => {
+  const g = parseGoal(goalText([row("T-1 (fix the widget parser)", "src/a/**")]));
+  assert.deepEqual(g.errors, []);
+  assert.equal(g.tasks[0].id, "T-1");
+  assert.equal(g.tasks[0].title, "fix the widget parser");
+  const header = taskBrief(g.tasks[0], "L1", "routine").split("\n")[0];
+  assert.equal(header, "Lane: L1 · Task: T-1 (fix the widget parser) · Tier: routine");
+  assert.deepEqual(parseBrief(header), { lane: "L1", task: "T-1", tier: "routine" });
 });
 
 test("dispatcherEligible holds for three routine, landing, disjoint-or-not tasks", () => {

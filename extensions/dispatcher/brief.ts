@@ -41,7 +41,7 @@ export function renderBrief(f: BriefFields): string {
 export function taskBrief(task: TaskSpec, lane: string, tier: string): string {
   return renderBrief({
     lane,
-    task: task.id,
+    task: task.title ? `${task.id} (${task.title})` : task.id,
     tier,
     objective: task.objective,
     owned: task.owned.join(", "),

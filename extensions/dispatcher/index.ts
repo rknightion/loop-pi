@@ -78,10 +78,12 @@ export function completionText(data: any): string {
   return typeof data?.summary === "string" ? data.summary : "";
 }
 
-/** The Envelope table has no objective column: use the backlog task's title, else name the task. */
+/** The Envelope table has no objective column: use the backlog task's title, else name the task. The title
+ * also fills the brief header when the Envelope cell gave none. */
 async function objectiveFor(task: TaskSpec, repo: string): Promise<string> {
   const r = await run("backlog", ["task", task.id, "--plain"], { cwd: repo, timeoutMs: MINUTE });
   const title = r.code === 0 ? backlogTitle(r.stdout) : undefined;
+  if (title && !task.title) task.title = title;
   return title ? `Complete backlog task ${task.id}: ${title}` : `Complete task ${task.id}.`;
 }
 

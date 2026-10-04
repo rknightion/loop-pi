@@ -16,6 +16,7 @@ import { guardedHits } from "./glob.ts";
 
 export interface TaskSpec {
   id: string;
+  title?: string;
   objective: string;
   acceptance: string;
   owned: string[];
@@ -95,8 +96,12 @@ function parseEnvelope(lines: string[], errors: string[]): TaskSpec[] {
       errors.push(`## Envelope row has ${c.length} cells, not ${ENVELOPE_COLUMNS.length}: ${row.trim()}`);
       continue;
     }
-    const [id, acceptance, owned, gate, landing, agent, tier] = c;
-    tasks.push({ id, objective: "", acceptance, owned: splitList(owned), gate, landing, agent, tier });
+    const [cell, acceptance, owned, gate, landing, agent, tier] = c;
+    // The task cell is `<id>` or `<id> (<title>)`.
+    const titled = /^(\S+)\s+\((.+)\)$/.exec(cell);
+    const spec: TaskSpec = { id: titled ? titled[1] : cell, objective: "", acceptance, owned: splitList(owned), gate, landing, agent, tier };
+    if (titled) spec.title = titled[2];
+    tasks.push(spec);
   }
   return tasks;
 }
