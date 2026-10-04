@@ -12,10 +12,14 @@
 // - A red composed gate stops new work; running lanes drain and the loop closes `blocked`.
 
 import { ATTEMPT_CEILING, failedRunReturn, gateBrief, parseLaneReturn, parseTriage, retryAgent, taskBrief, triageBrief, type LaneReturn } from "./brief.ts";
-import { ownedOverlap, ownedWithin, guardedHits } from "./glob.ts";
+import { globMatch, guardedHits, ownedOverlap, ownedPatterns, ownedWithin } from "./glob.ts";
 import type { TaskSpec } from "./goal.ts";
 
 export type CloseReason = "nothing-admissible" | "owner-stop" | "blocked" | "budget";
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 export interface Ports {
   /** Appends one S2 event (without v/seq/ts/by). Throws when the log refuses it. */
@@ -26,6 +30,8 @@ export interface Ports {
   remoteSha(): Promise<string>;
   /** True when `sha` is contained in `tip`. */
   isAncestor(sha: string, tip: string): Promise<boolean>;
+  /** Paths touched by any commit on the default branch between two SHAs (per commit, not the net diff). */
+  changedFiles(base: string, tip: string): Promise<string[]>;
   backlogDone(task: string): Promise<{ ok: boolean; detail: string }>;
   closeout(): Promise<{ ok: boolean; detail: string }>;
   /** Commits `backlog/` only (explicit pathspec), never pushed. */
@@ -72,6 +78,8 @@ interface Lane {
   brief: string;
   sha?: string;
   failedLane?: string;
+  /** The default branch's SHA when the lane was dispatched. */
+  base?: string;
 }
 
 const FINISHED: ReadonlySet<Status> = new Set(["accepted", "parked", "split"]);
@@ -203,13 +211,21 @@ export class Dispatcher {
   }
 
   private async spawnLane(agent: string, lane: Lane, task: string): Promise<boolean> {
+    // Read main before the spawn: a lane that pushes at once must still show up as a change since its base.
+    // A gate lane reuses the tip dispatchGate just fetched. A failed fetch refuses the spawn like any refusal.
+    try {
+      lane.base = lane.kind === "gate" && lane.sha ? lane.sha : await this.ports.remoteSha();
+    } catch (error) {
+      this.ports.log(`dispatcher: spawn of ${lane.lane} (${agent}) refused: no dispatch base: ${errorText(error)}`);
+      return false;
+    }
     const result = await this.ports.spawn(agent, lane.brief);
     if ("error" in result) {
       this.ports.log(`dispatcher: spawn of ${lane.lane} (${agent}) refused: ${result.error}`);
       return false;
     }
     this.lanes.set(result.runId, lane);
-    await this.ports.append({ ev: "dispatch", lane: lane.lane, task, agent, run: result.runId, base: await this.ports.remoteSha() });
+    await this.ports.append({ ev: "dispatch", lane: lane.lane, task, agent, run: result.runId, base: lane.base });
     const early = this.early.get(result.runId);
     if (early !== undefined) {
       this.early.delete(result.runId);
@@ -263,20 +279,18 @@ export class Dispatcher {
     await this.ports.append(returnEvent(lane.lane, runId, r));
     if (lane.kind === "gate") return this.handleGate(lane, r);
     const t = this.tasks.get(lane.tasks[0])!;
-    if (failed && lane.kind === "work" && reported.landed && reported.sha) {
-      // The lane may have pushed before it failed: that commit is ungated, and a retry or an overlapping
+    if (lane.kind === "work" && reported.landed && reported.sha && (failed || reported.status !== "complete")) {
+      // The lane may have pushed without finishing: that commit is ungated, and a retry or an overlapping
       // task would build on it. A parked task holds no files, so stop new work as a refused pre-green land does.
-      t.lastReturn = lastReturnBlock(text);
       let where = "main not checked";
       try {
         const tip = await this.ports.remoteSha();
         where = (await this.ports.isAncestor(reported.sha, tip)) ? `on main at ${tip}` : `not on main at ${tip}`;
       } catch (error) {
-        where = `main not checked: ${error instanceof Error ? error.message : String(error)}`;
+        where = `main not checked: ${errorText(error)}`;
       }
-      await this.park(t, "owner", `lane ${lane.lane} failed or timed out after reporting landed at ${reported.sha} (${where}); never gated`, lane.lane);
-      this.halt();
-      return;
+      const how = failed ? "failed or timed out" : `returned ${reported.status}`;
+      return this.parkPushed(t, lane, text, `lane ${lane.lane} ${how} after reporting landed at ${reported.sha} (${where}); never gated`);
     }
     if (lane.kind === "triage") {
       // A failed or timed-out triager's decision block may be unfinished: park rather than act on it.
@@ -305,6 +319,12 @@ export class Dispatcher {
       }
       return;
     }
+    if (lane.kind === "work" && !(r.status === "complete" && r.landed && r.sha)) {
+      // No landed claim, yet the lane may still have pushed. Owned files are disjoint across live lanes, so a
+      // change to this task's files on main since dispatch is this lane's; never retry on top of it.
+      const pushed = await this.ownedChangesSince(t, lane);
+      if (pushed) return this.parkPushed(t, lane, text, `lane ${lane.lane} returned ${r.status} without a landed claim, but ${pushed}; never gated`);
+    }
     if (this.halted) return this.park(t, "defect", `lane ${lane.lane} returned ${r.status} after the loop halted`, lane.lane);
     if (t.attempts >= ATTEMPT_CEILING) {
       return this.park(t, "defect", `attempt ceiling ${ATTEMPT_CEILING} reached; last return ${r.status}`, lane.lane);
@@ -314,6 +334,26 @@ export class Dispatcher {
     t.status = "triage";
     if (!(await this.spawnLane("triager", { lane: triager, kind: "triage", tasks: [t.spec.id], brief, failedLane: lane.lane }, t.spec.id))) {
       await this.park(t, "defect", "the triager could not be spawned", lane.lane);
+    }
+  }
+
+  /** Parks a task whose lane may have pushed an ungated commit, and stops new work. */
+  private async parkPushed(t: TaskState, lane: Lane, text: string, reason: string): Promise<void> {
+    t.lastReturn = lastReturnBlock(text);
+    await this.park(t, "owner", reason, lane.lane);
+    this.halt();
+  }
+
+  /** Why this task's owned files may have changed on main since the lane's dispatch, or undefined. */
+  private async ownedChangesSince(t: TaskState, lane: Lane): Promise<string | undefined> {
+    try {
+      if (!lane.base) return "its dispatch base is unknown";
+      const tip = await this.ports.remoteSha();
+      const owned = t.current.owned.flatMap(ownedPatterns);
+      const hits = (await this.ports.changedFiles(lane.base, tip)).filter((f) => owned.some((g) => globMatch(f, g)));
+      return hits.length ? `its owned files changed on main since ${lane.base}: ${hits.slice(0, 5).join(", ")}` : undefined;
+    } catch (error) {
+      return `main could not be checked (${errorText(error)})`;
     }
   }
 

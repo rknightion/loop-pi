@@ -304,11 +304,20 @@ class DigestTests(Base):
         self.assertIn("- T3: accepted", text)
         self.assertIn("- T4: parked needs=owner", text)
         self.assertIn("- T5: landed sha=" + "d" * 12, text)
+
         self.assertIn("## Admissible (1)\nT2", text)
         self.assertEqual(
             json.loads(self.digest("--json")),
             {"live_lanes": 1, "open_tasks": 2, "admissible": ["T2"], "parked": ["T4"]},
         )
+
+    def test_landed_task_whose_run_failed_shows_its_status(self):
+        self.seed()
+        self.append("dispatch", "lane=L1", "task=T1", "agent=lane-worker", "run=r1", "base=b")
+        self.append("return", "lane=L1", "run=r1", "status=failed", "landed=true", "sha=" + "e" * 40)
+        text = self.digest()
+        self.assertIn("- T1: landed:failed sha=" + "e" * 12, text)
+        self.assertNotIn("T1", self.digest("--json").split('"admissible"')[1].split("]")[0])
 
     def test_failed_return_and_rejection_make_a_task_admissible_again(self):
         self.seed()

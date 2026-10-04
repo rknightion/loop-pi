@@ -221,13 +221,22 @@ export default function (pi: ExtensionAPI) {
       },
       async remoteSha() {
         const b = await defaultBranch();
-        await git(["fetch", "--quiet", "origin", b]);
+        // A failed fetch leaves a stale origin ref: never answer from it.
+        const f = await git(["fetch", "--quiet", "origin", b]);
+        if (f.code !== 0) throw new Error(`git fetch origin ${b} failed: ${f.stderr.trim() || `exit ${f.code}`}`);
         const r = await git(["rev-parse", `origin/${b}`]);
         if (r.code !== 0) throw new Error(`cannot resolve origin/${b}: ${r.stderr.trim()}`);
         return r.stdout.trim();
       },
       async isAncestor(sha, tip) {
         return (await git(["merge-base", "--is-ancestor", sha, tip])).code === 0;
+      },
+      async changedFiles(base, tip) {
+        // Per commit, not the net diff: a push its lane then reverted still names its paths. A merge
+        // commit lists what it changed against its first parent, including any conflict-resolution edit.
+        const r = await git(["log", "-z", "--format=", "--name-only", "--no-renames", "--diff-merges=first-parent", `${base}..${tip}`]);
+        if (r.code !== 0) throw new Error(`git log ${base}..${tip} failed: ${r.stderr.trim() || `exit ${r.code}`}`);
+        return [...new Set(r.stdout.split("\0").map((p) => p.replace(/^\n+/, "")).filter(Boolean))];
       },
       async backlogDone(task) {
         const r = await run("backlog", ["task", "edit", task, "-s", "Done"], { cwd: repo, timeoutMs: MINUTE });

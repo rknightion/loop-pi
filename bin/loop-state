@@ -573,6 +573,11 @@ def _short(sha):
     return sha[:12] if isinstance(sha, str) else str(sha)
 
 
+def _landed_unfinished(t):
+    """A landed claim from a return that was not complete: the commit may be on main, never gated."""
+    return t["state"] == "landed" and t["status"] not in (None, "complete")
+
+
 def _task_line(t, level):
     if level >= 1:
         label = t["state"]
@@ -580,8 +585,11 @@ def _task_line(t, level):
             label = "parked:%s" % t["parked"]
         elif t["status"] and t["state"] == "returned":
             label = "returned:%s" % t["status"]
+        elif _landed_unfinished(t):
+            label = "landed:%s" % t["status"]
         return "- %s %s" % (t["id"], label)
-    parts = ["- %s: %s" % (t["id"], t["state"])]
+    state = "landed:%s" % t["status"] if _landed_unfinished(t) else t["state"]
+    parts = ["- %s: %s" % (t["id"], state)]
     if t["state"] == "dispatched":
         parts.append("lane=%s run=%s" % (t["lane"], t["run"]))
         if t["deadline"]:

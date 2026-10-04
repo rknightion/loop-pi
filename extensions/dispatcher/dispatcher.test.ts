@@ -238,6 +238,12 @@ class FakePorts implements Ports {
   done: string[] = [];
   calls: string[] = [];
   refuse = new Set<string>();
+  fetchFails = false;
+  tip = "tip";
+  /** When set, a spawn moves main to this SHA at once: a lane that pushes before its dispatch is recorded. */
+  pushOnSpawn?: string;
+  /** Files changed on main between two SHAs; keyed "base..tip". */
+  changed = new Map<string, string[]>();
   notOnMain = new Set<string>();
   refusePreGreen = false;
   private n = 0;
@@ -249,13 +255,18 @@ class FakePorts implements Ports {
   async spawn(agent: string, brief: string) {
     if (this.refuse.has(agent)) return { error: `${agent} refused` };
     const runId = `r${++this.n}`;
+    if (this.pushOnSpawn) this.tip = this.pushOnSpawn;
     this.spawns.push({ agent, brief, runId });
     this.live.add(runId);
     this.maxLive = Math.max(this.maxLive, [...this.live].filter((id) => this.byRun(id).agent !== "gate-runner").length);
     return { runId };
   }
   async remoteSha() {
-    return "tip";
+    if (this.fetchFails) throw new Error("fetch failed");
+    return this.tip;
+  }
+  async changedFiles(base: string, tip: string) {
+    return this.changed.get(`${base}..${tip}`) ?? [];
   }
   async isAncestor(sha: string) {
     return !this.notOnMain.has(sha);
@@ -566,6 +577,90 @@ test("a failed completion that arrives before its spawn reply keeps its failure"
   await d.settled();
   assert.deepEqual(ports.ofEv("land"), []);
   assert.equal(ports.ofEv("return")[0].status, "failed");
+});
+
+test("an owner park whose fetch fails says main was not checked and still stops new work", SCHED, async () => {
+  const ports = new FakePorts();
+  const d = new Dispatcher(plan([spec("T1", ["a/**"]), spec("T2", ["b/**"])], 1), ports);
+  const closed = d.start();
+  await d.settled();
+  ports.fetchFails = true;
+  ports.live.delete("r1");
+  d.complete("r1", landed("s1"), true);
+  await d.settled();
+  assert.match(String(ports.ofEv("park")[0].reason), /main not checked: fetch failed/);
+  assert.equal(await closed, "blocked");
+});
+
+test("a partial or blocked return that claims a landed SHA parks for its owner instead of a retry", SCHED, async () => {
+  for (const status of ["partial", "blocked"]) {
+    const ports = new FakePorts();
+    const d = new Dispatcher(plan([spec("T1", ["a/**"]), spec("T2", ["a/x/**"])], 2), ports);
+    const closed = d.start();
+    await d.settled();
+    await finish(d, ports, "r1", ret({ status, sha: "s1", landed: true }));
+    assert.deepEqual(ports.ofEv("park").map((e) => [e.task, e.needs]), [["T1", "owner"]], status);
+    assert.equal(ports.spawns.some((s) => s.agent === "triager"), false, status);
+    assert.equal(ports.spawns.some((s) => /Task: T2 /.test(s.brief)), false, `${status}: nothing builds on the pushed SHA`);
+    assert.equal(await closed, "blocked", status);
+  }
+});
+
+test("a return with no landed claim parks for its owner when its owned files changed on main since dispatch", SCHED, async () => {
+  const ports = new FakePorts();
+  ports.changed.set("tip..tip", ["a/pushed.ts", "z/other-lane.ts"]);
+  const d = new Dispatcher(plan([spec("T1", ["a/**"]), spec("T2", ["b/**"])], 1), ports);
+  const closed = d.start();
+  await d.settled();
+  await finish(d, ports, "r1", "the lane died before writing a block");
+  assert.deepEqual(ports.ofEv("park").map((e) => [e.task, e.needs]), [["T1", "owner"]]);
+  assert.match(String(ports.ofEv("park")[0].reason), /a\/pushed\.ts/);
+  assert.equal(ports.spawns.some((s) => s.agent === "triager"), false);
+  assert.equal(await closed, "blocked");
+
+  const fast = new FakePorts();
+  fast.pushOnSpawn = "t1";
+  fast.changed.set("tip..t1", ["a/fast.ts"]);
+  const f = new Dispatcher(plan([spec("T1", ["a/**"])], 1), fast);
+  f.start();
+  await f.settled();
+  await finish(f, fast, "r1", "the lane died before writing a block");
+  assert.deepEqual(fast.ofEv("dispatch").map((e) => e.base), ["tip"], "the base is main before the spawn");
+  assert.match(String(fast.ofEv("park")[0]?.reason), /a\/fast\.ts/, "a push made right after the spawn is still seen");
+
+  const other = new FakePorts();
+  other.changed.set("tip..tip", ["z/other-lane.ts"]);
+  const o = new Dispatcher(plan([spec("T1", ["a/**"])], 1), other);
+  o.start();
+  await o.settled();
+  await finish(o, other, "r1", "the lane died before writing a block");
+  assert.equal(other.spawns[1].agent, "triager", "another lane's files on main do not park this task");
+});
+
+test("a fetch that fails before a spawn refuses that spawn instead of leaving the loop open", SCHED, async () => {
+  const work = new FakePorts();
+  work.fetchFails = true;
+  const w = new Dispatcher(plan([spec("T1", ["a/**"])], 1), work);
+  const wClosed = w.start();
+  assert.equal(await wClosed, "nothing-admissible", "a refused spawn parks its task, as any refused spawn does");
+  assert.equal(work.spawns.length, 0, "no lane starts without a dispatch base");
+  assert.deepEqual(work.ofEv("park").map((e) => [e.task, e.needs]), [["T1", "defect"]]);
+
+  // The gate lane reuses the tip dispatchGate fetched; a second fetch would fail here and must not be made.
+  const ports = new FakePorts();
+  const d = new Dispatcher(plan([spec("T1", ["a/**"])], 1), ports);
+  const closed = d.start();
+  await d.settled();
+  let calls = 0;
+  const real = ports.remoteSha.bind(ports);
+  ports.remoteSha = async () => (++calls > 1 ? Promise.reject(new Error("fetch failed")) : real());
+  await finish(d, ports, "r1", landed("s1"));
+  const gate = ports.spawns.find((s) => s.agent === "gate-runner");
+  assert.ok(gate, "the gate lane starts on the tip dispatchGate fetched");
+  assert.equal(calls, 1);
+  await finish(d, ports, gate.runId, greenGate);
+  assert.equal(await closed, "nothing-admissible");
+  assert.deepEqual(ports.done, ["T1"]);
 });
 
 test("a completion that arrives before its spawn reply is kept and handled", SCHED, async () => {
