@@ -196,7 +196,7 @@ export class Dispatcher {
   private async pump(): Promise<void> {
     if (this.closing) return;
     if (!this.halted) {
-      while (this.runningWork().length < this.plan.cap) {
+      while (!this.halted && this.runningWork().length < this.plan.cap) {
         const t = this.admissible();
         if (!t) break;
         await this.dispatchWork(t);
@@ -210,13 +210,20 @@ export class Dispatcher {
     }
   }
 
+  /** Why the last spawnLane call refused, for the park reason. */
+  private refusal = "";
+
   private async spawnLane(agent: string, lane: Lane, task: string): Promise<boolean> {
+    this.refusal = "";
     // Read main before the spawn: a lane that pushes at once must still show up as a change since its base.
     // A gate lane reuses the tip dispatchGate just fetched. A failed fetch refuses the spawn like any refusal.
     try {
       lane.base = lane.kind === "gate" && lane.sha ? lane.sha : await this.ports.remoteSha();
     } catch (error) {
-      this.ports.log(`dispatcher: spawn of ${lane.lane} (${agent}) refused: no dispatch base: ${errorText(error)}`);
+      // Main cannot be read, so no later spawn can be checked either: stop rather than drain the queue.
+      this.refusal = `no dispatch base: ${errorText(error)}`;
+      this.ports.log(`dispatcher: spawn of ${lane.lane} (${agent}) refused: ${this.refusal}`);
+      this.halt();
       return false;
     }
     const result = await this.ports.spawn(agent, lane.brief);
@@ -243,7 +250,7 @@ export class Dispatcher {
     t.lastBrief = brief;
     const agent = t.attempts > 1 ? retryAgent(t.agent) : t.agent;
     if (!(await this.spawnLane(agent, { lane, kind: "work", tasks: [t.spec.id], brief }, t.spec.id))) {
-      await this.park(t, "defect", `spawn refused for ${agent}`, lane);
+      await this.park(t, "defect", `spawn refused for ${agent}${this.refusal ? `: ${this.refusal}` : ""}`, lane);
     }
   }
 

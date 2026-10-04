@@ -644,7 +644,7 @@ def render_digest(st, judgements, task_level):
         out.append("## Tasks (%d, detail omitted)" % len(tasks))
     else:
         if task_level == 2:
-            shown = [t for t in tasks if t["state"] not in ("landed", "accepted")]
+            shown = [t for t in tasks if t["state"] not in ("landed", "accepted") or _landed_unfinished(t)]
             out.append("## Tasks (%d, %d done omitted)" % (len(tasks), len(tasks) - len(shown)))
         else:
             shown = tasks

@@ -14,6 +14,17 @@ SCRIPT = os.path.join(HERE, "loop-state")
 OPEN = ["open", "goal_sha256=" + "a" * 64, "tier=routine", "root=llm", "root_model=m", 'envelope=["T1","T2"]']
 
 
+def load_cli():
+    """bin/loop-state as a module, to render digest detail levels a small log never reaches."""
+    import importlib.machinery
+    import importlib.util
+    loader = importlib.machinery.SourceFileLoader("loop_state_cli", SCRIPT)
+    spec = importlib.util.spec_from_loader("loop_state_cli", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
 def run(*args, stdin=None):
     return subprocess.run(
         [sys.executable, SCRIPT, *args], input=stdin, capture_output=True, text=True, timeout=60
@@ -317,6 +328,10 @@ class DigestTests(Base):
         self.append("return", "lane=L1", "run=r1", "status=failed", "landed=true", "sha=" + "e" * 40)
         text = self.digest()
         self.assertIn("- T1: landed:failed sha=" + "e" * 12, text)
+        mod = load_cli()
+        st = mod.fold(self.log)
+        self.assertIn("- T1 landed:failed", mod.render_digest(st, [], 1))
+        self.assertIn("- T1 landed:failed", mod.render_digest(st, [], 2), "a size-limited digest still shows it")
         self.assertNotIn("T1", self.digest("--json").split('"admissible"')[1].split("]")[0])
 
     def test_failed_return_and_rejection_make_a_task_admissible_again(self):

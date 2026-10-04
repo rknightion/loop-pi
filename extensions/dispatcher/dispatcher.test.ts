@@ -640,11 +640,12 @@ test("a return with no landed claim parks for its owner when its owned files cha
 test("a fetch that fails before a spawn refuses that spawn instead of leaving the loop open", SCHED, async () => {
   const work = new FakePorts();
   work.fetchFails = true;
-  const w = new Dispatcher(plan([spec("T1", ["a/**"])], 1), work);
+  const w = new Dispatcher(plan([spec("T1", ["a/**"]), spec("T2", ["b/**"]), spec("T3", ["c/**"]), spec("T4", ["d/**"])], 2), work);
   const wClosed = w.start();
-  assert.equal(await wClosed, "nothing-admissible", "a refused spawn parks its task, as any refused spawn does");
+  assert.equal(await wClosed, "blocked", "a failed fetch stops the loop instead of draining the queue");
   assert.equal(work.spawns.length, 0, "no lane starts without a dispatch base");
-  assert.deepEqual(work.ofEv("park").map((e) => [e.task, e.needs]), [["T1", "defect"]]);
+  assert.deepEqual(work.ofEv("park").map((e) => [e.task, e.needs]), [["T1", "defect"]], "only the task it was dispatching parks");
+  assert.match(String(work.ofEv("park")[0].reason), /no dispatch base: fetch failed/);
 
   // The gate lane reuses the tip dispatchGate fetched; a second fetch would fail here and must not be made.
   const ports = new FakePorts();
@@ -661,6 +662,43 @@ test("a fetch that fails before a spawn refuses that spawn instead of leaving th
   await finish(d, ports, gate.runId, greenGate);
   assert.equal(await closed, "nothing-admissible");
   assert.deepEqual(ports.done, ["T1"]);
+});
+
+test("an owned-files check that cannot run parks the task rather than retrying", SCHED, async () => {
+  const ports = new FakePorts();
+  ports.changedFiles = async () => {
+    throw new Error("bad revision");
+  };
+  const d = new Dispatcher(plan([spec("T1", ["a/**"])], 1), ports);
+  const closed = d.start();
+  await d.settled();
+  await finish(d, ports, "r1", ret({ status: "blocked" }));
+  assert.deepEqual(ports.ofEv("park").map((e) => [e.task, e.needs]), [["T1", "owner"]]);
+  assert.match(String(ports.ofEv("park")[0].reason), /could not be checked \(bad revision\)/);
+  assert.equal(await closed, "blocked");
+});
+
+test("a complete return without a landed claim parks when its owned files changed on main", SCHED, async () => {
+  const ports = new FakePorts();
+  ports.changed.set("tip..tip", ["a/pushed.ts"]);
+  const d = new Dispatcher(plan([spec("T1", ["a/**"])], 1), ports);
+  d.start();
+  await d.settled();
+  await finish(d, ports, "r1", ret({ status: "complete", landed: false }));
+  assert.deepEqual(ports.ofEv("park").map((e) => [e.task, e.needs]), [["T1", "owner"]]);
+});
+
+test("a retry narrowed to fewer owned files is checked against them, not the task's original files", SCHED, async () => {
+  const ports = new FakePorts();
+  const d = new Dispatcher(plan([spec("T1", ["a/**"])], 1), ports);
+  d.start();
+  await d.settled();
+  await finish(d, ports, "r1", ret({ status: "blocked" }));
+  await finish(d, ports, "r2", triage({ decision: "retry", brief: brief7("Try the parser", "a/parser/**", "parser tests pass") }));
+  ports.changed.set("tip..tip", ["a/other.ts"]);
+  await finish(d, ports, "r3", ret({ status: "blocked" }));
+  assert.deepEqual(ports.ofEv("park"), [], "a change outside the retry's owned files is not this lane's");
+  assert.equal(ports.spawns[3].agent, "triager");
 });
 
 test("a completion that arrives before its spawn reply is kept and handled", SCHED, async () => {

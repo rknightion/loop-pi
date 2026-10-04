@@ -234,7 +234,8 @@ before any `await`. A missing reply means the provider extension is not loaded; 
     `partial` or `blocked` return that claims landed, or any return without a complete landed claim
     whose task's owned files changed on main since its dispatch base (owned files are disjoint across
     live lanes, so such a change is this lane's). A fetch that fails throws instead of reading a
-    stale `origin/<branch>`; a park whose main check fails says so in its reason.
+    stale `origin/<branch>`: before a spawn it refuses that spawn, parks the task with the fetch error
+    and stops new work (closes `blocked`); a park whose main check fails says so in its reason.
   - `loop-state` (model roots) records a failed run's return as failed but keeps the block's
     `landed`, `sha` and other fields, so its digest never re-admits a task whose lane may already
     have pushed, and shows such a task as `landed:<status>` rather than a clean `landed`.
