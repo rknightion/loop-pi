@@ -532,6 +532,20 @@ test("a failed run that reports a landed SHA parks for its owner: never gated, n
   assert.deepEqual(ports.ofEv("park").map((e) => [e.task, e.needs]), [["T1", "owner"]]);
   assert.match(String(ports.ofEv("park")[0].reason), /s1/);
   assert.equal(ports.spawns.some((s) => s.agent === "triager"), false, "no triager or retry onto the same files");
+  assert.match(String(ports.ofEv("park")[0].reason), /\(on main at tip\)/);
+});
+
+test("an owner park after a failed landed lane stops new work, so no overlapping task builds on the ungated commit", SCHED, async () => {
+  const ports = new FakePorts();
+  const d = new Dispatcher(plan([spec("T1", ["a/**"]), spec("T2", ["a/x/**"])], 2), ports);
+  const closed = d.start();
+  await d.settled();
+  ports.live.delete("r1");
+  d.complete("r1", landed("s1"), true);
+  await d.settled();
+  assert.equal(ports.spawns.some((s) => /Task: T2 /.test(s.brief)), false, "T2 is never dispatched onto T1's files");
+  assert.equal(await closed, "blocked");
+  assert.deepEqual(ports.done, []);
 });
 
 test("a failed completion that arrives before its spawn reply keeps its failure", SCHED, async () => {

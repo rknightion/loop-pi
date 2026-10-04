@@ -264,9 +264,14 @@ export class Dispatcher {
     if (lane.kind === "gate") return this.handleGate(lane, r);
     const t = this.tasks.get(lane.tasks[0])!;
     if (failed && lane.kind === "work" && reported.landed && reported.sha) {
-      // The lane may have pushed before it failed: that commit is ungated, and a retry would build on it.
+      // The lane may have pushed before it failed: that commit is ungated, and a retry or an overlapping
+      // task would build on it. A parked task holds no files, so stop new work as a refused pre-green land does.
       t.lastReturn = lastReturnBlock(text);
-      return this.park(t, "owner", `lane ${lane.lane} failed or timed out after reporting landed at ${reported.sha}; never gated`, lane.lane);
+      const tip = await this.ports.remoteSha();
+      const where = (await this.ports.isAncestor(reported.sha, tip)) ? `on main at ${tip}` : `not on main at ${tip}`;
+      await this.park(t, "owner", `lane ${lane.lane} failed or timed out after reporting landed at ${reported.sha} (${where}); never gated`, lane.lane);
+      this.halt();
+      return;
     }
     if (lane.kind === "triage") {
       // A failed or timed-out triager's decision block may be unfinished: park rather than act on it.
