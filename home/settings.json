@@ -29,5 +29,8 @@
   },
   "compaction": {
     "reserveTokens": 70000
+  },
+  "loopPi": {
+    "onIncident": []
   }
 }

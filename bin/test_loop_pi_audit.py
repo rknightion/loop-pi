@@ -41,7 +41,7 @@ def init_repo_with_remote(tmp, name):
 
 
 def run_audit(*args, env_overrides=None):
-    env = dict(os.environ)
+    env = {k: v for k, v in os.environ.items() if k != "LOOP_PI_RUN_DIR"}
     if env_overrides:
         env.update(env_overrides)
     return subprocess.run([sys.executable, SCRIPT, *args], capture_output=True, text=True, env=env, timeout=60)
@@ -943,6 +943,206 @@ class OpsReleaseTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertIn("does not match", result.stderr)
         self.assertNotIn("GRANTED ops release", result.stdout)
+
+
+class ProtoDefaultBranchTests(unittest.TestCase):
+    """Protocol 2 (`loop-pi-proto` in the run dir): a move of the default branch is granted by the
+    push log, `backlog/`-only commits or a bot actor, never by a `refs/heads/<default>` grant."""
+
+    BOT = "renovate[bot]"
+    BOT_EMAIL = "29139614+renovate[bot]@users.noreply.github.com"
+
+    def setUp(self):
+        self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="loop-pi-audit-proto-test-"))
+        self.repo, self.remote = init_repo_with_remote(self.tmp, "repo")
+        git(self.remote, "symbolic-ref", "HEAD", "refs/heads/main")
+        self.other = os.path.join(self.tmp, "other")
+        subprocess.run([GIT, "clone", "--no-local", "-q", self.remote, self.other], check=True, timeout=60)
+        git(self.other, "config", "user.email", "someone@example.com")
+        git(self.other, "config", "user.name", "someone")
+        self.gh_bin = make_bin_with_gh_stub(self.tmp)
+        self.run_dir = os.path.join(self.tmp, "run")
+        os.makedirs(self.run_dir)
+        self.env = {"PATH": self.gh_bin, "LOOP_PI_RUN_DIR": self.run_dir}
+        self.log_path = os.path.join(self.run_dir, "push-log.jsonl")
+        self.begun = False
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def proto(self):
+        with open(os.path.join(self.run_dir, "loop-pi-proto"), "w", encoding="utf-8") as fh:
+            fh.write("2\n")
+
+    def begin(self):
+        self.assertEqual(run_audit("begin", self.repo, env_overrides=self.env).returncode, 0)
+
+    def head(self, repo):
+        return git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    def commit(self, repo, name, message="c", env=None, author=None):
+        path = os.path.join(repo, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(message + "\n")
+        git(repo, "add", "--", name)
+        cmd = [GIT, "-C", repo, "commit", "-q", "-m", message]
+        if author:
+            cmd += ["--author", author]
+        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=60, env={**os.environ, **(env or {})})
+        return self.head(repo)
+
+    def logged_push(self, repo, old, new, ref="refs/heads/main", log_repo=None):
+        git(repo, "push", "-q", "origin", f"{new}:{ref}")
+        entry = {"v": 1, "ts": "2026-10-04T00:00:00Z", "actor": "lane", "agent": "lane-worker", "lane": "L1",
+                 "repo": log_repo or self.repo, "remote": "origin", "ref": ref, "old": old, "new": new}
+        with open(self.log_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry) + "\n")
+
+    def grants(self, data, name="grants.json"):
+        path = os.path.join(self.tmp, name)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        with open(path, "rb") as fh:
+            return path, hashlib.sha256(fh.read()).hexdigest()
+
+    def closeout(self, grants=None, *extra):
+        args = ["closeout"]
+        if grants:
+            args += ["--grants", grants[0], "--grants-sha256", grants[1]]
+        return run_audit(*args, *extra, env_overrides=self.env)
+
+    def ready(self):
+        self.proto()
+        self.begin()
+        self.start = self.head(self.repo)
+
+    def test_a_logged_push_grants_the_default_branch_move(self):
+        self.ready()
+        c1 = self.commit(self.repo, "f.txt", "one")
+        c2 = self.commit(self.repo, "f.txt", "two")
+        self.logged_push(self.repo, self.start, c2)
+        result = self.closeout(self.grants({self.repo: ["HEAD"]}))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("refs/heads/main", result.stdout)
+        self.assertNotIn("UNGRANTED", result.stdout)
+        self.assertTrue(c1)
+
+    def test_a_foreign_commit_between_two_logged_pushes_is_flagged(self):
+        self.ready()
+        b = self.commit(self.repo, "f.txt", "ours one")
+        self.logged_push(self.repo, self.start, b)
+        git(self.other, "pull", "-q", "--ff-only", "origin", "main")
+        foreign = self.commit(self.other, "g.txt", "foreign")
+        git(self.other, "push", "-q", "origin", "main")
+        git(self.repo, "pull", "-q", "--ff-only", "origin", "main")
+        g = self.commit(self.repo, "f.txt", "ours two")
+        self.logged_push(self.repo, foreign, g)
+        result = self.closeout(self.grants({self.repo: ["HEAD"]}))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("UNGRANTED", result.stdout)
+        self.assertIn(foreign[:12], result.stdout)
+        self.assertNotIn(b[:12], result.stdout.split("note:")[-1])
+
+    def test_an_unlogged_commit_after_the_last_push_is_flagged(self):
+        self.ready()
+        b = self.commit(self.repo, "f.txt", "ours")
+        self.logged_push(self.repo, self.start, b)
+        git(self.other, "pull", "-q", "--ff-only", "origin", "main")
+        late = self.commit(self.other, "g.txt", "late")
+        git(self.other, "push", "-q", "origin", "main")
+        result = self.closeout(self.grants({self.repo: ["HEAD"]}))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(late[:12], result.stdout)
+
+    def test_a_backlog_only_commit_passes_and_a_mixed_one_does_not(self):
+        self.ready()
+        task = self.commit(self.other, "backlog/tasks/x.md", "task note")
+        git(self.other, "push", "-q", "origin", "main")
+        result = self.closeout(self.grants({self.repo: ["HEAD"]}))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("UNGRANTED", result.stdout)
+        self.assertTrue(task)
+        # A commit touching backlog/ and anything else is not backlog-only.
+        os.makedirs(os.path.join(self.other, "backlog"), exist_ok=True)
+        with open(os.path.join(self.other, "backlog", "y.md"), "w", encoding="utf-8") as fh:
+            fh.write("y\n")
+        with open(os.path.join(self.other, "code.txt"), "w", encoding="utf-8") as fh:
+            fh.write("z\n")
+        git(self.other, "add", "--", "backlog/y.md", "code.txt")
+        git(self.other, "commit", "-q", "-m", "mixed")
+        git(self.other, "push", "-q", "origin", "main")
+        again = self.closeout(self.grants({self.repo: ["HEAD"]}))
+        self.assertEqual(again.returncode, 1, again.stdout + again.stderr)
+
+    def test_a_bot_commit_and_a_bot_merge_pass_only_for_declared_actors(self):
+        self.ready()
+        author = f"{self.BOT} <{self.BOT_EMAIL}>"
+        git(self.other, "checkout", "-q", "-b", "renovate/x")
+        self.commit(self.other, "dep.txt", "bump", author=author)
+        git(self.other, "checkout", "-q", "main")
+        subprocess.run([GIT, "-C", self.other, "merge", "--no-ff", "-q", "-m", "merge bump", "renovate/x"],
+                       check=True, capture_output=True, text=True, timeout=60,
+                       env={**os.environ, "GIT_COMMITTER_NAME": self.BOT, "GIT_COMMITTER_EMAIL": self.BOT_EMAIL,
+                            "GIT_AUTHOR_NAME": self.BOT, "GIT_AUTHOR_EMAIL": self.BOT_EMAIL})
+        git(self.other, "push", "-q", "origin", "main")
+        declared = self.grants({self.repo: {"refs": ["HEAD"], "bot_actors": [self.BOT]}})
+        result = self.closeout(declared)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        undeclared = self.grants({self.repo: ["HEAD"]}, "plain.json")
+        self.assertEqual(self.closeout(undeclared).returncode, 1)
+        wrong = self.grants({self.repo: {"refs": ["HEAD"], "bot_actors": ["other-app[bot]"]}}, "wrong.json")
+        self.assertEqual(self.closeout(wrong).returncode, 1)
+
+    def test_a_default_branch_ref_grant_is_ignored_with_a_warning(self):
+        self.ready()
+        self.commit(self.other, "g.txt", "unlogged")
+        git(self.other, "push", "-q", "origin", "main")
+        result = self.closeout(self.grants({self.repo: ["refs/heads/main", "HEAD"]}))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("refs/heads/main", result.stderr)
+        self.assertIn("ignored", result.stderr)
+
+    def test_a_wrong_grants_sha256_fails_and_grants_nothing(self):
+        self.ready()
+        c = self.commit(self.repo, "f.txt", "ours")
+        self.logged_push(self.repo, self.start, c)
+        path, _ = self.grants({self.repo: ["HEAD"]})
+        result = self.closeout((path, "0" * 64))
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("does not match", result.stderr)
+        self.assertNotIn("GRANTED", result.stdout)
+
+    def test_explicit_push_log_path_is_used(self):
+        self.ready()
+        c = self.commit(self.repo, "f.txt", "ours")
+        self.logged_push(self.repo, self.start, c)
+        elsewhere = os.path.join(self.tmp, "elsewhere.jsonl")
+        os.rename(self.log_path, elsewhere)
+        grants = self.grants({self.repo: ["HEAD"]})
+        self.assertEqual(self.closeout(grants).returncode, 1)
+        result = self.closeout(grants, "--push-log", elsewhere)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_a_push_logged_for_another_repo_or_ref_grants_nothing(self):
+        self.ready()
+        c = self.commit(self.repo, "f.txt", "ours")
+        self.logged_push(self.repo, self.start, c, log_repo=os.path.join(self.tmp, "elsewhere"))
+        self.assertEqual(self.closeout(self.grants({self.repo: ["HEAD"]})).returncode, 1)
+
+    def test_other_branches_keep_their_ref_grants(self):
+        self.ready()
+        git(self.repo, "push", "-q", "origin", "HEAD:refs/heads/feature")
+        self.assertEqual(self.closeout(self.grants({self.repo: ["refs/heads/feature"]})).returncode, 0)
+
+    def test_without_the_marker_a_default_branch_grant_still_covers_the_move(self):
+        self.begin()
+        self.commit(self.other, "g.txt", "unlogged")
+        git(self.other, "push", "-q", "origin", "main")
+        path, _ = self.grants({self.repo: ["refs/heads/main", "HEAD"]})
+        result = run_audit("closeout", "--grants", path, env_overrides=self.env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("ignored", result.stderr)
 
 
 if __name__ == "__main__":

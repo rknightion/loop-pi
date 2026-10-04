@@ -46,7 +46,8 @@ PI_CLI = f"node_modules/{PI_PACKAGE}/dist/bundle/cli.js"
 BUILD_MANIFEST = ".loop-pi-build.json"
 HOME_MANIFEST = ".loop-pi-managed.json"
 # Root-only extensions, loaded by launcher flags, never by settings packages.
-ROOT_EXTENSIONS = ("loop-guard/root.ts", "loop-wait/root.ts", "loop-continuation/index.ts", "loop-state/index.ts")
+ROOT_EXTENSIONS = ("loop-guard/root.ts", "loop-wait/root.ts", "loop-continuation/index.ts", "loop-state/index.ts",
+                   "lane-worktrees/index.ts")
 # The dispatcher host loads only its own entry: it registers the lane children itself and answers
 # pi-subagents' completion turns with an in-process idle model (extensions/dispatcher).
 DISPATCH_EXTENSIONS = ("dispatcher/index.ts",)
@@ -65,7 +66,7 @@ NODE_CANDIDATES = ("/opt/homebrew/bin/node", "/usr/local/bin/node", "/usr/bin/no
 AGENT_SET = {"mapper", "mapper-deep", "gate-runner", "lane-worker", "lane-worker-push", "lane-worker-low",
              "lane-worker-low-push", "lane-worker-retry", "lane-worker-retry-push", "complex-worker",
              "complex-worker-push", "reviewer", "reviewer-high", "security-reviewer", "rescue-sol",
-             "rescue-astra", "ops", "triager"}
+             "rescue-astra", "ops", "ops-probe", "triager"}
 SMOKE_COMMAND = "loop-closeout"
 # Defaults for settings.json `loopPi`; the extensions use the same ones (model-family.ts).
 DEFAULT_FAMILY = {"provider": "openai", "pattern": r"^gpt-6(\.[0-9]+)?(-[a-z0-9]+)+$", "name": "gpt-6"}

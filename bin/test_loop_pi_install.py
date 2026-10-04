@@ -168,6 +168,37 @@ class InstallerTests(unittest.TestCase):
         # Some OpenAI-compatible proxies never acknowledge a request whose tool list changed mid-conversation.
         self.assertIn("--exclude-tools subagents_enable,bg_wait ", complete)
 
+    def test_lane_worktrees_is_a_root_extension_and_its_absence_is_reported_not_fatal(self):
+        entry = "lane-worktrees/index.ts"
+        self.assertIn(entry, m.ROOT_EXTENSIONS)
+        self.assertNotIn(entry, m.LANE_EXTENSIONS + m.DISPATCH_EXTENSIONS)
+        prefix = fake_prefix(self.tmp)
+        self.assertIn(entry, m.missing_extensions(prefix))
+        for rel in m.ROOT_EXTENSIONS + m.LANE_EXTENSIONS + m.DISPATCH_EXTENSIONS:
+            stub = prefix / "extensions" / rel
+            stub.parent.mkdir(parents=True, exist_ok=True)
+            stub.write_text("export default () => {};\n")
+        self.assertEqual(m.missing_extensions(prefix), [])
+        home = self.tmp / ".loop-pi-demo"
+        text = m.launcher_text(prefix, home, "/usr/bin/node", {"label": "x", "missing_extensions": []},
+                               "loop-pi", "loop-pi-install")
+        self.assertIn(f"--extension '{prefix}/extensions/{entry}'", text)
+        # An absent entry in an incomplete build keeps the version-only launcher.
+        absent = m.launcher_text(prefix, home, "/usr/bin/node", {"label": "x", "missing_extensions": [entry]},
+                                 "loop-pi", "loop-pi-install")
+        self.assertTrue("--version" in absent and "--extension" not in absent)
+
+    def test_ops_probe_is_in_the_installed_agent_set(self):
+        self.assertIn("ops-probe", m.AGENT_SET)
+        prefix = fake_prefix(self.tmp)
+        agents = prefix / "home/agents"
+        agents.mkdir(parents=True)
+        for name in m.AGENT_SET - {"ops-probe"}:
+            (agents / f"{name}.md").write_text("---\nname: x\n---\n")
+        with self.assertRaises(m.InstallError) as ctx:
+            m.check_agent_set(prefix)
+        self.assertIn("ops-probe", str(ctx.exception))
+
     def agent_file(self, front_extra: str, body: str = "body\n") -> str:
         return f"---\nname: a\nmodel: openai/gpt-6-luna\n{front_extra}---\n{body}"
 

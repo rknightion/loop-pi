@@ -31,8 +31,8 @@ Three pi extensions, a home template and an installer:
   time, and turns an output-budget stop with no output into an incident. Either one sends the
   session a follow-up message that starts its next turn, a bounded number of times in a row.
   It also adds jitter to pi's retry wait after a 5xx and holds a 429 retry to a flat 60 s.
-- `home/` holds the twelve agent files (mapper, lane-worker, reviewer and so on), the pi settings
-  and the policy header for the dedicated loop home.
+- `home/` holds the agent files (mapper, lane-worker, reviewer, ops, ops-probe and so on), the pi
+  settings and the policy header for the dedicated loop home.
 - `bin/loop-pi-install` builds a pinned runtime, validates it, installs one pi home and writes a
   launcher. `bin/loop-pi-preflight` refuses a target repository that is not safe to loop in, and
   `bin/loop-pi-audit` snapshots remote state before a run and reports every ungranted remote change
@@ -78,10 +78,18 @@ Settings under `loopPi` in `home/settings.json` (or your overlay):
 | `modelFamily` | `{"provider": "openai", "pattern": "^gpt-6(\\.[0-9]+)?(-[a-z0-9]+)+$", "name": "gpt-6"}` | the only models the root and lanes may run |
 | `rootRoute` | `{"provider": "openai", "model": "gpt-6.1-sol", "thinking": "medium"}` | the root's model, and the fallback when a session selects one outside the family |
 | `requiredHookScripts` | `[]` | guard scripts that must exist; a missing required one blocks every lane tool call |
+| `onIncident` | `[]` | argv of a notifier run, detached, whenever the loop writes an incident file; `{file}` in any element is replaced by the incident's absolute path. Failures are ignored. loop-pi ships no notifier: an overlay sets this to its own command |
 
 The agent files name `openai/gpt-6.1-sol` and `openai/gpt-6-*` models. If you use another family, replace the agent files
 through the overlay and set `modelFamily` and `rootRoute` to match; the installer refuses a build
 where they disagree.
+
+### Ops agents
+
+`ops` runs the commands of one granted ops surface of any kind (deploy, probe, release, secret
+write). `ops-probe` is the same shape with `thinking: low` for read-only probes, readbacks and
+summaries, and may only be bound to a surface of `kind: probe`. Both are single-flight and are
+bound to their surface by the root guard.
 
 ### Guard scripts
 
@@ -126,6 +134,43 @@ ordinary audit verdict remains unchanged. Covered changes have a separate `autom
 line with full old/new SHAs and actor. Neither `main`, either snapshot's default branch, tags,
 nor an unresolved default branch can be covered this way. This never grants another ref or
 permits the root's own ungranted pushes. Declare grants before a run, not to repair an old audit.
+
+### Protocol 2 closeout
+
+A run dir that holds a `loop-pi-proto` file (written by `loop-continuation` when it arms a root)
+is a protocol 2 run. For those, and only those, `closeout` judges a move of a remote's default
+branch commit by commit instead of by grant:
+
+```sh
+loop-pi-audit closeout --grants grants.json --grants-sha256 <hex> --push-log push-log.jsonl
+```
+
+- `--grants-sha256 HEX` is the hash frozen for the grants file at launch. A file whose bytes differ
+  is refused with exit 2 before it covers anything. A protocol 2 closeout without it warns.
+- `--push-log FILE` is the loop's push log (default `<run-dir>/push-log.jsonl`), one JSON object
+  per successfully updated ref with `repo`, `ref`, `old` and `new`.
+- A `refs/heads/<default branch>` entry in the grants file is ignored, with a warning. The move is
+  granted only when every commit in `before..after` lies in some logged `old..new` range for that
+  repository and ref, or touches only paths under `backlog/`, or has an author or committer
+  listed in that repository's `bot_actors` (a login such as `some-app[bot]`, matched against the
+  commit's name or its GitHub noreply address `<id>+<login>@users.noreply.github.com`). Anything
+  else is `UNGRANTED` and printed in a `note:` line. A foreign commit between two logged pushes is
+  therefore flagged, as is any commit after the last logged push. The fast-forward check still
+  applies, and a derived `HEAD` move follows the default branch's verdict.
+- Other branches, tags and releases are judged exactly as before. `bot_actors` sits beside `refs`
+  in a repository's grants object: `{"<repo>": {"refs": ["HEAD"], "bot_actors": ["some-app[bot]"]}}`.
+- `compare` applies the same rules when given `--run-dir DIR` for a run dir with the marker; it
+  never reads `LOOP_PI_RUN_DIR`. With no marker, behaviour is unchanged.
+
+### State log (`loop-state`)
+
+`loop-state append <log> <ev> k=v ...` validates every event; `check` and `digest` read the log.
+A log takes one `open`. Only `land mode=after-green` is accepted for new appends (older logs with
+`pre-green` still check and digest). `revert` accepts `reason=root-decision`. `park needs=budget`
+is valid; `close reason=budget` in a protocol 2 run (`--run-dir DIR` or `LOOP_PI_RUN_DIR`) is
+refused unless `harness-facts.jsonl` records a `compaction-failed` or `quota-exhausted` fact. A
+string-list field accepts a JSON array or a comma-separated string, `judgement` text may be 4,096
+bytes, and an unknown field's error lists the event's allowed fields.
 
 ## Limits, stated plainly
 

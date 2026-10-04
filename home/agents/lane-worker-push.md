@@ -55,3 +55,6 @@ Your final message is a few lines of prose, then exactly one block, with nothing
 `complete` only when the Acceptance check holds on the tested SHA. `sha` is null for an uncommitted
 candidate. `check`, `exit` and `tail` are the Gate's. Every undecided point goes in `questions`.
 Say your material choices in the prose lines. Nothing before the final message: no progress notes.
+Write logs, gate output and CI output to files under the evidence directory and name their paths
+in the return; keep the `tail` to at most 40 lines. This overrides any brief that asks for full
+output.

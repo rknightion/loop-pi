@@ -39,6 +39,23 @@ deleted tags and releases still need a ref grant. The `--grants` file is unchang
 whose bytes no longer match is refused (exit 2) before it covers anything. `--ops` without it still
 works, with a warning on stderr that the ops file is unverified.
 
+Protocol 2: when the run dir holds `loop-pi-proto`, `closeout` (and `compare --run-dir DIR`)
+grant a move of a remote's default branch only through the commits themselves, never through a
+`refs/heads/<default>` entry in the grants file (such an entry is ignored, with a warning). Every
+commit in `before..after` must satisfy one of:
+- it lies in some `old..new` range of the push log (`--push-log FILE`, default
+  `<run-dir>/push-log.jsonl`, lines `{"repo", "ref", "old", "new", ...}`) for that repository and ref;
+- it touches only paths under `backlog/`;
+- its author or committer is a member of the repository's `bot_actors` list in the grants file (a
+  name equal to the login, or a GitHub noreply address `<id>+<login>@users.noreply.github.com`).
+Anything else is UNGRANTED and named in a `note:` line. The fast-forward check still applies. A
+derived `HEAD` move follows the default branch's verdict. Other refs, tags and releases are
+unchanged. Without the marker every rule above is skipped and behaviour is as before.
+
+`--grants-sha256 HEX` (compare and closeout) is the sha256 the launch froze for the `--grants`
+file; a file whose bytes differ is refused (exit 2) before it covers anything. Under protocol 2 a
+`--grants` file without it still works, with a warning on stderr.
+
 Stdlib only.
 """
 import argparse
@@ -293,11 +310,13 @@ def cmd_closeout(args: argparse.Namespace) -> int:
     run_dir = run_dir_of(args)
     with open(os.path.join(run_dir, ".audit.lock"), "w", encoding="utf-8") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        return closeout_locked(run_dir, args.grants, args.ops, args.ops_sha256)
+        return closeout_locked(run_dir, args.grants, args.ops, args.ops_sha256, args.grants_sha256, args.push_log)
 
 
 OPS_KINDS = {"deploy", "probe", "release", "secret-write", "credential-create"}
 OPS_SHA256_HELP = "The sha256 the launch froze for the --ops file; a mismatch refuses the audit (exit 2)."
+GRANTS_SHA256_HELP = "The sha256 the launch froze for the --grants file; a mismatch refuses the audit (exit 2)."
+PUSH_LOG_HELP = "Protocol 2 push log (default: <run-dir>/push-log.jsonl)."
 
 
 def load_ops_release(path: str | None, sha256: str | None = None) -> set[str]:
@@ -333,7 +352,8 @@ def load_ops_release(path: str | None, sha256: str | None = None) -> set[str]:
     return {os.path.dirname(codex)}
 
 
-def closeout_locked(run_dir: str, grants: str | None, ops: str | None = None, ops_sha256: str | None = None) -> int:
+def closeout_locked(run_dir: str, grants: str | None, ops: str | None = None, ops_sha256: str | None = None,
+                    grants_sha256: str | None = None, push_log: str | None = None) -> int:
     before_path = os.path.join(run_dir, "audit-before.json")
     with open(before_path, "r", encoding="utf-8") as fh:
         repos = sorted(json.load(fh)["repos"])
@@ -341,7 +361,8 @@ def closeout_locked(run_dir: str, grants: str | None, ops: str | None = None, op
     write_json(after_path, {"taken_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                             "repos": {repo: snapshot_repo(repo) for repo in repos}})
     return cmd_compare(argparse.Namespace(before=before_path, after=after_path, grants=grants, ops=ops,
-                                          ops_sha256=ops_sha256))
+                                          ops_sha256=ops_sha256, grants_sha256=grants_sha256,
+                                          push_log=push_log, run_dir=run_dir))
 
 
 def diff_ref_map(before: dict, after: dict) -> list[tuple[str, str, str, str]]:
@@ -430,6 +451,10 @@ def head_target(entry: dict, other: dict) -> str | None:
 
 def validate_automation(grants_by_repo: dict) -> None:
     for grants in grants_by_repo.values():
+        if isinstance(grants, dict) and "bot_actors" in grants:
+            actors = grants["bot_actors"]
+            if not isinstance(actors, list) or not all(isinstance(a, str) and a for a in actors):
+                raise ValueError("bot_actors must be a list of nonempty login strings")
         if not isinstance(grants, dict) or "automation" not in grants:
             continue
         items = grants["automation"]
@@ -533,6 +558,107 @@ def automation_actor(repo: str, remote: str, ref: str, old: str, new: str,
         return None
 
 
+PROTO_MARKER = "loop-pi-proto"
+ZERO_SHA = "0" * 40
+
+
+def is_proto2(run_dir: str | None) -> bool:
+    return bool(run_dir) and os.path.isfile(os.path.join(run_dir, PROTO_MARKER))
+
+
+def load_push_log(path: str | None) -> list[dict]:
+    """Well-formed push-log records; unreadable lines are skipped (they grant nothing)."""
+    entries: list[dict] = []
+    if not path:
+        return entries
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    obj = json.loads(line)
+                except ValueError:
+                    continue
+                if (isinstance(obj, dict) and isinstance(obj.get("repo"), str) and isinstance(obj.get("ref"), str)
+                        and isinstance(obj.get("new"), str) and re.fullmatch(r"[0-9a-f]{40}", obj["new"])
+                        and (obj.get("old") is None or (isinstance(obj["old"], str)
+                                                         and re.fullmatch(r"[0-9a-f]{40}", obj["old"])))):
+                    entries.append(obj)
+    except OSError:
+        pass
+    return entries
+
+
+def rev_list(repo: str, spec: str) -> list[str] | None:
+    try:
+        result = run(["git", "-C", repo, "rev-list", spec], timeout=120)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return result.stdout.split() if result.returncode == 0 else None
+
+
+def logged_commits(repo: str, ref: str, push_log: list[dict]) -> set[str]:
+    """Commits inside any logged `old..new` push range for this repository and ref."""
+    real = os.path.realpath(repo)
+    covered: set[str] = set()
+    for entry in push_log:
+        if entry["ref"] != ref or os.path.realpath(entry["repo"]) != real:
+            continue
+        commits = rev_list(repo, f"{entry['old']}..{entry['new']}" if entry.get("old") else entry["new"])
+        if commits:
+            covered.update(commits)
+    return covered
+
+
+def touches_only_backlog(repo: str, sha: str) -> bool:
+    parents = run(["git", "-C", repo, "rev-list", "--parents", "-n", "1", sha]).stdout.split()[1:]
+    if parents:
+        cmd = ["git", "-C", repo, "diff-tree", "-r", "-z", "--name-only", "--no-commit-id", parents[0], sha]
+    else:
+        cmd = ["git", "-C", repo, "diff-tree", "-r", "-z", "--name-only", "--no-commit-id", "--root", sha]
+    result = run(cmd)
+    paths = [p for p in result.stdout.split("\0") if p]
+    return result.returncode == 0 and bool(paths) and all(p.startswith("backlog/") for p in paths)
+
+
+def is_bot_identity(name: str, email: str, logins: list[str]) -> bool:
+    for login in logins:
+        want = login.lower()
+        if name.lower() == want:
+            return True
+        m = re.fullmatch(r"(?:\d+\+)?(.+)@users\.noreply\.github\.com", email, re.IGNORECASE)
+        if m and m.group(1).lower() == want:
+            return True
+    return False
+
+
+def authored_by_bot(repo: str, sha: str, logins: list[str]) -> bool:
+    if not logins:
+        return False
+    result = run(["git", "-C", repo, "log", "-1", "--format=%an%x00%ae%x00%cn%x00%ce", sha])
+    parts = result.stdout.rstrip("\n").split("\0")
+    if result.returncode != 0 or len(parts) != 4:
+        return False
+    return is_bot_identity(parts[0], parts[1], logins) or is_bot_identity(parts[2], parts[3], logins)
+
+
+def default_move_verdict(repo: str, remote: str, ref: str, before_sha: str, after_sha: str,
+                         push_log: list[dict], bot_logins: list[str]) -> tuple[bool, list[str]]:
+    """Protocol 2: is every commit in before..after accounted for? Returns (covered, notes)."""
+    fetched, reason = fetch_ref(repo, remote, ref)
+    if not fetched:
+        return False, [f"cannot verify commits: {reason}"]
+    commits = rev_list(repo, f"{before_sha}..{after_sha}")
+    if commits is None:
+        return False, [f"cannot list commits {before_sha[:12]}..{after_sha[:12]}"]
+    logged = logged_commits(repo, ref, push_log)
+    notes = []
+    for sha in commits:
+        if sha in logged or touches_only_backlog(repo, sha) or authored_by_bot(repo, sha, bot_logins):
+            continue
+        notes.append(f"commit {sha[:12]} is not in a logged push, is not backlog-only and has no declared bot author")
+    return not notes, notes
+
+
 def shared_remote_grants(before_repos: dict, after_repos: dict, grants_by_repo: dict) -> dict:
     """Share only explicit remote-ref authority, identified from both snapshots."""
     shared = {}
@@ -552,9 +678,12 @@ def shared_remote_grants(before_repos: dict, after_repos: dict, grants_by_repo: 
 
 def compare_repo(name: str, before: dict, after: dict, grants: list[str] | dict, report: list[str],
                  times: tuple[str, str] = ("", ""), shared: dict | None = None,
-                 seen_granted: set | None = None, ops_release: bool = False) -> bool:
-    """Returns True if changes are granted or foreign automation."""
+                 seen_granted: set | None = None, ops_release: bool = False,
+                 proto: dict | None = None) -> bool:
+    """Returns True if changes are granted or foreign automation. `proto` (protocol 2) is
+    {"push_log": [...]}: default-branch moves are then judged commit by commit."""
     automation = grants.get("automation", []) if isinstance(grants, dict) else []
+    bot_logins = grants.get("bot_actors", []) if isinstance(grants, dict) else []
     rewrites = set(grants.get("allow_non_fast_forward", [])) if isinstance(grants, dict) else set()
     grants = grants.get("refs", []) if isinstance(grants, dict) else grants
     all_covered = True
@@ -576,6 +705,27 @@ def compare_repo(name: str, before: dict, after: dict, grants: list[str] | dict,
         authority = (shared or {}).get(url, {})
         remote_grants = authority.get("refs", grants)
         remote_rewrites = authority.get("rewrites", rewrites)
+        defaults: set[str] = set()
+        verdicts: dict[str, tuple[bool, list[str]]] = {}
+        if proto is not None:
+            defaults = {t for t in (head_target(b, a), head_target(a, b)) if t}
+            if not defaults:
+                defaults = {"refs/heads/main", "refs/heads/master"}
+            for ref in sorted(set(remote_grants) & defaults):
+                print(f"loop-pi-audit: warning: grant for {ref} on {name} ignored; protocol 2 never grants the "
+                      "default branch by ref", file=sys.stderr)
+            remote_grants = set(remote_grants) - defaults
+            remote_rewrites = set(remote_rewrites) - defaults
+
+        def default_verdict(ref: str) -> tuple[bool, list[str]]:
+            if ref not in verdicts:
+                before_sha, after_sha = b.get("refs", {}).get(ref), a.get("refs", {}).get(ref)
+                if before_sha and after_sha and before_sha != after_sha:
+                    verdicts[ref] = default_move_verdict(name, remote, ref, before_sha, after_sha,
+                                                         proto["push_log"], bot_logins)
+                else:
+                    verdicts[ref] = (False, [])
+            return verdicts[ref]
         changes = diff_ref_map(b.get("refs", {}), a.get("refs", {}))
         before_head = b.get("symrefs", {}).get("HEAD")
         after_head = a.get("symrefs", {}).get("HEAD")
@@ -586,6 +736,7 @@ def compare_repo(name: str, before: dict, after: dict, grants: list[str] | dict,
                             a.get("refs", {}).get("HEAD", "")))
         for change, ref, before_sha, after_sha in changes:
             target = ref
+            notes: list[str] = []
             actor = automation_actor(name, remote, ref, before_sha, after_sha, automation,
                                      [head_target(b, a), head_target(a, b)], times)
             if actor:
@@ -599,7 +750,8 @@ def compare_repo(name: str, before: dict, after: dict, grants: list[str] | dict,
                     mark = "UNVERIFIED HEAD target"
                     all_covered = False
                 else:
-                    covered = all(t in remote_grants for t in targets)
+                    covered = all(default_verdict(t)[0] if (proto is not None and t in defaults) else t in remote_grants
+                                  for t in targets)
                     mark = "GRANTED derived HEAD" if covered else "UNGRANTED derived HEAD"
                     all_covered = all_covered and covered
             elif ref.startswith("refs/pull/") and ref not in remote_grants:
@@ -608,6 +760,8 @@ def compare_repo(name: str, before: dict, after: dict, grants: list[str] | dict,
                 if ref.startswith("refs/tags/") and ref.endswith("^{}"):
                     target = ref[:-3]
                 covered = target in remote_grants
+                if proto is not None and change == "moved" and ref in defaults:
+                    covered, notes = default_verdict(ref)
                 if (not covered and ops_release and change == "added" and ref.startswith("refs/tags/")):
                     report.append(f"[{name}] remote '{remote}' ref {change}: {ref} "
                                   f"({before_sha[:12] or '-'} -> {after_sha[:12] or '-'}) [GRANTED ops release]")
@@ -615,7 +769,7 @@ def compare_repo(name: str, before: dict, after: dict, grants: list[str] | dict,
                 if change == "moved" and ref == target:
                     mark, contributes_covered = moved_ref_mark(
                         name, remote, ref, before_sha, after_sha, covered,
-                        ref.startswith("refs/heads/") and ref in remote_rewrites)
+                        ref.startswith("refs/heads/") and ref in remote_rewrites and ref not in defaults)
                     all_covered = all_covered and contributes_covered
                 else:
                     all_covered = all_covered and covered
@@ -628,6 +782,8 @@ def compare_repo(name: str, before: dict, after: dict, grants: list[str] | dict,
                     continue
                 seen_granted.add(key)
             report.append(f"[{name}] remote '{remote}' ref {change}: {ref} ({before_sha[:12] or '-'} -> {after_sha[:12] or '-'}) [{mark}]")
+            for note in notes:
+                report.append(f"[{name}] remote '{remote}' ref {change}: {ref} note: {note}")
 
     before_tags = before.get("tags", {})
     after_tags = after.get("tags", {})
@@ -684,10 +840,33 @@ def cmd_compare(args: argparse.Namespace) -> int:
     with open(args.after, "r", encoding="utf-8") as fh:
         after = json.load(fh)
 
+    run_dir = getattr(args, "run_dir", None)
+    proto_run = is_proto2(run_dir)
+    grants_sha256 = getattr(args, "grants_sha256", None)
     grants_by_repo: dict[str, list[str]] = {}
+    if grants_sha256 is not None and not args.grants:
+        print("loop-pi-audit: invalid grants: --grants-sha256 needs --grants", file=sys.stderr)
+        return 2
     if args.grants:
-        with open(args.grants, "r", encoding="utf-8") as fh:
-            grants_by_repo = json.load(fh)
+        with open(args.grants, "rb") as fh:
+            raw_grants = fh.read()
+        if grants_sha256 is not None:
+            actual = hashlib.sha256(raw_grants).hexdigest()
+            if actual != grants_sha256.strip().lower():
+                print(f"loop-pi-audit: invalid grants: {args.grants} has sha256 {actual}, which does not match "
+                      f"--grants-sha256 {grants_sha256}", file=sys.stderr)
+                return 2
+        elif proto_run:
+            print(f"loop-pi-audit: warning: grants file {args.grants} is unverified; pass --grants-sha256 with "
+                  "the sha256 the launch froze for it.", file=sys.stderr)
+        grants_by_repo = json.loads(raw_grants.decode("utf-8"))
+    proto = None
+    if proto_run:
+        log_path = getattr(args, "push_log", None) or os.path.join(run_dir, "push-log.jsonl")
+        if not os.path.isfile(log_path):
+            print(f"loop-pi-audit: warning: no push log at {log_path}; default-branch moves are granted only by "
+                  "backlog-only or declared bot commits.", file=sys.stderr)
+        proto = {"push_log": load_push_log(log_path)}
 
     try:
         validate_automation(grants_by_repo)
@@ -725,7 +904,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
         pre_len = len(report)
         covered = compare_repo(name, b, a, grants_by_repo.get(name, []), report,
                                (before.get("taken_at", ""), after.get("taken_at", "")), shared, seen_granted,
-                               os.path.realpath(name) in ops_release_repos)
+                               os.path.realpath(name) in ops_release_repos, proto)
         if len(report) > pre_len:
             any_change = True
         all_ok = all_ok and covered
@@ -759,6 +938,10 @@ def main() -> int:
     comp.add_argument("--grants", help="Path to a grants JSON file: {\"<repo>\": [\"refs/heads/main\", ...]}.")
     comp.add_argument("--ops", help="Path to the loop's frozen ops grant file; a release-kind entry covers added tags and releases in the repo holding it.")
     comp.add_argument("--ops-sha256", help=OPS_SHA256_HELP)
+    comp.add_argument("--grants-sha256", help=GRANTS_SHA256_HELP)
+    comp.add_argument("--push-log", help=PUSH_LOG_HELP)
+    comp.add_argument("--run-dir", help="Run directory; protocol 2 rules apply when it holds loop-pi-proto "
+                                        "(compare never reads $LOOP_PI_RUN_DIR).")
     comp.set_defaults(func=cmd_compare)
 
     for name, func, text in (("begin", cmd_begin, "Start a run's before-snapshot with REPO."),
@@ -773,6 +956,8 @@ def main() -> int:
     close.add_argument("--grants", help="Path to a grants JSON file, keyed by the repo paths in the run.")
     close.add_argument("--ops", help="Path to the loop's frozen ops grant file; a release-kind entry covers added tags and releases in the repo holding it.")
     close.add_argument("--ops-sha256", help=OPS_SHA256_HELP)
+    close.add_argument("--grants-sha256", help=GRANTS_SHA256_HELP)
+    close.add_argument("--push-log", help=PUSH_LOG_HELP)
     close.set_defaults(func=cmd_closeout)
 
     args = parser.parse_args()

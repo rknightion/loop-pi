@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 """loop-state: append-only event log for a fan-out loop, with a recovery digest.
 
-  loop-state append <log> <ev> [k=v ...] [--by root|dispatcher|ext|daemon]
-  loop-state append <log> [--by ...] < event.json
+  loop-state append <log> <ev> [k=v ...] [--by root|dispatcher|ext|daemon] [--run-dir DIR]
+  loop-state append <log> [--by ...] [--run-dir DIR] < event.json
   loop-state digest <log> [--json]
   loop-state check <log>
 
 Stdlib only; runs under Python 3.9 (macOS /usr/bin/python3).
 
-Exit codes: 0 ok; 2 append rejected (validation error or ineligible pre-green land) or usage error;
+Run dir (`--run-dir DIR` on append, else $LOOP_PI_RUN_DIR): when it holds `loop-pi-proto`, a
+`close reason=budget` needs a `compaction-failed` or `quota-exhausted` fact in its
+`harness-facts.jsonl`. Without the marker nothing about the run dir changes any verdict.
+
+Exit codes: 0 ok; 2 append rejected (validation error, a second `open`, a pre-green land or an
+unlicensed budget close) or usage error;
 1 digest/check failure (unreadable log, or the first invalid line for `check`).
 """
 from __future__ import annotations
@@ -23,7 +28,7 @@ from datetime import datetime, timezone
 VERSION = 1
 GATE_AGENT = "gate-runner"
 DIGEST_MAX_BYTES = 4096
-JUDGEMENT_MAX_BYTES = 2048
+JUDGEMENT_MAX_BYTES = 4096
 JUDGEMENTS_IN_DIGEST = 5
 BY_VALUES = ("root", "dispatcher", "ext", "daemon")
 TS_RE = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
@@ -82,7 +87,7 @@ SCHEMA = {
         {
             "task": STR,
             "reason": STR,
-            "needs": ("owner", "authority", "evidence-later", "dependency", "defect"),
+            "needs": ("owner", "authority", "evidence-later", "dependency", "defect", "budget"),
         },
         {"lane": STR, "until": STR},
     ),
@@ -91,7 +96,13 @@ SCHEMA = {
         {"lane": STR, "ci": STR},
     ),
     "revert": (
-        {"sha": STR, "reverted_by": STR, "reason": ("ci-red", "ci-timeout", "composed-red")},
+        {
+            "sha": STR,
+            "reverted_by": STR,
+            # ci-red, ci-timeout and composed-red are the retired daemon's reasons: kept so legacy
+            # logs still validate.
+            "reason": ("ci-red", "ci-timeout", "composed-red", "root-decision"),
+        },
         {"task": STR},
     ),
     "judgement": ({"text": STR}, {"task": STR, "lane": STR}),
@@ -100,6 +111,14 @@ SCHEMA = {
         {},
     ),
 }
+
+
+PRE_GREEN_REFUSAL = "lands-pre-green was removed; land after green"
+BUDGET_REFUSAL = (
+    "close budget refused: the harness compacts automatically. Budget needs a recorded quota or "
+    "compaction failure; continue the next admissible task."
+)
+BUDGET_FACT_KINDS = ("compaction-failed", "quota-exhausted")
 
 
 class Rejected(Exception):
@@ -153,7 +172,8 @@ def _check_value(field, kind, value):
 
 
 def validate_event(obj, framed=False):
-    """Validate an event body. framed=True also checks v, seq, ts and by (used by `check`)."""
+    """Validate an event body. framed=True also checks v, seq, ts and by (used by `check`, which
+    must keep accepting legacy `land mode=pre-green` lines)."""
     if not isinstance(obj, dict):
         raise Rejected("event must be a JSON object")
     ev = obj.get("ev")
@@ -163,7 +183,10 @@ def validate_event(obj, framed=False):
     envelope = {"ev", "v", "seq", "ts", "by"}
     for field in obj:
         if field not in required and field not in optional and field not in envelope:
-            raise Rejected("%s: unknown field %s" % (ev, field))
+            raise Rejected(
+                "%s: unknown field %s; allowed fields: %s"
+                % (ev, field, ", ".join(list(required) + list(optional)))
+            )
     for field, kind in required.items():
         if field not in obj:
             raise Rejected("%s: missing required field %s" % (ev, field))
@@ -216,7 +239,14 @@ def parse_kv(ev, pairs):
             parsed_ok = True
         except ValueError:
             parsed, parsed_ok = raw, False
-        if kind in (STR, STR_OR_NULL) or isinstance(kind, tuple):
+        if kind == STRLIST:
+            if parsed_ok and isinstance(parsed, list):
+                out[key] = parsed
+            elif raw.lstrip().startswith("["):
+                out[key] = raw  # broken JSON: let validation name the field
+            else:
+                out[key] = [part.strip() for part in raw.split(",") if part.strip()]
+        elif kind in (STR, STR_OR_NULL) or isinstance(kind, tuple):
             if parsed_ok and (isinstance(parsed, str) or (parsed is None and kind == STR_OR_NULL)):
                 out[key] = parsed
             else:
@@ -295,50 +325,38 @@ def _tail_state(data):
     return 0, prefix
 
 
-def read_loop_md_keys(path):
-    """The key: value lines that open LOOP.md, up to the first `## ` heading; the first of a key
-    wins. The value is the rest of the line with surrounding blanks trimmed and nothing removed, so
-    `release-on-push: no (tags only)` is not `no`. The dispatcher's parseLoopMd reads it the same way."""
-    keys = {}
-    with open(path, encoding="utf-8") as fh:
-        for line in fh:
-            line = line.rstrip("\n")
-            if line.startswith("## "):
-                break
-            m = re.match(r"^([A-Za-z][A-Za-z0-9_-]*):[ \t]*(.*?)[ \t]*$", line)
-            if m:
-                keys.setdefault(m.group(1), m.group(2))
-    return keys
-
-
-def check_pre_green_eligible(log_path):
-    log_dir = os.path.dirname(os.path.realpath(log_path))
-    if os.path.basename(log_dir) != "codex":
-        raise Rejected("land mode=pre-green: the log must live in <repo>/codex/ to find LOOP.md")
-    loop_md = os.path.join(os.path.dirname(log_dir), "LOOP.md")
+def read_run_facts(run_dir):
+    """The `kind` of every readable fact in `<run_dir>/harness-facts.jsonl` (none when absent)."""
+    kinds = []
     try:
-        keys = read_loop_md_keys(loop_md)
-    except OSError as exc:
-        raise Rejected("land mode=pre-green refused: cannot read %s (%s)" % (loop_md, exc.strerror))
-    wanted = (("tier", "routine"), ("release-on-push", "no"), ("deploy-on-push", "no"))
-    for key, value in wanted:
-        if keys.get(key) != value:
-            raise Rejected(
-                "land mode=pre-green refused: LOOP.md needs `%s: %s` (found %r)"
-                % (key, value, keys.get(key))
-            )
-    if "baseline-red" in keys:
-        raise Rejected(
-            "land mode=pre-green refused: LOOP.md carries `baseline-red: %s`; a known-red main "
-            "never lands pre-green" % keys["baseline-red"]
-        )
+        with open(os.path.join(run_dir, "harness-facts.jsonl"), encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    obj = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(obj, dict) and isinstance(obj.get("kind"), str):
+                    kinds.append(obj["kind"])
+    except OSError:
+        pass
+    return kinds
 
 
-def do_append(log_path, event, by):
+def check_budget_close(run_dir):
+    """Refuse `close reason=budget` in a protocol-2 run that holds no compaction or quota fact."""
+    if not run_dir or not os.path.isfile(os.path.join(run_dir, "loop-pi-proto")):
+        return
+    if not any(k in BUDGET_FACT_KINDS for k in read_run_facts(run_dir)):
+        raise Rejected(BUDGET_REFUSAL)
+
+
+def do_append(log_path, event, by, run_dir=None):
     validate_event(event)
     event = dict(event)
     if event["ev"] == "land" and event["mode"] == "pre-green":
-        check_pre_green_eligible(log_path)
+        raise Rejected(PRE_GREEN_REFUSAL)
+    if event["ev"] == "close" and event["reason"] == "budget":
+        check_budget_close(run_dir)
     by = by or event.get("by") or "root"
     if by not in BY_VALUES:
         raise Rejected("by must be one of %s" % "|".join(BY_VALUES))
@@ -355,6 +373,8 @@ def do_append(log_path, event, by):
                 break
             data += more
         last, prefix = _tail_state(data)
+        if event["ev"] == "open" and _log_has_open(data):
+            raise Rejected("open refused: the log already has an open event; a loop opens once")
         seq = last + 1
         framed = {"v": VERSION, "seq": seq, "ts": utc_now(), "ev": event["ev"], "by": by}
         for key, value in event.items():
@@ -369,6 +389,19 @@ def do_append(log_path, event, by):
     finally:
         os.close(fd)  # closing releases the flock
     return framed
+
+
+def _log_has_open(data):
+    for raw in data.split(b"\n"):
+        if b'"open"' not in raw:
+            continue
+        try:
+            obj = json.loads(raw.decode("utf-8"))
+        except ValueError:
+            continue
+        if isinstance(obj, dict) and obj.get("ev") == "open":
+            return True
+    return False
 
 
 TORN = "torn"
@@ -696,8 +729,28 @@ def _pop_by(args):
     return by, rest
 
 
+def _pop_run_dir(args):
+    run_dir, rest, i = None, [], 0
+    while i < len(args):
+        a = args[i]
+        if a == "--run-dir":
+            if i + 1 >= len(args):
+                raise Rejected("--run-dir needs a value")
+            run_dir = args[i + 1]
+            i += 2
+        elif a.startswith("--run-dir="):
+            run_dir = a[len("--run-dir=") :]
+            i += 1
+        else:
+            rest.append(a)
+            i += 1
+    return run_dir, rest
+
+
 def cmd_append(args):
     by, rest = _pop_by(args)
+    run_dir, rest = _pop_run_dir(rest)
+    run_dir = run_dir or os.environ.get("LOOP_PI_RUN_DIR") or None
     if not rest:
         raise Rejected("usage: loop-state append <log> [<ev> k=v ...] [--by ...]")
     log_path, rest = rest[0], rest[1:]
@@ -713,7 +766,7 @@ def cmd_append(args):
         for key in ("v", "seq", "ts"):
             if key in event:
                 raise Rejected("%s is set by loop-state" % key)
-    framed = do_append(log_path, event, by)
+    framed = do_append(log_path, event, by, run_dir)
     sys.stdout.write("seq=%d\n" % framed["seq"])
     return 0
 

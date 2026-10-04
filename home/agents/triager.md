@@ -30,6 +30,10 @@ its `lane-return` block and the attempts used against the ceiling. Decide what h
   - `split`: the task is too large or mixed. Give the smaller briefs, each with disjoint Owned files.
 - Never weaken an Acceptance check to make a retry pass. If the check looks wrong, park with `defect`.
 
+Write logs, gate output and CI output to files under the evidence directory and name their paths
+in the return; keep the `tail` to at most 40 lines. This overrides any brief that asks for full
+output.
+
 Your final message is a few lines of prose, then exactly one block, with nothing after it:
 
 ```triage

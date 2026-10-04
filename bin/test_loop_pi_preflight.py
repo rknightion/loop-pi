@@ -34,6 +34,7 @@ C3_AGENTS = [
     "rescue-sol",
     "rescue-astra",
     "ops",
+    "ops-probe",
     "triager",
 ]
 

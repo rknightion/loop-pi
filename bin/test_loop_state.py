@@ -25,9 +25,11 @@ def load_cli():
     return mod
 
 
-def run(*args, stdin=None):
+def run(*args, stdin=None, env=None):
+    base = {k: v for k, v in os.environ.items() if k != "LOOP_PI_RUN_DIR"}
+    base.update(env or {})
     return subprocess.run(
-        [sys.executable, SCRIPT, *args], input=stdin, capture_output=True, text=True, timeout=60
+        [sys.executable, SCRIPT, *args], input=stdin, capture_output=True, text=True, timeout=60, env=base
     )
 
 
@@ -94,7 +96,7 @@ class ValidationTests(Base):
     def test_type_violations(self):
         self.reject("gate", "scope=lane", "sha=a", "cmd=c", "exit=zero", needle="exit must be an integer")
         self.reject("accept", "task=T", "accepted=maybe", "reason=r", needle="accepted must be true or false")
-        self.reject(*OPEN[:5], "envelope=T1", needle="envelope must be a list of strings")
+        self.reject(*OPEN[:5], "envelope=[1,2]", needle="envelope must be a list of strings")
         self.reject(
             "return", "lane=L", "run=r", "status=complete", "coderabbit={}", needle="coderabbit must be"
         )
@@ -110,8 +112,23 @@ class ValidationTests(Base):
         self.assertEqual((e["lane"], e["task"], e["run"], e["base"]), ("1", "2", "123456", "1234567"))
 
     def test_judgement_limit(self):
-        self.append("judgement", "text=" + "x" * 2048)
-        self.reject("judgement", "text=" + "x" * 2049, needle="over 2048 bytes")
+        self.append("judgement", "text=" + "x" * 4096)
+        self.reject("judgement", "text=" + "x" * 4097, needle="over 4096 bytes")
+
+    def test_unknown_field_error_lists_the_allowed_fields(self):
+        r = self.append("close", "reason=budget", "colour=red", ok=False)
+        self.assertIn("allowed fields: reason", r.stderr)
+        r = self.append("land", "task=T", "sha=a", "gate=g", "mode=after-green", "colour=red", ok=False)
+        for field in ("task", "sha", "gate", "mode", "lane", "ci"):
+            self.assertIn(field, r.stderr.split("allowed fields:")[1])
+
+    def test_string_list_accepts_a_comma_separated_string(self):
+        self.append(*OPEN[:5], "envelope=T1, T2,T3")
+        self.assertEqual(self.events()[0]["envelope"], ["T1", "T2", "T3"])
+        self.append("return", "lane=L", "run=r", "status=partial", "questions=why?")
+        self.assertEqual(self.events()[1]["questions"], ["why?"])
+        self.append("return", "lane=L2", "run=r2", "status=partial", 'questions=["a,b","c"]')
+        self.assertEqual(self.events()[2]["questions"], ["a,b", "c"])
 
     def test_bad_ev_and_bad_kv(self):
         self.reject("nope", needle="ev must be one of")
@@ -154,50 +171,129 @@ class ConcurrencyTests(Base):
         self.assertEqual(run("check", self.log).returncode, 0)
 
 
-class PreGreenTests(Base):
-    LAND = ["land", "task=T1", "sha=abc", "gate=just check", "mode=pre-green"]
+class LandModeTests(Base):
+    PRE = ["land", "task=T1", "sha=abc", "gate=just check", "mode=pre-green"]
+    LEGACY_LAND = {
+        "v": 1, "seq": 1, "ts": "2026-10-03T00:00:00Z", "ev": "land", "by": "root",
+        "task": "T1", "sha": "abc", "gate": "g", "mode": "pre-green",
+    }
+    LEGACY_REVERT = {
+        "v": 1, "seq": 2, "ts": "2026-10-03T00:00:01Z", "ev": "revert", "by": "daemon",
+        "sha": "abc", "reverted_by": "def", "reason": "ci-red",
+    }
 
-    def loop_md(self, **over):
-        keys = {"tier": "routine", "release-on-push": "no", "deploy-on-push": "no"}
-        keys.update(over)
-        body = "# Loop: demo\n" + "".join("%s: %s\n" % kv for kv in keys.items()) + "\n## Traps\nrelease-on-push: yes\n"
+    def test_pre_green_is_refused_with_the_exact_message(self):
+        r = self.append(*self.PRE, ok=False)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("lands-pre-green was removed; land after green", r.stderr)
+        self.assertFalse(os.path.exists(self.log))
+
+    def test_pre_green_no_longer_reads_loop_md(self):
+        # The old refusal depended on LOOP.md; an eligible LOOP.md must not change the verdict.
         with open(os.path.join(self.repo, "LOOP.md"), "w", encoding="utf-8") as fh:
-            fh.write(body)
+            fh.write("tier: routine\nrelease-on-push: no\ndeploy-on-push: no\n")
+        r = self.append(*self.PRE, ok=False)
+        self.assertIn("lands-pre-green was removed", r.stderr)
 
-    def test_refuses_without_loop_md(self):
-        r = self.append(*self.LAND, ok=False)
+    def test_after_green_needs_no_loop_md_and_log_may_live_anywhere(self):
+        r = run("append", os.path.join(self.repo, "state.jsonl"), "land", "task=T1", "sha=abc", "gate=g", "mode=after-green")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_legacy_log_with_pre_green_land_and_daemon_revert_still_checks_and_digests(self):
+        with open(self.log, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(self.LEGACY_LAND) + "\n" + json.dumps(self.LEGACY_REVERT) + "\n")
+        self.assertEqual(run("check", self.log).returncode, 0, run("check", self.log).stderr)
+        self.assertEqual(run("digest", self.log).returncode, 0)
+
+    def test_revert_by_root_with_root_decision_is_allowed(self):
+        self.append("revert", "sha=abc", "reverted_by=def", "reason=root-decision", "--by", "root")
+        e = self.events()[0]
+        self.assertEqual((e["by"], e["reason"]), ("root", "root-decision"))
+        self.assertEqual(run("check", self.log).returncode, 0)
+        # The daemon reasons stay valid for new appends too (reading legacy logs does not depend on it).
+        self.append("revert", "sha=abc", "reverted_by=def", "reason=ci-timeout")
+
+
+class OpenAndParkTests(Base):
+    def test_a_second_open_is_refused(self):
+        self.append(*OPEN)
+        r = self.append(*OPEN, ok=False)
         self.assertEqual(r.returncode, 2)
-        self.assertIn("LOOP.md", r.stderr)
+        self.assertIn("already has an open event", r.stderr)
+        self.assertEqual(len(self.events()), 1)
+
+    def test_a_second_open_is_refused_from_stdin_too(self):
+        self.append(*OPEN)
+        body = {"ev": "open", "goal_sha256": "b" * 64, "tier": "guarded", "root": "llm", "root_model": "m", "envelope": []}
+        r = self.append(stdin=json.dumps(body), ok=False)
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual(len(self.events()), 1)
+
+    def test_park_needs_budget(self):
+        self.append("park", "task=T1", "reason=out of budget", "needs=budget")
+        self.assertEqual(self.events()[0]["needs"], "budget")
+        self.assertEqual(run("check", self.log).returncode, 0)
+
+
+class BudgetCloseTests(Base):
+    REFUSAL = (
+        "close budget refused: the harness compacts automatically. Budget needs a recorded quota or "
+        "compaction failure; continue the next admissible task."
+    )
+
+    def setUp(self):
+        super().setUp()
+        self.run_dir = os.path.join(self.repo, "run")
+        os.makedirs(self.run_dir)
+
+    def mark_proto(self):
+        with open(os.path.join(self.run_dir, "loop-pi-proto"), "w", encoding="utf-8") as fh:
+            fh.write("2\n")
+
+    def facts(self, *kinds):
+        with open(os.path.join(self.run_dir, "harness-facts.jsonl"), "w", encoding="utf-8") as fh:
+            for kind in kinds:
+                fh.write(json.dumps({"v": 1, "ts": "2026-10-04T00:00:00Z", "kind": kind, "session": "s", "detail": "d"}) + "\n")
+
+    def close_budget(self, *extra, env=None):
+        return run("append", self.log, "close", "reason=budget", *extra, env=env)
+
+    def test_refused_under_the_marker_without_a_fact_via_env(self):
+        self.mark_proto()
+        r = self.close_budget(env={"LOOP_PI_RUN_DIR": self.run_dir})
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn(self.REFUSAL, r.stderr)
         self.assertFalse(os.path.exists(self.log))
 
-    def test_refuses_each_unmet_key(self):
-        for key, value in (("tier", "guarded"), ("release-on-push", "yes"), ("deploy-on-push", "yes")):
-            self.loop_md(**{key: value})
-            r = self.append(*self.LAND, ok=False)
-            self.assertEqual(r.returncode, 2, key)
-            self.assertIn("`%s:" % key, r.stderr)
-        self.assertFalse(os.path.exists(self.log))
-
-    def test_refuses_baseline_red(self):
-        self.loop_md(**{"baseline-red": "T9 - main fails the lint leg"})
-        r = self.append(*self.LAND, ok=False)
+    def test_refused_via_the_run_dir_option(self):
+        self.mark_proto()
+        r = self.close_budget("--run-dir", self.run_dir)
         self.assertEqual(r.returncode, 2)
-        self.assertIn("`baseline-red", r.stderr)
-        self.assertFalse(os.path.exists(self.log))
+        self.assertIn(self.REFUSAL, r.stderr)
 
-    def test_accepts_eligible_repo_and_ignores_after_green(self):
-        self.loop_md(**{"release-on-push": "no"})
-        self.append(*self.LAND)
-        self.assertEqual(self.events()[0]["mode"], "pre-green")
-        self.loop_md(tier="guarded")
-        self.append("land", "task=T2", "sha=abc", "gate=g", "mode=after-green")
-        self.assertEqual(len(self.events()), 2)
+    def test_a_context_overflow_fact_alone_does_not_license_it(self):
+        self.mark_proto()
+        self.facts("context-overflow")
+        self.assertEqual(self.close_budget("--run-dir", self.run_dir).returncode, 2)
 
-    def test_log_outside_codex_dir_is_refused(self):
-        self.loop_md()
-        r = run("append", os.path.join(self.repo, "state.jsonl"), *self.LAND)
-        self.assertEqual(r.returncode, 2)
-        self.assertIn("codex", r.stderr)
+    def test_allowed_with_a_compaction_failed_or_quota_exhausted_fact(self):
+        self.mark_proto()
+        for kind in ("compaction-failed", "quota-exhausted"):
+            if os.path.exists(self.log):
+                os.remove(self.log)
+            self.facts("context-overflow", kind)
+            r = self.close_budget("--run-dir", self.run_dir)
+            self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_without_the_marker_budget_close_is_as_before(self):
+        self.assertEqual(self.close_budget("--run-dir", self.run_dir).returncode, 0)
+        os.remove(self.log)
+        self.assertEqual(self.close_budget().returncode, 0)
+
+    def test_other_close_reasons_are_not_affected(self):
+        self.mark_proto()
+        r = run("append", self.log, "close", "reason=blocked", "--run-dir", self.run_dir)
+        self.assertEqual(r.returncode, 0, r.stderr)
 
 
 class CheckTests(Base):
