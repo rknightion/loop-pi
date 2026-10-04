@@ -166,3 +166,79 @@ test("a real lane yields dispatch and return events through the subagent tool", 
     await session.close();
   }
 });
+
+test("S6: a 3.37 MB lane return reaches the root at 16 KB or less with its lane-return block, and the return event keeps its fields", async () => {
+  const s = scaffold();
+  const runDir = freshDir("loop-state-e2e-run-");
+  mkdirSync(join(s.agentDir, "agents"), { recursive: true });
+  writeFileSync(
+    join(s.agentDir, "settings.json"),
+    JSON.stringify({ packages: [PI_SUBAGENTS_PACKAGE_DIR], subagents: { agentExcludeDirs: ["~/.agents"] } }),
+  );
+  writeFileSync(
+    join(s.agentDir, "agents", "lane-worker.md"),
+    ["---", "name: lane-worker", "description: Test lane worker", "tools: bash", "extensions: []", `subagentOnlyExtensions: ${FAUX_EXTENSION}`, "model: faux/faux-1", "---", "", "worker"].join("\n"),
+  );
+  const block =
+    '```lane-return\n{"v":2,"lane":"L9","status":"complete","sha":null,"landed":false,"base":"b","check":"just check","exit":0,"tail":"ok","ci":null,"coderabbit":null,"questions":[]}\n```';
+  // The block comes first and every gate log after it, as in the oversized return that overflowed a root.
+  const huge = `Finished.\n${block}\n${"gate output line 0123456789 abcdefghijklmnopqrstuvwxyz\n".repeat(62_000)}END_OF_RETURN`;
+  assert.ok(Buffer.byteLength(huge) > 3_370_000);
+  const fauxScript = writeFauxScript([
+    { match: "SPAWN_LANE", once: true, toolCalls: [{ name: "subagent", args: { agent: "lane-worker", task: "Lane: L9 · Task: T9 · Tier: routine\nObjective: CHILD_HUGE_MARKER" } }] },
+    { match: "CHILD_HUGE_MARKER", once: true, text: huge },
+    { match: ".*", text: "ok" },
+  ]);
+  const previous = process.env.LOOP_PI_RUN_DIR;
+  process.env.LOOP_PI_RUN_DIR = runDir;
+  const session = startPiRpc({
+    extensions: [FAUX_EXTENSION, STATE_EXTENSION, s.stub],
+    fauxScriptPath: fauxScript,
+    agentDir: s.agentDir,
+    subagentTempRoot: freshDir("loop-state-e2e-sub-"),
+    cwd: s.repo,
+    sessionArgs: [],
+    extraArgs: ["--exclude-tools", "subagents_enable"],
+  });
+  if (previous === undefined) delete process.env.LOOP_PI_RUN_DIR;
+  else process.env.LOOP_PI_RUN_DIR = previous;
+  try {
+    session.send({ id: "p1", type: "prompt", message: "SPAWN_LANE please" });
+    const notify = await session.waitFor(
+      (e) => e.type === "message_end" && (e.message as { customType?: string })?.customType === "subagent-notify",
+      90_000,
+    );
+    const content = (notify.message as { content: string }).content;
+    assert.equal(typeof content, "string");
+    assert.ok(Buffer.byteLength(content) <= 16_384, `the root received ${Buffer.byteLength(content)} bytes`);
+    assert.ok(content.includes(block), "the lane-return block is intact");
+    assert.ok(content.includes("END_OF_RETURN"), "the tail is kept");
+    const marker = /^\[\.\.\. (\d+) bytes omitted; full return: (\S+) \.\.\.\]$/m.exec(content);
+    assert.ok(marker, "the marker line names the omitted bytes and the full return");
+    const full = readFileSync(marker[2], "utf8");
+    assert.ok(full.includes(huge), "the full return is kept on disk");
+    assert.ok(marker[2].startsWith(join(runDir, "returns") + "/"), marker[2]);
+
+    session.send({ id: "m1", type: "get_messages" });
+    const reply = await session.waitFor((e) => e.type === "response" && e.id === "m1");
+    const kept = (reply.data as { messages: { role: string; customType?: string; content?: unknown }[] }).messages.find(
+      (m) => m.role === "custom" && m.customType === "subagent-notify",
+    );
+    assert.ok(kept && Buffer.byteLength(String(kept.content)) <= 16_384, "the session keeps the capped message, not the full one");
+
+    const ret = await waitForCondition(() => {
+      try {
+        const rows = readFileSync(s.log, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+        return rows.find((r) => r.ev === "return");
+      } catch {
+        return undefined;
+      }
+    }, 30_000, 250);
+    assert.deepEqual(
+      { lane: ret.lane, status: ret.status, check: ret.check, exit: ret.exit, landed: ret.landed },
+      { lane: "L9", status: "complete", check: "just check", exit: 0, landed: false },
+    );
+  } finally {
+    await session.close();
+  }
+});

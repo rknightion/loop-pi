@@ -8,7 +8,7 @@ export const STATE_CUSTOM_TYPE = "loop-continuation-state";
 export const NUDGE_CUSTOM_TYPE = "loop-continuation";
 
 /** Custom message types that start a root turn by pushing new work (SEAMS.md "Names and paths"). */
-export const PUSH_CUSTOM_TYPES: ReadonlySet<string> = new Set(["subagent-notify", "loop-watch", "loop-wake"]);
+export const PUSH_CUSTOM_TYPES: ReadonlySet<string> = new Set(["subagent-notify", "loop-watch", "loop-wake", "loop-closeout-audit"]);
 
 export const MAX_NUDGES = 3;
 
@@ -44,6 +44,10 @@ export interface ContinuationState {
   opsPath?: string | null;
   /** The ops grants frozen at launch. null: no ops line, or one that was rejected. */
   ops?: OpsGrants | null;
+  /** The audit grants copy frozen into the run dir at arm (S2), or null. */
+  auditGrantsPath?: string | null;
+  /** The sha256 the launch's `Audit grants:` line stated and the frozen copy matched, or null. */
+  auditGrantsSha256?: string | null;
 }
 
 export const INITIAL_STATE: ContinuationState = {

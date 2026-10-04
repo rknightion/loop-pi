@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { parseLaneReturn, parseTriage, retryAgent, taskBrief } from "./brief.ts";
 import { globsIntersect, guardedHits, ownedOverlap, ownedWithin } from "./glob.ts";
-import { dispatcherEligible, parseGoal, parseLoopMd, preGreenEligible, type TaskSpec } from "./goal.ts";
+import { dispatcherEligible, parseGoal, parseLoopMd, type TaskSpec } from "./goal.ts";
 import { backlogTitle, completionText, onCloseCommands, runFailed } from "./index.ts";
 import { parseLaunch, stateLogFor } from "./launch.ts";
 import { parseBrief } from "../loop-state/core.ts";
@@ -127,37 +127,11 @@ test("dispatcherEligible refuses each failing condition with a reason", () => {
   assert.match(reasons(goalText([...three.slice(0, 2), row("T3", "c/**", "returns candidate")])), /T3: landing is 'returns candidate'/);
   assert.match(reasons(goalText([...three.slice(0, 2), row("T3", "c/**", "lands-after-green", "lane-worker")])), /needs a -push agent/);
   assert.match(reasons(goalText([...three.slice(0, 2), row("T3", "c/**", "lands-after-green", "lane-worker-push", "guarded")])), /T3: tier guarded/);
-  assert.match(reasons(goalText([...three.slice(0, 2), row("T3", "c/**", "lands-pre-green")]), "tier: routine\nrelease-on-push: yes\n"), /not land-before-green eligible/);
+  // lands-pre-green was removed from the protocol: refused even in a repo that once qualified for it.
+  assert.match(reasons(goalText([...three.slice(0, 2), row("T3", "c/**", "lands-pre-green")])), /T3: landing is 'lands-pre-green', not lands-after-green/);
   assert.match(reasons(goalText(three), `${ROUTINE_LOOP}baseline-red: T9 - main fails the lint leg\n`), /LOOP\.md carries `baseline-red:/);
   assert.match(reasons(goalText(three, { header: "| task | owned files | gate |" })), /Envelope columns/);
   assert.match(reasons(goalText([...three.slice(0, 2), "| T3 | x | c/** |"])), /row has 3 cells/);
-});
-
-const LOOP_STATE = fileURLToPath(new URL("../../bin/loop-state", import.meta.url));
-
-test("the dispatcher and loop-state read LOOP.md identically for a pre-green land", () => {
-  const variants = [
-    ROUTINE_LOOP,
-    ROUTINE_LOOP.replace("release-on-push: no", "release-on-push: no (tags only)"),
-    ROUTINE_LOOP.replace("deploy-on-push: no", "deploy-on-push: no  # for now"),
-    ROUTINE_LOOP.replace("tier: routine", "tier : routine"),
-    ROUTINE_LOOP.replace("deploy-on-push: no", "Deploy-On-Push: no"),
-    `${ROUTINE_LOOP}\n## Traps\nrelease-on-push: yes\n`,
-    ROUTINE_LOOP.replace("release-on-push: no", "release-on-push: yes"),
-    `${ROUTINE_LOOP}baseline-red: T9 - main fails the lint leg\n`,
-  ];
-  for (const text of variants) {
-    const repo = mkdtempSync(join(tmpdir(), "loop-md-parity-"));
-    try {
-      mkdirSync(join(repo, "codex"));
-      writeFileSync(join(repo, "LOOP.md"), text);
-      const log = join(repo, "codex", "state-x-loop1.jsonl");
-      const r = spawnSync("python3", [LOOP_STATE, "append", log, "land", "task=T1", "sha=abc", "gate=g", "mode=pre-green"], { encoding: "utf8" });
-      assert.equal(preGreenEligible(parseLoopMd(text)), r.status === 0, `LOOP.md:\n${text}\nloop-state: exit ${r.status} ${r.stderr}`);
-    } finally {
-      rmSync(repo, { recursive: true, force: true });
-    }
-  }
 });
 
 // ---------------------------------------------------------------- briefs and returns
@@ -245,10 +219,8 @@ class FakePorts implements Ports {
   /** Files changed on main between two SHAs; keyed "base..tip". */
   changed = new Map<string, string[]>();
   notOnMain = new Set<string>();
-  refusePreGreen = false;
   private n = 0;
   async append(event: Record<string, unknown>) {
-    if (this.refusePreGreen && event.ev === "land" && event.mode === "pre-green") throw new Error("loop-state refused land: LOOP.md needs `release-on-push: no`");
     this.events.push(event);
     this.calls.push(`append:${event.ev}`);
   }
@@ -465,18 +437,14 @@ test("a composed gate is green only for a parsed complete return with exit 0 on 
   }
 });
 
-test("a pre-green land loop-state refuses is still recorded, as an after-green land plus a park, and stops new work", SCHED, async () => {
+test("every land is recorded after-green; a lands-pre-green spec never yields a pre-green land", SCHED, async () => {
   const ports = new FakePorts();
-  ports.refusePreGreen = true;
   const d = new Dispatcher(plan([spec("T1", ["a/**"], { landing: "lands-pre-green" }), spec("T2", ["b/**"]), spec("T3", ["c/**"])], 1), ports);
-  const closed = d.start();
+  void d.start();
   await d.settled();
   await finish(d, ports, "r1", landed("s1"));
   assert.deepEqual(ports.ofEv("land").map((e) => [e.task, e.sha, e.mode]), [["T1", "s1", "after-green"]]);
-  assert.deepEqual(ports.ofEv("park").map((e) => [e.task, e.needs]), [["T1", "owner"]]);
-  assert.match(ports.ofEv("park")[0].reason, /pre-green/);
-  assert.equal(await closed, "blocked");
-  assert.equal(ports.spawns.length, 1, "no new work after the refusal");
+  assert.deepEqual(ports.ofEv("park"), []);
 });
 
 test("a refused spawn parks the task; a landed SHA missing from main parks instead of gating", SCHED, async () => {
@@ -746,4 +714,29 @@ test("completion text prefers the run's output, then the summary; backlog titles
   assert.equal(runFailed({ results: [{ success: true, outputPartial: true }] }), true);
   assert.equal(backlogTitle("File: x\n\nTask T-1 - Fix the thing\n=====\n"), "Fix the thing");
   assert.equal(backlogTitle("nothing"), undefined);
+});
+
+test("S6: the dispatcher caps an oversized subagent-notify at message_end and keeps the full text in the run dir", async () => {
+  const runDir = mkdtempSync(join(tmpdir(), "dispatch-cap-"));
+  const previous = process.env.LOOP_PI_RUN_DIR;
+  process.env.LOOP_PI_RUN_DIR = runDir;
+  try {
+    const handlers = new Map<string, (e: any, c: any) => any>();
+    const { default: dispatcher } = await import("./index.ts");
+    dispatcher({ on: (n: string, h: any) => handlers.set(n, h), registerProvider: () => undefined, events: { on: () => () => undefined, emit: () => undefined } } as any);
+    const block = '```lane-return\n{"v":2,"lane":"L1","status":"complete","sha":"abc","landed":true}\n```';
+    const text = `Background task completed: **lane-worker-push**\n\n${block}\n${"log line\n".repeat(400_000)}\nRetention-managed async directory: /t/async-subagent-runs/run-77`;
+    const message = { role: "custom", customType: "subagent-notify", content: text, display: false };
+    const result = handlers.get("message_end")!({ type: "message_end", message }, {});
+    assert.ok(result?.message, "the oversized notify is replaced");
+    assert.equal(result.message.role, "custom");
+    assert.ok(Buffer.byteLength(result.message.content) <= 16_384);
+    assert.ok(result.message.content.includes(block));
+    assert.equal(readFileSync(join(runDir, "returns", "run-77.md"), "utf8"), text);
+    assert.equal(handlers.get("message_end")!({ type: "message_end", message: { ...message, content: "small" } }, {}), undefined);
+  } finally {
+    if (previous === undefined) delete process.env.LOOP_PI_RUN_DIR;
+    else process.env.LOOP_PI_RUN_DIR = previous;
+    rmSync(runDir, { recursive: true, force: true });
+  }
 });

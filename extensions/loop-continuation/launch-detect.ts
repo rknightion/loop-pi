@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { type AuditLine, parseAuditLine } from "./audit-grants.ts";
 import { type OpsLine, parseOpsLine } from "./ops-grants.ts";
 
 // Ported from the author's loop_launch.py (frozen spec: seam v2.1 section 1),
@@ -21,9 +22,13 @@ export interface LaunchInfo {
   launchTs: string;
 }
 
-/** A recognised launch plus what its text says about ops grants (never persisted as part of LaunchInfo). */
+/** A recognised launch plus what its text says about ops and audit grants and its goal (never
+ *  persisted as part of LaunchInfo). */
 export interface ParsedLaunch extends LaunchInfo {
   opsLine: OpsLine;
+  auditLine: AuditLine;
+  /** The goal file: the one `codex/goal-*-loop<N>.md` the launch names, else the report's sibling. */
+  goal: string;
 }
 
 const MARKER_RE = /\bYou are the (?:campaign )?root\b/;
@@ -41,19 +46,32 @@ const LEFT = "(?:^|(?<=[\\s`'\"(]))";
 const RIGHT = "(?:$|(?=[\\s`'\")\\,;:])|(?=\\.(?:\\s|$)))";
 
 const TOKEN_RE = new RegExp(LEFT + "(" + PREFIX + NAME_V2 + ")" + RIGHT, "g");
+const GOAL_TOKEN_RE = new RegExp(LEFT + "(" + PREFIX + "goal-[\\w.-]*-loop\\d+\\.md)" + RIGHT, "g");
 const LOOP_SUFFIX_RE = /-loop(\d+)\.md$/;
 const BARE_LAUNCH_NAME_RE = /^launch-.*\.(?:txt|md)$/;
 
-function findReportTokens(text: string): string[] {
+function findTokens(text: string, re: RegExp): string[] {
   const tokens: string[] = [];
-  // Reset lastIndex: TOKEN_RE is a module-level `g` regex reused across calls.
-  TOKEN_RE.lastIndex = 0;
+  // Reset lastIndex: the token regexes are module-level `g` regexes reused across calls.
+  re.lastIndex = 0;
   let m: RegExpExecArray | null;
-  while ((m = TOKEN_RE.exec(text)) !== null) {
+  while ((m = re.exec(text)) !== null) {
     tokens.push(m[1]);
-    if (m.index === TOKEN_RE.lastIndex) TOKEN_RE.lastIndex++; // guard a zero-width match
+    if (m.index === re.lastIndex) re.lastIndex++; // guard a zero-width match
   }
   return tokens;
+}
+
+function findReportTokens(text: string): string[] {
+  return findTokens(text, TOKEN_RE);
+}
+
+/** The goal a launch names (one distinct `codex/goal-*-loop<N>.md`), else the report's sibling goal file. */
+function goalFor(text: string, base: string | null, report: string): string {
+  const named = singleTarget(findTokens(text, GOAL_TOKEN_RE), base);
+  if (named) return named.report;
+  const slash = report.lastIndexOf("/");
+  return report.slice(0, slash + 1) + report.slice(slash + 1).replace(/^report-/, "goal-");
 }
 
 function extractLoop(token: string): number | null {
@@ -87,7 +105,8 @@ function resolveToken(token: string, base: string | null): string {
   return normalizePath(base.replace(/\/+$/, "") + "/" + rel);
 }
 
-/** Resolve every token against `base`; return the single distinct target, or null for 0 or 2+. */
+/** Resolve every token against `base`; return the single distinct target, or null for 0 or 2+.
+ *  (`loop` is read from a report-shaped name; callers resolving a goal token use `report` only.) */
 function singleTarget(tokens: string[], base: string | null): { report: string; loop: number | null } | null {
   const absolutes = tokens.filter((t) => t.startsWith("/")).map(normalizePath);
   const targets = new Map<string, string>(); // resolved path -> original token (first wins)
@@ -155,7 +174,14 @@ export function parseLaunch(
 
   const direct = recognize(text, cwd || null);
   if (direct !== null) {
-    return { report: direct.report, loop: direct.loop, launchTs, opsLine: parseOpsLine(text) };
+    return {
+      report: direct.report,
+      loop: direct.loop,
+      launchTs,
+      opsLine: parseOpsLine(text),
+      auditLine: parseAuditLine(text),
+      goal: goalFor(text, cwd || null, direct.report),
+    };
   }
 
   const candidate = bareCandidatePath(text);
@@ -175,7 +201,15 @@ export function parseLaunch(
   // A relative report inside the launch file resolves against the parent of the codex/
   // directory holding the launch file. Outside any codex/ directory there is no base, so the
   // file must name an absolute report path.
-  const inner = recognize(content, codexDirParent(launchPath));
+  const base = codexDirParent(launchPath);
+  const inner = recognize(content, base);
   if (inner === null || !inner.report.startsWith("/")) return null;
-  return { report: inner.report, loop: inner.loop, launchTs, opsLine: parseOpsLine(content) };
+  return {
+    report: inner.report,
+    loop: inner.loop,
+    launchTs,
+    opsLine: parseOpsLine(content),
+    auditLine: parseAuditLine(content),
+    goal: goalFor(content, base, inner.report),
+  };
 }

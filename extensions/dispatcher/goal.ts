@@ -141,7 +141,7 @@ export function composedGate(goal: Goal, loop: LoopMd): string | undefined {
 /** The key: value lines that open LOOP.md, up to the first `## ` heading; the first of a key wins.
  *  This is exactly loop-state's reading (`read_loop_md_keys` in bin/loop-state): the value is the
  *  rest of the line with its surrounding blanks trimmed and nothing else removed, so
- *  `release-on-push: no (tags only)` is not `no`. A test runs both readers on the same files. */
+ *  `release-on-push: no (tags only)` is not `no`. */
 export function parseLoopMd(text: string | null | undefined): LoopMd {
   const keys: Record<string, string> = {};
   for (const line of (text ?? "").split(/\r?\n/)) {
@@ -161,20 +161,6 @@ export function guardedExtra(loop: LoopMd): string[] {
   return splitList(loop.keys["guarded-paths"] ?? "");
 }
 
-/** S4: land-before-green needs a routine repo that neither releases nor deploys on push and whose
- *  LOOP.md carries no `baseline-red` (a main known to be red). The
- *  fourth leg, `ci-required` matching the branch-protection required checks, is loop-lint's: it
- *  reads them through `gh api` when the goal and LOOP.md are written. Neither this check nor
- *  loop-state's (which is offline) repeats it. */
-export function preGreenEligible(loop: LoopMd): boolean {
-  return (
-    loop.keys.tier === "routine" &&
-    loop.keys["release-on-push"] === "no" &&
-    loop.keys["deploy-on-push"] === "no" &&
-    !Object.hasOwn(loop.keys, "baseline-red")
-  );
-}
-
 /** The tier a task runs at: guarded when its owned files touch the guarded set (S4 decision 4),
  *  else its Envelope tier, else the repo's. */
 export function effectiveTier(task: TaskSpec, loop: LoopMd, files: readonly string[] = []): string {
@@ -192,7 +178,8 @@ export interface Eligibility {
 }
 
 /** S7 planner predicate: a dispatcher root only when every task is routine with owned files, an
- *  acceptance check, a gate and `lands-*` landing; no ops grant; at least three tasks; and LOOP.md
+ *  acceptance check, a gate and `lands-after-green` landing (`lands-pre-green` is no longer a landing
+ *  value); no ops grant; at least three tasks; and LOOP.md
  *  carries no `baseline-red`, whose base-versus-integrated gate judgement only an LLM root makes.
  *  The Envelope table has no dependency column, so file order (overlapping owned files run in table
  *  order) is the only ordering there is. Pure: takes the goal and LOOP.md text (or their parsed forms) and,
@@ -218,13 +205,10 @@ export function dispatcherEligible(
     if (!t.owned.length) reasons.push(`${t.id}: no owned files`);
     if (!t.gate) reasons.push(`${t.id}: no gate`);
     if (!t.agent) reasons.push(`${t.id}: no agent route`);
-    if (t.landing !== "lands-after-green" && t.landing !== "lands-pre-green") {
-      reasons.push(`${t.id}: landing is '${t.landing || "missing"}', not lands-after-green or lands-pre-green`);
+    if (t.landing !== "lands-after-green") {
+      reasons.push(`${t.id}: landing is '${t.landing || "missing"}', not lands-after-green`);
     } else if (t.agent && !canPush(t.agent)) {
       reasons.push(`${t.id}: landing ${t.landing} needs a -push agent, not ${t.agent}`);
-    }
-    if (t.landing === "lands-pre-green" && !preGreenEligible(loop)) {
-      reasons.push(`${t.id}: lands-pre-green in a repo that is not land-before-green eligible`);
     }
     const hits = guardedHits(t.owned, guardedExtra(loop), files);
     if (hits.length) reasons.push(`${t.id}: owned files touch guarded paths (${hits.join(", ")})`);

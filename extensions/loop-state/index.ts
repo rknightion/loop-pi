@@ -5,6 +5,11 @@
 // `report-` replaced by `state-` and `.md` by `.jsonl`). Every append goes through the
 // `loop-state` CLI, so validation, seq and locking stay in one place. A failure here warns and
 // never blocks a tool call.
+//
+// It also caps oversized lane returns (S6, return-cap.ts): a `subagent-notify` message over 16 KB is
+// replaced at `message_end`, before pi persists it, and the `context` hook caps any that reached the
+// session another way (an older session, a delivery path without `message_end`). The `return` event
+// is parsed from the async-complete payload, which holds the full text and is never rewritten.
 
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -12,6 +17,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { type Brief, deriveLogPath, failedRunBlock, parseBrief, parseLaneReturn, returnEvent, runFailed, runIdFromText } from "./core.ts";
+import { capNotifyMessage, contentText, NOTIFY_CUSTOM_TYPE, RETURN_CAP_BYTES } from "./return-cap.ts";
 
 export const DIGEST_CUSTOM_TYPE = "loop-state-digest";
 const CLI_TIMEOUT_MS = 10_000;
@@ -200,6 +206,35 @@ export default function (pi: ExtensionAPI) {
     logPath = null;
     // Let loop-continuation restore its launch state first.
     setImmediate(() => enqueue(injectDigest));
+  });
+
+  pi.on("message_end", (event) => {
+    try {
+      const replacement = capNotifyMessage(event.message as { role?: string; customType?: string; content?: unknown }, process.env.LOOP_PI_RUN_DIR);
+      if (replacement) return { message: replacement as typeof event.message };
+    } catch (error) {
+      warn(`return cap: ${String(error)}`);
+    }
+    return undefined;
+  });
+
+  pi.on("context", (event) => {
+    try {
+      let changed = false;
+      const messages = event.messages.map((message) => {
+        const m = message as { role?: string; customType?: string; content?: unknown };
+        if (m.role !== "custom" || m.customType !== NOTIFY_CUSTOM_TYPE) return message;
+        if (Buffer.byteLength(contentText(m.content), "utf8") <= RETURN_CAP_BYTES) return message;
+        const replacement = capNotifyMessage(m, process.env.LOOP_PI_RUN_DIR);
+        if (!replacement) return message;
+        changed = true;
+        return replacement as typeof message;
+      });
+      if (changed) return { messages };
+    } catch (error) {
+      warn(`return cap: ${String(error)}`);
+    }
+    return undefined;
   });
 
   pi.on("session_compact", (_event, ctx) => {

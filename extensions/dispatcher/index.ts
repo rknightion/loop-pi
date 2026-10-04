@@ -11,6 +11,9 @@
 // including dispatch and return, is written here with `by: dispatcher`; the loop-state extension is
 // not loaded in a dispatcher session.
 // Before `loopPi.onClose` it commits the backlog Done edits with `git commit -- backlog`, unpushed.
+// The completion pi-subagents injects for each lane is capped like a model root's (S6,
+// ../loop-state/return-cap.ts): the scheduler reads the full text from the async-complete payload,
+// and the session keeps only the capped message.
 
 import { execFile } from "node:child_process";
 import { randomUUID, createHash } from "node:crypto";
@@ -25,6 +28,7 @@ import { composedGate as findComposedGate, dispatcherEligible, effectiveTier, gu
 import { guardSpawn } from "./guard.ts";
 import { parseLaunch } from "./launch.ts";
 import { Dispatcher, type CloseReason, type Ports } from "./scheduler.ts";
+import { capNotifyMessage } from "../loop-state/return-cap.ts";
 
 export const IDLE_PROVIDER = "loop-dispatch";
 export const IDLE_MODEL = "idle";
@@ -127,6 +131,16 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_shutdown", () => {
     childRegistration?.dispose();
     childRegistration = undefined;
+  });
+
+  pi.on("message_end", (event) => {
+    try {
+      const replacement = capNotifyMessage(event.message as { role?: string; customType?: string; content?: unknown }, process.env.LOOP_PI_RUN_DIR);
+      if (replacement) return { message: replacement as typeof event.message };
+    } catch {
+      // The cap is best effort; an uncapped completion is never lost.
+    }
+    return undefined;
   });
 
   pi.events.on("subagent:async-complete", (data: any) => {

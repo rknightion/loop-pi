@@ -3,10 +3,11 @@
 // current PAUSED: line. No live model, no network; every temp dir is under os.tmpdir() and
 // cleaned up; the spawned pi process's stdin is closed so it never waits on a TTY.
 
-import { test } from "node:test";
+import { after, test } from "node:test";
+import { cleanupFixtures, loopFixture } from "./test-fixture.ts";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,20 +18,21 @@ const CLI = join(PI_ROOT, "node_modules", "@earendil-works", "pi-coding-agent", 
 const FAUX_EXTENSION = join(PI_ROOT, "extensions", "test-support", "faux-extension.ts");
 const LOOP_CONTINUATION_EXTENSION = HERE;
 
+after(cleanupFixtures);
+
 test("three ignored nudges release the root and write a home/cwd-attributed incident", async () => {
   const tmp = mkdtempSync(join(tmpdir(), "loop-continuation-incident-cli-"));
-  const cwd = join(tmp, "cwd");
-  const home = join(tmp, "home");
-  mkdirSync(cwd, { recursive: true });
-  mkdirSync(home, { recursive: true });
+  const f = loopFixture();
+  const cwd = f.repo;
+  const home = f.agentDir;
   const script = join(tmp, "faux-script.json");
   writeFileSync(script, JSON.stringify({ rules: [
     { match: "You are the root", once: true, text: "Still working.", stopReason: "stop" },
     { match: "TURN ENDINGS", text: "Still working.", stopReason: "stop" },
   ] }));
-  const rpc = startRpc(cwd, script, home);
+  const rpc = startRpc(cwd, script, home, f.runDir);
   try {
-    rpc.send({ id: "launch", type: "prompt", message: "You are the root. Report at codex/report-x-loop1.md when finished." });
+    rpc.send({ id: "launch", type: "prompt", message: f.launch });
     await rpc.waitFor((e) => e.type === "agent_settled");
     const nudges = rpc.events.filter((e: any) => e.type === "entry_appended" && e.entry?.customType === "loop-continuation");
     assert.equal(nudges.length, 3);
@@ -57,7 +59,7 @@ interface Rpc {
   close(): Promise<number | null>;
 }
 
-function startRpc(cwd: string, faux_script: string, home: string): Rpc {
+function startRpc(cwd: string, faux_script: string, home: string, runDir: string): Rpc {
   const proc = spawn(
     process.execPath,
     [
@@ -79,6 +81,7 @@ function startRpc(cwd: string, faux_script: string, home: string): Rpc {
       env: {
         ...process.env,
         PI_CODING_AGENT_DIR: home,
+        LOOP_PI_RUN_DIR: runDir,
         PI_OFFLINE: "1",
         PI_SKIP_VERSION_CHECK: "1",
         PI_TELEMETRY: "0",
@@ -164,10 +167,7 @@ function startRpc(cwd: string, faux_script: string, home: string): Rpc {
 
 test("an armed root that stops with plain text gets exactly one nudge, then releases on PAUSED:", async () => {
   const tmp = mkdtempSync(join(tmpdir(), "loop-continuation-cli-"));
-  const cwd = join(tmp, "cwd");
-  const home = join(tmp, "home");
-  mkdirSync(cwd, { recursive: true });
-  mkdirSync(home, { recursive: true });
+  const f = loopFixture();
 
   const fauxScript = join(tmp, "faux-script.json");
   writeFileSync(
@@ -189,12 +189,12 @@ test("an armed root that stops with plain text gets exactly one nudge, then rele
     }),
   );
 
-  const rpc = startRpc(cwd, fauxScript, home);
+  const rpc = startRpc(f.repo, fauxScript, f.agentDir, f.runDir);
   try {
     rpc.send({
       id: "launch",
       type: "prompt",
-      message: "You are the root. Report at codex/report-x-loop1.md when finished.",
+      message: f.launch,
     });
 
     const promptResponse = await rpc.waitFor((e) => e.type === "response" && e.command === "prompt");
@@ -226,6 +226,35 @@ test("an armed root that stops with plain text gets exactly one nudge, then rele
       });
     assert.equal(assistantTexts.length, 2, "expected two assistant turns: the stall, then the paused reply");
     assert.match(assistantTexts[1], /PAUSED: waiting on the owner/);
+  } finally {
+    await rpc.close();
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("S3: a refused arm returns handled from input, so no model turn runs, and the reason reaches the user", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "loop-continuation-refused-cli-"));
+  const f = loopFixture();
+  const script = join(tmp, "faux-script.json");
+  writeFileSync(script, JSON.stringify({ rules: [{ match: ".*", text: "A MODEL TURN RAN", stopReason: "stop" }] }));
+  // A run dir that does not exist: the launcher never made one.
+  const rpc = startRpc(f.repo, script, f.agentDir, join(tmp, "no-run-dir"));
+  try {
+    rpc.send({ id: "launch", type: "prompt", message: f.launch });
+    const response = await rpc.waitFor((e) => e.type === "response" && e.id === "launch");
+    assert.equal(response.success, true);
+    const notice = await rpc.waitFor((e) => e.type === "extension_ui_request" && e.method === "notify" && /did not arm this root/.test(String(e.message)));
+    assert.equal(notice.notifyType, "error");
+    assert.match(String(notice.message), /does not exist/);
+    // Give a turn every chance to start before asserting none did.
+    rpc.send({ id: "state", type: "get_state" });
+    await rpc.waitFor((e) => e.type === "response" && e.id === "state");
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    assert.equal(rpc.events.filter((e: any) => e.type === "message_end" && e.message?.role === "assistant").length, 0, "no model turn ran");
+    assert.equal(rpc.events.filter((e: any) => e.type === "agent_start").length, 0);
+    const incidents = readdirSync(join(f.agentDir, "incidents", "root"));
+    assert.equal(incidents.length, 1);
+    assert.match(incidents[0], /-arm-refused\.json$/);
   } finally {
     await rpc.close();
     rmSync(tmp, { recursive: true, force: true });

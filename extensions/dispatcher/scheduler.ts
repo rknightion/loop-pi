@@ -288,7 +288,7 @@ export class Dispatcher {
     const t = this.tasks.get(lane.tasks[0])!;
     if (lane.kind === "work" && reported.landed && reported.sha && (failed || reported.status !== "complete")) {
       // The lane may have pushed without finishing: that commit is ungated, and a retry or an overlapping
-      // task would build on it. A parked task holds no files, so stop new work as a refused pre-green land does.
+      // task would build on it. A parked task holds no files, so stop new work.
       let where = "main not checked";
       try {
         const tip = await this.ports.remoteSha();
@@ -309,21 +309,7 @@ export class Dispatcher {
       t.sha = r.sha;
       t.status = "awaiting-gate";
       const land = { ev: "land", task: t.spec.id, sha: r.sha, gate: r.check || t.spec.gate, lane: lane.lane, ...(r.ci ? { ci: r.ci } : {}) };
-      if (t.spec.landing !== "lands-pre-green") {
-        await this.ports.append({ ...land, mode: "after-green" });
-        return;
-      }
-      try {
-        await this.ports.append({ ...land, mode: "pre-green" });
-      } catch (error) {
-        // loop-state found the repo not land-before-green eligible, but the commit is already pushed.
-        // Record it anyway so the log (and every watcher reading it) holds the SHA, park the task for
-        // its owner, and stop new work: further pre-green lanes would push into the same repo.
-        const why = error instanceof Error ? error.message : String(error);
-        await this.ports.append({ ...land, mode: "after-green" });
-        await this.park(t, "owner", `landed pre-green at ${r.sha}, but the pre-green land was refused (${why}); recorded as after-green, never gated`, lane.lane);
-        this.halt();
-      }
+      await this.ports.append({ ...land, mode: "after-green" });
       return;
     }
     if (lane.kind === "work" && !(r.status === "complete" && r.landed && r.sha)) {
