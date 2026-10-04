@@ -810,6 +810,7 @@ test("C3_AGENTS matches SEAMS.md exactly", () => {
       "lane-worker-low-push",
       "triager",
       "ops",
+      "ops-probe",
     ].sort(),
   );
 });
@@ -970,3 +971,145 @@ for (const r of REAL_LANE_BLOCKS) {
     assert.equal(decision.warning, undefined);
   });
 }
+
+// ---------------------------------------------------------------------------
+// Protocol 2 (SEAMS S0/S1/S8): refusals that apply only when the run dir carries `loop-pi-proto`
+// (`proto: true` in the guard context). Without the marker every command below keeps today's
+// verdict. `protectedPath` is the run-dir / authority predicate the extension entries build; here
+// a pure stand-in that refuses anything under a fake run dir.
+// ---------------------------------------------------------------------------
+
+const FAKE_RUN = "/runs/loop-a";
+const fakeProtected = (path: string): string | undefined =>
+  /^(\$LOOP_PI_RUN_DIR|\$\{LOOP_PI_RUN_DIR\})(\/|$)/.test(path) || path === FAKE_RUN || path.startsWith(`${FAKE_RUN}/`)
+    ? `loop-guard: '${path}' is inside the loop run dir, which only the harness writes.`
+    : undefined;
+const P2 = { proto: true, protectedPath: fakeProtected, cwd: "/repo" };
+const LEGACY = { proto: false, protectedPath: fakeProtected, cwd: "/repo" };
+
+const ROOT_LOOP_STATE_DENY = [
+  "loop-state append codex/state-a-loop1.jsonl land task=T-1 mode=after-green --by ext",
+  "loop-state append codex/state-a-loop1.jsonl park task=T-1 --by daemon",
+  "loop-state append codex/state-a-loop1.jsonl open goal_sha256=x --by=dispatcher",
+  "/home/user/.loop-pi-x/bin/loop-state append codex/state-a-loop1.jsonl close reason=budget --by=ext",
+  "python3 $HOME/.loop-pi-x/bin/loop-state append codex/state-a-loop1.jsonl revert sha=abc --by daemon",
+  "cd /repo && loop-state append codex/state-a-loop1.jsonl gate scope=lane sha=a cmd=x exit=0 --by ext",
+  "loop-state append codex/state-a-loop1.jsonl <<'EOF'\n{\"ev\":\"land\",\"task\":\"T-1\",\"by\":\"ext\"}\nEOF",
+  "echo '{\"ev\":\"close\",\"reason\":\"budget\",\"by\": \"daemon\"}' | loop-state append codex/state-a-loop1.jsonl",
+  "loop-state append codex/state-a-loop1.jsonl <<< '{\"ev\":\"land\",\"by\":\"root\"}'",
+];
+
+for (const command of ROOT_LOOP_STATE_DENY) {
+  test(`proto root: loop-state carrying a non-root --by or a stdin by field is refused: ${command.split("\n")[0]}`, () => {
+    const decision = evaluateBashCommand(command, "root", 0, true, P2);
+    assert.equal(decision.block, true, command);
+    assert.match(decision.reason ?? "", /loop-state/);
+  });
+  test(`legacy root (no marker): the same loop-state call keeps today's verdict: ${command.split("\n")[0]}`, () => {
+    assert.equal(evaluateBashCommand(command, "root", 0, true, LEGACY).block, false, command);
+  });
+}
+
+test("proto root: loop-state with --by root, no --by, a by word in a k=v text, digest and check stay allowed", () => {
+  for (const command of [
+    "loop-state append codex/state-a-loop1.jsonl land task=T-1 mode=after-green --by root",
+    "loop-state append codex/state-a-loop1.jsonl judgement text='decided by: the root'",
+    "loop-state append codex/state-a-loop1.jsonl <<'EOF'\n{\"ev\":\"judgement\",\"text\":\"x\"}\nEOF",
+    "loop-state digest codex/state-a-loop1.jsonl --json",
+    "loop-state check codex/state-a-loop1.jsonl",
+    "echo --by ext",
+  ]) {
+    assert.equal(evaluateBashCommand(command, "root", 0, true, P2).block, false, command);
+  }
+});
+
+const RUN_DIR_BASH_WRITES = [
+  "echo x > $LOOP_PI_RUN_DIR/push-log.jsonl",
+  "printf '%s\\n' '{}' >> ${LOOP_PI_RUN_DIR}/harness-facts.jsonl",
+  "echo 2 | tee $LOOP_PI_RUN_DIR/loop-pi-proto",
+  "cp /tmp/grants.json /runs/loop-a/audit-grants.json",
+  "mv /tmp/x.md /runs/loop-a/returns/run-1.md",
+  "mv /runs/loop-a/push-log.jsonl /tmp/old.jsonl",
+  "rm -f /runs/loop-a/push-log.jsonl",
+  "sed -i '' 's/a/b/' $LOOP_PI_RUN_DIR/push-log.jsonl",
+  "bash -c 'echo 1 > $LOOP_PI_RUN_DIR/loop-pi-proto'",
+];
+
+for (const command of RUN_DIR_BASH_WRITES) {
+  for (const role of ["root", "lane"] as Role[]) {
+    test(`proto ${role}: a bash write into the run dir is refused: ${command}`, () => {
+      const decision = evaluateBashCommand(command, role, 0, true, P2);
+      assert.equal(decision.block, true, command);
+      assert.match(decision.reason ?? "", /run dir/);
+    });
+    test(`legacy ${role}: a bash write into the run dir keeps today's verdict: ${command}`, () => {
+      assert.equal(evaluateBashCommand(command, role, 0, true, LEGACY).block, false, command);
+    });
+  }
+}
+
+test("proto: reading the run dir (cat, cp out of it, jq) is allowed for root and lanes", () => {
+  for (const command of [
+    "cat $LOOP_PI_RUN_DIR/push-log.jsonl",
+    "cp $LOOP_PI_RUN_DIR/push-log.jsonl /tmp/push-log.jsonl",
+    "jq -c . /runs/loop-a/harness-facts.jsonl > /tmp/facts.json",
+  ]) {
+    for (const role of ["root", "lane"] as Role[]) {
+      assert.equal(evaluateBashCommand(command, role, 0, true, P2).block, false, `${role}: ${command}`);
+    }
+  }
+});
+
+test("proto lane: gh pr merge is a release, refused without an ops grant", () => {
+  for (const command of ["gh pr merge 12 --squash", "gh -R o/r pr merge 12 --merge --delete-branch", "env GH_PROMPT_DISABLED=1 gh pr merge --auto 3"]) {
+    const decision = evaluateBashCommand(command, "lane", 0, true, P2);
+    assert.equal(decision.block, true, command);
+    assert.match(decision.reason ?? "", /gh pr merge/);
+    assert.equal(evaluateBashCommand(command, "root", 0, true, P2).block, false, `root: ${command}`);
+  }
+});
+
+test("legacy lane (no marker): gh pr merge keeps today's verdict", () => {
+  assert.equal(evaluateBashCommand("gh pr merge 12 --squash", "lane", 0, true, LEGACY).block, false);
+});
+
+test("proto lane: gh pr merge passes only on an ops release surface whose allow fully matches", () => {
+  const release = { surface: "release:svc", kind: "release", allow: ["gh pr merge [0-9]+ --squash"] };
+  const deploy = { surface: "deploy:svc", kind: "deploy", allow: ["gh pr merge [0-9]+ --squash"] };
+  assert.equal(evaluateBashCommand("gh pr merge 12 --squash", "lane", 0, true, { ...P2, ops: release }).block, false);
+  assert.equal(evaluateBashCommand("gh pr merge 12 --merge", "lane", 0, true, { ...P2, ops: release }).block, true);
+  const onDeploy = evaluateBashCommand("gh pr merge 12 --squash", "lane", 0, true, { ...P2, ops: deploy });
+  assert.equal(onDeploy.block, true);
+  assert.match(onDeploy.reason ?? "", /release/);
+});
+
+test("proto lane: gh pr view/list/checks stay allowed", () => {
+  for (const command of ["gh pr view 12 --json state", "gh pr list --state open", "gh pr checks 12"]) {
+    assert.equal(evaluateBashCommand(command, "lane", 0, true, P2).block, false, command);
+  }
+});
+
+test("proto lane: bash writes into codex/grants-* are refused, reads are not", () => {
+  for (const command of [
+    "echo '{}' > codex/grants-2026-10-04-loop3.json",
+    "jq . /tmp/g.json | tee codex/grants-2026-10-04-loop3.json",
+    "rm codex/grants-*.json",
+    "sed -i 's/a/b/' /repo/codex/grants-2026-10-04-loop3.json",
+  ]) {
+    const decision = evaluateBashCommand(command, "lane", 0, true, P2);
+    assert.equal(decision.block, true, command);
+    assert.match(decision.reason ?? "", /grants/);
+    assert.equal(evaluateBashCommand(command, "lane", 0, true, LEGACY).block, false, `legacy: ${command}`);
+  }
+  assert.equal(evaluateBashCommand("cat codex/grants-2026-10-04-loop3.json", "lane", 0, true, P2).block, false);
+  assert.equal(evaluateBashCommand("echo x > LOOP.md", "lane", 0, true, P2).block, false, "LOOP.md stays writable by lanes");
+});
+
+test("proto: an unparseable command still gets the run-dir and loop-state refusals (fallback scan)", () => {
+  const unparseable = "echo 'unterminated; echo x > $LOOP_PI_RUN_DIR/push-log.jsonl";
+  assert.equal(parseCommand(unparseable, "root"), null);
+  assert.equal(evaluateBashCommand(unparseable, "root", 0, true, P2).block, true);
+  const loopState = "loop-state append codex/state-a-loop1.jsonl land task=T --by ext 'oops";
+  assert.equal(parseCommand(loopState, "root"), null);
+  assert.equal(evaluateBashCommand(loopState, "root", 0, true, P2).block, true);
+});

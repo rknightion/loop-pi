@@ -342,3 +342,35 @@ function findChildSessionFile(dir: string): string | undefined {
   }
   return undefined;
 }
+
+test("(c) protocol 2 root: with the run dir marker, a write into the run dir and a long bash timeout are refused", async () => {
+  const runDir = freshDir("loop-guard-e2e-p2-run-");
+  writeFileSync(join(runDir, "loop-pi-proto"), "2\n");
+  const cwd = freshDir("loop-guard-e2e-p2-cwd-");
+  const session = startPiRpc({
+    extensions: [FAUX_EXTENSION, ROOT_EXTENSION],
+    fauxScriptPath: writeFauxScript([
+      { match: "P2_WRITE", once: true, toolCalls: [{ name: "write", args: { path: join(runDir, "push-log.jsonl"), content: "{}\n" } }] },
+      { match: "P2_TIMEOUT", once: true, toolCalls: [{ name: "bash", args: { command: "true", timeout: 3600 } }] },
+      { match: ".*", text: "ok" },
+    ]),
+    agentDir: freshDir("loop-guard-e2e-p2-agentdir-"),
+    subagentTempRoot: freshDir("loop-guard-e2e-p2-subtemp-"),
+    cwd,
+    env: { LOOP_PI_RUN_DIR: runDir },
+  });
+  try {
+    session.send({ id: "p1", type: "prompt", message: "P2_WRITE" });
+    const write = await session.waitFor((e) => e.type === "tool_execution_end" && e.toolName === "write");
+    assert.equal(write.isError, true, JSON.stringify(write));
+    assert.match(JSON.stringify(write.result), /inside the loop run dir/);
+    assert.equal(existsSync(join(runDir, "push-log.jsonl")), false);
+    await session.waitFor((e) => e.type === "agent_end");
+    session.send({ id: "p2", type: "prompt", message: "P2_TIMEOUT" });
+    const bash = await session.waitFor((e) => e.type === "tool_execution_end" && e.toolName === "bash");
+    assert.equal(bash.isError, true, JSON.stringify(bash));
+    assert.match(JSON.stringify(bash.result), /watch_start/);
+  } finally {
+    await session.close();
+  }
+});

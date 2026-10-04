@@ -2,10 +2,16 @@
 //
 // An ops grant comes only from the ops file frozen at launch by loop-continuation, answered on
 // `pi.events` `loop-continuation:query-launch` as `{reportPath, opsPath, ops}`. The root admits an
-// `ops` launch only for a surface in that file and binds the full entry into the child's
-// `loop-pi.guard/1` extension binding; the lane trusts nothing else. Pure: no pi imports, no I/O.
+// `ops` or `ops-probe` launch only for a surface in that file and binds the full entry into the
+// child's `loop-pi.guard/1` extension binding; the lane trusts nothing else. `ops` may bind any
+// kind; `ops-probe` only kind `probe`. Pure: no pi imports, no I/O.
 
 export const OPS_AGENT = "ops";
+export const OPS_PROBE_AGENT = "ops-probe";
+/** The agents that take an ops surface: single-flight, identity-bound, launched alone. */
+export const OPS_AGENTS: ReadonlySet<string> = new Set([OPS_AGENT, OPS_PROBE_AGENT]);
+/** The only kind an `ops-probe` lane may be bound to. */
+export const PROBE_KIND = "probe";
 export const OPS_KINDS: ReadonlySet<string> = new Set(["deploy", "probe", "release", "secret-write", "credential-create"]);
 export const QUERY_LAUNCH_EVENT = "loop-continuation:query-launch";
 export const GUARD_NAMESPACE = "loop-pi.guard/1";
@@ -34,8 +40,9 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((v) => typeof v === "string");
 }
 
-/** The entry when it is well formed, else null. Every allow pattern must start with `^` and
- *  compile; an unanchored or broken pattern makes the whole entry invalid (fail closed). */
+/** The entry when it is well formed, else null. Every allow pattern must compile; a broken pattern
+ *  makes the whole entry invalid (fail closed). Patterns need no `^` or `$`: the lane always
+ *  matches the whole command (`^(?:pattern)$`). */
 export function validateOpsEntry(entry: unknown): OpsEntry | null {
   if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
   const e = entry as Record<string, unknown>;
@@ -43,7 +50,6 @@ export function validateOpsEntry(entry: unknown): OpsEntry | null {
   if (typeof e.kind !== "string" || !OPS_KINDS.has(e.kind)) return null;
   if (!isStringArray(e.allow)) return null;
   for (const pattern of e.allow) {
-    if (!pattern.startsWith("^")) return null;
     try {
       new RegExp(pattern);
     } catch {
@@ -114,11 +120,13 @@ function refuse(reason: string): OpsLaunchDecision {
 
 /** The root's ops check for one `subagent` call, run after evaluateSubagentCall allowed it.
  *
- *  - `Ops surface:` lines are refused in any brief other than a single `{agent: "ops", task}` launch.
- *  - Agent `ops` is refused anywhere but such a single launch, when no ops grants are frozen,
- *    without exactly one surface line, for a surface not in the frozen ops (or listed twice, or
- *    malformed), and while an ops run on that surface is active in this session.
- *  - Otherwise an `ops` launch returns the full entry to bind. Any other call returns no entry. */
+ *  - `Ops surface:` lines are refused in any brief other than a single `{agent: "ops"|"ops-probe",
+ *    task}` launch.
+ *  - Agents `ops` and `ops-probe` are refused anywhere but such a single launch, when no ops grants
+ *    are frozen, without exactly one surface line, for a surface not in the frozen ops (or listed
+ *    twice, or malformed), and while an ops run on that surface is active in this session.
+ *    `ops-probe` is also refused for any surface whose kind is not `probe`.
+ *  - Otherwise the launch returns the full entry to bind. Any other call returns no entry. */
 export function evaluateOpsLaunch(
   input: Record<string, unknown>,
   ops: unknown,
@@ -126,16 +134,19 @@ export function evaluateOpsLaunch(
 ): OpsLaunchDecision {
   const children = launchChildren(input);
   const single = isSingleLaunch(input);
-  const opsSingle = single && input.agent === OPS_AGENT;
+  const opsSingle = single && typeof input.agent === "string" && OPS_AGENTS.has(input.agent);
   if (!opsSingle) {
-    if (children.some((c) => c.agent === OPS_AGENT) && input.action === undefined) {
-      return refuse("agent `ops` may only be launched alone, as one `subagent` call with {agent: \"ops\", task}.");
+    const opsChild = children.find((c) => typeof c.agent === "string" && OPS_AGENTS.has(c.agent));
+    if (opsChild && input.action === undefined) {
+      const agent = opsChild.agent as string;
+      return refuse(`agent \`${agent}\` may only be launched alone, as one \`subagent\` call with {agent: "${agent}", task}.`);
     }
     if (children.some((c) => typeof c.task === "string" && opsSurfaceLines(c.task).length > 0)) {
-      return refuse("an `Ops surface:` line is only valid in a brief for agent `ops`.");
+      return refuse("an `Ops surface:` line is only valid in a brief for agent `ops` or `ops-probe`.");
     }
     return { block: false };
   }
+  const agent = input.agent as string;
   const lines = opsSurfaceLines(input.task as string);
   if (lines.length !== 1) {
     return refuse(`an ops brief must carry exactly one \`Ops surface: <id>\` line; found ${lines.length}.`);
@@ -157,7 +168,12 @@ export function evaluateOpsLaunch(
   }
   const entry = validateOpsEntry(matching[0]);
   if (!entry) {
-    return refuse(`the frozen ops entry for surface '${surface}' is malformed (kind, allow patterns anchored with ^, secret_paths).`);
+    return refuse(`the frozen ops entry for surface '${surface}' is malformed (kind, allow patterns that compile, secret_paths).`);
+  }
+  if (agent === OPS_PROBE_AGENT && entry.kind !== PROBE_KIND) {
+    return refuse(
+      `agent \`ops-probe\` binds only kind \`probe\` surfaces; surface '${surface}' is kind '${entry.kind}'. Launch \`ops\` for it.`,
+    );
   }
   if (isSurfaceActive(surface)) {
     return refuse(`an ops run on surface '${surface}' is already active in this session; wait for it to complete.`);
@@ -172,8 +188,16 @@ export interface LaneOpsGrant {
 
 export interface LaneBinding {
   agent?: string;
-  /** Set only for agent `ops` with a surface and a valid entry for that same surface. */
+  /** Set only for agent `ops` (any kind) or `ops-probe` (kind `probe`) with a surface and a valid
+   *  entry for that same surface. */
   ops?: LaneOpsGrant;
+  /** The loop run dir the root bound (SEAMS S1), when it is an absolute path. */
+  runDir?: string;
+}
+
+/** True for an absolute, NUL-free path string: the only run dir a binding may carry. */
+export function isBindableRunDir(value: unknown): value is string {
+  return typeof value === "string" && value.startsWith("/") && !value.includes("\u0000");
 }
 
 /** Parse the child's `PI_SUBAGENT_EXTENSION_BINDINGS`. Missing or malformed input binds nothing. */
@@ -188,8 +212,10 @@ export function parseLaneBinding(raw: string | undefined): LaneBinding {
   const guard = (bindings as Record<string, unknown> | null)?.[GUARD_NAMESPACE] as Record<string, unknown> | undefined;
   if (!guard || typeof guard !== "object") return {};
   const agent = typeof guard.agent === "string" ? guard.agent : undefined;
-  if (agent !== OPS_AGENT) return { agent };
+  const base: LaneBinding = isBindableRunDir(guard.runDir) ? { agent, runDir: guard.runDir } : { agent };
+  if (agent === undefined || !OPS_AGENTS.has(agent)) return base;
   const entry = validateOpsEntry(guard.entry);
-  if (!entry || !isValidSurfaceId(guard.surface) || entry.surface !== guard.surface) return { agent };
-  return { agent, ops: { surface: guard.surface, entry } };
+  if (!entry || !isValidSurfaceId(guard.surface) || entry.surface !== guard.surface) return base;
+  if (agent === OPS_PROBE_AGENT && entry.kind !== PROBE_KIND) return base;
+  return { ...base, ops: { surface: guard.surface, entry } };
 }

@@ -54,9 +54,9 @@ const OPS_REFUSALS: { name: string; input: Record<string, unknown>; ops: unknown
     reason: /more than once/,
   },
   {
-    name: "unanchored allow pattern",
+    name: "allow pattern that does not compile",
     input: { agent: "ops", task: brief("deploy:svc-worker") },
-    ops: { v: 1, ops: [{ ...DEPLOY, allow: ["just deploy"] }] },
+    ops: { v: 1, ops: [{ ...DEPLOY, allow: ["just deploy ("] }] },
     reason: /malformed/,
   },
   {
@@ -127,7 +127,7 @@ const BINDING_REFUSALS: { name: string; binding: unknown }[] = [
   { name: "forged by a non-ops agent", binding: { "loop-pi.guard/1": { agent: "lane-worker", surface: DEPLOY.surface, entry: DEPLOY } } },
   { name: "surface differs from the entry", binding: { "loop-pi.guard/1": { agent: "ops", surface: "release:svc", entry: DEPLOY } } },
   { name: "entry missing", binding: { "loop-pi.guard/1": { agent: "ops", surface: DEPLOY.surface } } },
-  { name: "entry with an unanchored pattern", binding: { "loop-pi.guard/1": { agent: "ops", surface: DEPLOY.surface, entry: { ...DEPLOY, allow: [".*"] } } } },
+  { name: "entry with a pattern that does not compile", binding: { "loop-pi.guard/1": { agent: "ops", surface: DEPLOY.surface, entry: { ...DEPLOY, allow: ["(.*"] } } } },
   { name: "another namespace", binding: { "loop-pi.ops/1": { agent: "ops", surface: DEPLOY.surface, entry: DEPLOY } } },
 ];
 
@@ -251,4 +251,91 @@ for (const [command, target] of SECRET_TARGETS) {
 
 test("opsSubject quotes any word holding whitespace or shell syntax", () => {
   assert.equal(opsSubject(["gh", "release", "create", "v1 --draft", "a;b"]), "gh release create 'v1 --draft' 'a;b'");
+});
+
+// ---------------------------------------------------------------------------
+// SEAMS S8: no separate `^` requirement (full match stays), agent `ops-probe` bound only to
+// kind `probe`, and the optional `runDir` binding field.
+// ---------------------------------------------------------------------------
+
+const PROBE: OpsEntry = { surface: "probe:svc-health", kind: "probe", allow: ["curl -fsS https://svc\\.example\\.com/health"] };
+const OPS_WITH_PROBE = { v: 1, ops: [DEPLOY, RELEASE, PROBE] };
+
+test("ops entry: an allow pattern without a leading ^ is valid and launches", () => {
+  const unanchored = { ...DEPLOY, allow: ["just deploy( .*)?"] };
+  assert.ok(validateOpsEntry(unanchored));
+  const decision = evaluateOpsLaunch({ agent: "ops", task: brief("deploy:svc-worker") }, { v: 1, ops: [unanchored] }, never);
+  assert.equal(decision.block, false, decision.block ? decision.reason : "");
+  assert.deepEqual(parseLaneBinding(JSON.stringify({ "loop-pi.guard/1": { agent: "ops", surface: DEPLOY.surface, entry: unanchored } })).ops, {
+    surface: DEPLOY.surface,
+    entry: unanchored,
+  });
+});
+
+test("ops launch refusal text no longer asks for patterns anchored with ^", () => {
+  const decision = evaluateOpsLaunch({ agent: "ops", task: brief("deploy:svc-worker") }, { v: 1, ops: [{ ...DEPLOY, allow: ["("] }] }, never);
+  assert.equal(decision.block, true);
+  assert.doesNotMatch(decision.block ? decision.reason : "", /anchored/);
+});
+
+test("ops-probe launch: a probe surface binds its full entry", () => {
+  const decision = evaluateOpsLaunch({ agent: "ops-probe", task: brief("probe:svc-health") }, OPS_WITH_PROBE, never);
+  assert.equal(decision.block, false, decision.block ? decision.reason : "");
+  assert.deepEqual(decision.block === false && decision.entry, PROBE);
+  const input: Record<string, unknown> = { agent: "ops-probe", task: "x", extensionBindings: { "spoof/1": {} } };
+  bindLaneIdentity(input, "ops-probe", PROBE);
+  assert.deepEqual(input.extensionBindings, { "loop-pi.guard/1": { agent: "ops-probe", surface: PROBE.surface, entry: PROBE } });
+  const lane = parseLaneBinding(JSON.stringify(input.extensionBindings));
+  assert.equal(lane.agent, "ops-probe");
+  assert.deepEqual(lane.ops, { surface: PROBE.surface, entry: PROBE });
+});
+
+test("ops-probe launch: a deploy, release or secret-write surface is refused", () => {
+  for (const surface of ["deploy:svc-worker", "release:svc"]) {
+    const decision = evaluateOpsLaunch({ agent: "ops-probe", task: brief(surface) }, OPS_WITH_PROBE, never);
+    assert.equal(decision.block, true, surface);
+    assert.match(decision.block ? decision.reason : "", /ops-probe.*probe/);
+  }
+});
+
+test("ops may still bind a probe surface", () => {
+  const decision = evaluateOpsLaunch({ agent: "ops", task: brief("probe:svc-health") }, OPS_WITH_PROBE, never);
+  assert.deepEqual(decision.block === false && decision.entry, PROBE);
+});
+
+test("ops-probe launch: single flight, launched alone, and refused with no frozen ops", () => {
+  const active = evaluateOpsLaunch({ agent: "ops-probe", task: brief("probe:svc-health") }, OPS_WITH_PROBE, (s) => s === PROBE.surface);
+  assert.match(active.block ? active.reason : "", /already active/);
+  const parallel = evaluateOpsLaunch({ tasks: [{ agent: "ops-probe", task: brief("probe:svc-health") }] }, OPS_WITH_PROBE, never);
+  assert.match(parallel.block ? parallel.reason : "", /may only be launched alone/);
+  const none = evaluateOpsLaunch({ agent: "ops-probe", task: brief("probe:svc-health") }, null, never);
+  assert.match(none.block ? none.reason : "", /no ops grants are frozen/);
+  const noLine = evaluateOpsLaunch({ agent: "ops-probe", task: brief() }, OPS_WITH_PROBE, never);
+  assert.match(noLine.block ? noLine.reason : "", /exactly one `Ops surface/);
+});
+
+test("ops-probe binding: refuses a non-probe entry and a missing entry; a forged non-probe binding grants nothing", () => {
+  assert.throws(() => bindLaneIdentity({}, "ops-probe", DEPLOY), /probe/);
+  assert.throws(() => bindLaneIdentity({}, "ops-probe"), /requires its ops entry/);
+  const forged = parseLaneBinding(JSON.stringify({ "loop-pi.guard/1": { agent: "ops-probe", surface: DEPLOY.surface, entry: DEPLOY } }));
+  assert.equal(forged.agent, "ops-probe");
+  assert.equal(forged.ops, undefined);
+});
+
+test("binding runDir: optional, carried when given, ignored when not an absolute path", () => {
+  const input: Record<string, unknown> = { agent: "lane-worker-push", task: "x" };
+  bindLaneIdentity(input, "lane-worker-push", undefined, { runDir: "/runs/loop-a" });
+  assert.deepEqual(input.extensionBindings, { "loop-pi.guard/1": { agent: "lane-worker-push", runDir: "/runs/loop-a" } });
+  assert.equal(parseLaneBinding(JSON.stringify(input.extensionBindings)).runDir, "/runs/loop-a");
+  const ops: Record<string, unknown> = { agent: "ops", task: "x" };
+  bindLaneIdentity(ops, "ops", DEPLOY, { runDir: "/runs/loop-a" });
+  assert.deepEqual(ops.extensionBindings, { "loop-pi.guard/1": { agent: "ops", surface: DEPLOY.surface, entry: DEPLOY, runDir: "/runs/loop-a" } });
+  const parsed = parseLaneBinding(JSON.stringify(ops.extensionBindings));
+  assert.equal(parsed.runDir, "/runs/loop-a");
+  assert.deepEqual(parsed.ops, { surface: DEPLOY.surface, entry: DEPLOY });
+  const bare: Record<string, unknown> = {};
+  bindLaneIdentity(bare, "mapper", undefined, {});
+  assert.deepEqual(bare.extensionBindings, { "loop-pi.guard/1": { agent: "mapper" } }, "no runDir key without a run dir");
+  assert.equal(parseLaneBinding(JSON.stringify({ "loop-pi.guard/1": { agent: "mapper", runDir: "relative/run" } })).runDir, undefined);
+  assert.equal(parseLaneBinding(JSON.stringify({ "loop-pi.guard/1": { agent: "mapper", runDir: 7 } })).runDir, undefined);
 });

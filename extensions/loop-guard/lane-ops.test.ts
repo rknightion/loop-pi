@@ -215,3 +215,32 @@ test("every lane: bash writes into loop control files are refused, reads are not
     await assertVerdict(l, command, false);
   }
 });
+
+test("ops lane: an allow pattern without ^ or $ still has to match the whole command", async () => {
+  const entry = { surface: "release:svc-unanchored", kind: "release", allow: ["gh release create v[0-9]+\\.[0-9]+\\.[0-9]+"] };
+  const l = await laneWhenFree(entry);
+  await assertVerdict(l, "gh release create v1.2.3", false);
+  await assertVerdict(l, "gh release create v1.2.3 --draft=false", true, /does not fully match/);
+  await assertVerdict(l, "echo x; gh release create v1.2.3", false);
+  await l.shutdown();
+});
+
+test("ops-probe lane: bound to a probe surface it takes the single-flight lock and runs its allowed command", { timeout: 30_000 }, async () => {
+  const probe = { surface: "probe:svc-health", kind: "probe", allow: ["gh workflow run health-probe\\.yml"] };
+  const first = await laneWhenFree(probe);
+  // laneWhenFree binds agent `ops`; bind `ops-probe` explicitly for the lanes under test.
+  await first.shutdown();
+  const a = lane(opsBinding(probe, "ops-probe"));
+  await assertVerdict(a, "gh workflow run health-probe.yml", false);
+  await assertVerdict(a, "gh workflow run deploy.yml", true, /does not fully match/);
+  const b = lane(opsBinding(probe, "ops-probe"));
+  await assertVerdict(b, "ls", true, /single-flight/);
+  await b.shutdown();
+  await a.shutdown();
+});
+
+test("ops-probe lane: a binding on a non-probe entry grants nothing", async () => {
+  const l = lane(opsBinding({ ...RELEASE, surface: "release:svc-probe-forged" }, "ops-probe"));
+  await assertVerdict(l, "gh release create v1.2.3", true, /blocked for lanes/);
+  await l.shutdown();
+});

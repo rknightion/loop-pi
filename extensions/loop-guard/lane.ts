@@ -5,62 +5,36 @@
 // running the shared hook scripts blocks the call here (root allows it
 // through instead, per C4 item 1).
 //
-// An `ops` lane (identity bound by the root with its frozen ops entry) also takes the
+// An `ops` or `ops-probe` lane (identity bound by the root with its frozen ops entry) also takes the
 // single-flight surface lock at load and holds it for its whole life; while the lock is not held,
 // every shell command it runs is refused.
 
-import { lstatSync, readlinkSync, realpathSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, basename as pathBasename, isAbsolute, join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext, ToolCallEvent, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, isToolCallEventType } from "@earendil-works/pi-coding-agent";
 import { hookScriptsToRun, runHookScripts } from "./hooks.ts";
 import { installModelFamily, subagentOverrideBlock } from "./model-family.ts";
 import { installRequestCeiling, installRetryBackoff } from "../request-ceiling/index.ts";
-import { evaluateBashCommand, isLoopControlPath } from "./rules.ts";
+import { evaluateBashCommand } from "./rules.ts";
 import { hasLanePushGrant } from "./push-grant.ts";
 import { parseLaneBinding } from "./ops.ts";
 import { acquireOpsLock, type OpsLock } from "./ops-lock.ts";
+import { bashProtectedPath, isLoopControlToolPath, protoActive, runDirFromEnv, toolWriteRefusal } from "./guard-paths.ts";
+import { laneIdFromBrief, planPushes, recordPushes, type PlannedPush } from "./push-log.ts";
 
-/** The absolute path pi's edit/write tools resolve `path` to (`@` prefix, `~`, `file://`). */
-function toolPath(raw: string, cwd: string): string {
-  let p = raw.replace(/[  -​  　]/g, " ");
-  if (p.startsWith("@")) p = p.slice(1);
-  if (p === "~") p = homedir();
-  else if (p.startsWith("~/")) p = join(homedir(), p.slice(2));
-  if (p.startsWith("file://")) p = new URL(p).pathname;
-  return isAbsolute(p) ? resolve(p) : resolve(cwd, p);
-}
-
-/** The path with symlinks resolved, following a dangling link to its target and otherwise
- *  resolving through the deepest existing ancestor. */
-function realPath(p: string, depth = 0): string {
-  if (depth > 16) return p;
-  try {
-    return realpathSync(p);
-  } catch {
-    try {
-      if (lstatSync(p).isSymbolicLink()) return realPath(resolve(dirname(p), readlinkSync(p)), depth + 1);
-    } catch {
-      // Not present: resolve the parent instead.
-    }
-    const parent = dirname(p);
-    if (parent === p) return p;
-    return join(realPath(parent, depth + 1), pathBasename(p));
-  }
-}
-
-export function isLoopControlToolPath(raw: unknown, cwd: string): boolean {
-  if (typeof raw !== "string") return false;
-  const absolute = toolPath(raw, cwd);
-  return isLoopControlPath(absolute) || isLoopControlPath(realPath(absolute));
-}
+export { isLoopControlToolPath };
 
 export default function (pi: ExtensionAPI) {
   // Capture once at extension load: later tool calls cannot widen the launch grant.
   const rawBindings = process.env.PI_SUBAGENT_EXTENSION_BINDINGS;
   const pushGranted = hasLanePushGrant(rawBindings);
-  const ops = parseLaneBinding(rawBindings).ops;
+  const binding = parseLaneBinding(rawBindings);
+  const ops = binding.ops;
+  // The run dir: the environment's, else the one the root bound (SEAMS S1). Protocol 2 refusals and
+  // the push log apply only while its `loop-pi-proto` marker exists (S0).
+  const runDir = runDirFromEnv() ?? binding.runDir;
+  const proto = () => protoActive(runDir);
+  const pendingPushes = new Map<string, PlannedPush[]>();
+  let laneId: string | null | undefined;
   const opsLock: Promise<OpsLock> | undefined = ops ? acquireOpsLock(ops.surface) : undefined;
   let heldLock: OpsLock | undefined;
   if (opsLock) {
@@ -99,7 +73,13 @@ export default function (pi: ExtensionAPI) {
   ): Promise<ToolCallEventResult | void> => {
     const locked = await opsLockRefusal();
     if (locked) return locked;
-    const decision = evaluateBashCommand(command, "lane", 0, pushGranted, { ops: ops?.entry, cwd: ctx.cwd });
+    const p2 = proto();
+    const decision = evaluateBashCommand(command, "lane", 0, pushGranted, {
+      ops: ops?.entry,
+      cwd: ctx.cwd,
+      proto: p2,
+      protectedPath: p2 ? bashProtectedPath("lane", ctx.cwd, runDir) : undefined,
+    });
     if (decision.block) {
       return { block: true, reason: decision.reason };
     }
@@ -116,9 +96,33 @@ export default function (pi: ExtensionAPI) {
     return;
   };
 
+  // The lane id for the push log, from the brief's `Lane:` header (the first prompt).
+  pi.on("before_agent_start", (event) => {
+    if (laneId === undefined) laneId = laneIdFromBrief(typeof event.prompt === "string" ? event.prompt : "");
+  });
+
+  // Post-exec hook: a successful bash call that pushed appends to the run dir's push log.
+  pi.on("tool_execution_end", async (event) => {
+    const pushes = pendingPushes.get(event.toolCallId);
+    if (pushes === undefined) return;
+    pendingPushes.delete(event.toolCallId);
+    if (event.isError || runDir === undefined) return;
+    try {
+      await recordPushes(pushes, { runDir, actor: "lane", agent: binding.agent ?? null, lane: laneId ?? null });
+    } catch {
+      // The push log is evidence for the audit; a write failure never fails the tool call.
+    }
+  });
+
   pi.on("tool_call", async (event: ToolCallEvent, ctx: ExtensionContext): Promise<ToolCallEventResult | void> => {
     if (isToolCallEventType("bash", event)) {
-      return evaluateShellLikeToolCall(event.input.command, ctx);
+      const verdict = await evaluateShellLikeToolCall(event.input.command, ctx);
+      if (verdict?.block) return verdict;
+      if (proto() && runDir !== undefined) {
+        const pushes = await planPushes(event.input.command, ctx.cwd);
+        if (pushes.length) pendingPushes.set(event.toolCallId, pushes);
+      }
+      return verdict;
     }
 
     if (event.toolName === "watch_process") {
@@ -137,6 +141,10 @@ export default function (pi: ExtensionAPI) {
 
     if (event.toolName === "edit" || event.toolName === "write") {
       const path = (event.input as Record<string, unknown>).path;
+      if (proto()) {
+        const refusal = toolWriteRefusal(path, ctx.cwd, "lane", runDir);
+        if (refusal) return { block: true, reason: refusal };
+      }
       if (isLoopControlToolPath(path, ctx.cwd)) {
         return {
           block: true,

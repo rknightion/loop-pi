@@ -71,6 +71,7 @@ export const C3_AGENTS: ReadonlySet<string> = new Set([
   "lane-worker-low-push",
   "triager",
   "ops",
+  "ops-probe",
 ]);
 
 // ---------------------------------------------------------------------------
@@ -1413,7 +1414,7 @@ function withoutGhRepoFlag(args: string[]): string[] {
  *   `az ad sp|app credential reset`, `az ad sp create-for-rbac`, `op service-account create`,
  *   `op connect token create`.
  */
-export function classifyLaneForbidden(tokens: string[]): ForbiddenCommand | undefined {
+export function classifyLaneForbidden(tokens: string[], options: { proto?: boolean } = {}): ForbiddenCommand | undefined {
   if (tokens.length === 0) return undefined;
   const head = basename(tokens[0]);
   const rest = tokens.slice(1);
@@ -1421,6 +1422,8 @@ export function classifyLaneForbidden(tokens: string[]): ForbiddenCommand | unde
   if (head === "gh") {
     const words = withoutGhRepoFlag(rest);
     if (words[0] === "release" && ["create", "edit", "delete"].includes(words[1])) return found(`gh release ${words[1]}`, "release");
+    // Protocol 2 (SEAMS S8): merging a pull request lands it like a release.
+    if (options.proto && words[0] === "pr" && words[1] === "merge") return found(PR_MERGE_LABEL, "release");
     if (words[0] === "workflow" && words[1] === "run") return found("gh workflow run", "workflow");
     if (words[0] === "secret" && words[1] === "set") return found("gh secret set", "secret");
     if (words[0] === "api" && isMutatingGhApi(words.slice(1))) return found("gh api (mutating)", "api");
@@ -1454,8 +1457,10 @@ export function classifyLaneForbidden(tokens: string[]): ForbiddenCommand | unde
   return undefined;
 }
 
-function laneForbiddenCommand(tokens: string[]): string | undefined {
-  return classifyLaneForbidden(tokens)?.label;
+const PR_MERGE_LABEL = "gh pr merge";
+
+function laneForbiddenCommand(tokens: string[], proto = false): string | undefined {
+  return classifyLaneForbidden(tokens, { proto })?.label;
 }
 
 const LANE_FORBIDDEN_REASON =
@@ -1620,17 +1625,28 @@ export function secretWriteTarget(tokens: string[]): string | null {
 }
 
 // ---------------------------------------------------------------------------
-// Ops grants (lane side): a lane-forbidden command passes for agent `ops` only when the whole
-// segment fully matches one of the entry's anchored `allow` patterns, a secret write targets a
-// member of `secret_paths` exactly, and a credential creation is under kind `credential-create`.
+// Ops grants (lane side): a lane-forbidden command passes for agents `ops` and `ops-probe` only when
+// the whole segment fully matches one of the entry's `allow` patterns (matched as `^(?:p)$`), a
+// secret write targets a member of `secret_paths` exactly, a credential creation is under kind
+// `credential-create`, and (protocol 2) `gh pr merge` is under kind `release`.
 // ---------------------------------------------------------------------------
 
 export interface LaneContext {
-  /** The ops entry bound to this lane by the root (agent `ops` only). */
+  /** The ops entry bound to this lane by the root (agents `ops` and `ops-probe` only). */
   ops?: OpsEntry;
-  /** The lane's working directory, for resolving relative write targets. */
+  /** The working directory, for resolving relative write targets. */
   cwd?: string;
+  /** Protocol 2 (SEAMS S0): the run dir carries `loop-pi-proto`. Every refusal added for the
+   *  protocol applies only when this is true; without it the verdicts are today's. */
+  proto?: boolean;
+  /** With `proto`: the reason a bash write target is protected (the run dir for every role, the
+   *  standing-authority registry for lanes), or undefined. Built by the extension entries, which
+   *  own the file system lookups; this module stays pure. */
+  protectedPath?: (path: string) => string | undefined;
 }
+
+/** The context every role's bash check takes. Root calls pass `cwd`, `proto` and `protectedPath`. */
+export type GuardContext = LaneContext;
 
 /** One segment as the allow patterns see it: words joined by single spaces, any word holding
  *  whitespace or shell syntax single-quoted. */
@@ -1650,8 +1666,11 @@ function fullMatch(pattern: string, subject: string): boolean {
 function opsRefusal(segment: string[], stripped: string[], forbidden: ForbiddenCommand, entry: OpsEntry): string | null {
   const subject = opsSubject(segment);
   const surface = entry.surface;
-  if (!entry.allow.some((pattern) => pattern.startsWith("^") && fullMatch(pattern, subject))) {
+  if (!entry.allow.some((pattern) => fullMatch(pattern, subject))) {
     return `'${forbidden.label}' does not fully match any allow pattern of ops surface '${surface}' (matched text: ${subject}).`;
+  }
+  if (forbidden.label === PR_MERGE_LABEL && entry.kind !== "release") {
+    return `'${forbidden.label}' is a release; ops surface '${surface}' is kind '${entry.kind}', not release.`;
   }
   if (forbidden.category === "credential" && entry.kind !== "credential-create") {
     return `'${forbidden.label}' creates a credential; ops surface '${surface}' is kind '${entry.kind}', not credential-create.`;
@@ -1676,6 +1695,14 @@ function opsRefusal(segment: string[], stripped: string[], forbidden: ForbiddenC
 const LOOP_CONTROL_FILE = /(?:^|\/)codex\/(?:ops|state|goal)-[^/]*$/i;
 const LOOP_CONTROL_DIR = /(?:^|\/)codex$/i;
 const LOOP_CONTROL_SAMPLES = ["ops-c-loop1.json", "state-c-loop1.jsonl", "goal-c-loop1.md"];
+// Protocol 2 (SEAMS S2/S8): the frozen audit grants source joins the lane deny list.
+const GRANTS_FILE = /(?:^|\/)codex\/grants-[^/]*$/i;
+const GRANTS_SAMPLE = "grants-c-loop1.json";
+
+export interface LoopControlOptions {
+  /** Protocol 2: also treat `codex/grants-*` as a loop control file. */
+  grants?: boolean;
+}
 
 function normalisePosix(path: string, cwd?: string): string {
   let p = path;
@@ -1710,24 +1737,31 @@ function globToRegExp(glob: string): RegExp | null {
 }
 
 /** True when `path` names a loop control file, or a glob in a `codex` directory that could. */
-export function isLoopControlPath(path: string, cwd?: string): boolean {
+export function isLoopControlPath(path: string, cwd?: string, options: LoopControlOptions = {}): boolean {
   const p = normalisePosix(path.replace(/^file:\/\//, "").replace(/^@/, ""), cwd);
   if (LOOP_CONTROL_FILE.test(p)) return true;
+  if (options.grants && GRANTS_FILE.test(p)) return true;
   const slash = p.lastIndexOf("/");
   const dir = slash >= 0 ? p.slice(0, slash) : "";
   const name = p.slice(slash + 1);
   if (/[*?[]/.test(name) && (LOOP_CONTROL_DIR.test(dir) || (dir === "" && LOOP_CONTROL_DIR.test(cwd ?? "")))) {
     const re = globToRegExp(name);
-    return re === null || LOOP_CONTROL_SAMPLES.some((s) => re.test(s));
+    const samples = options.grants ? [...LOOP_CONTROL_SAMPLES, GRANTS_SAMPLE] : LOOP_CONTROL_SAMPLES;
+    return re === null || samples.some((s) => re.test(s));
   }
   return false;
+}
+
+/** True when `path` names `codex/grants-*` (the reason text differs from the other control files). */
+export function isGrantsPath(path: string, cwd?: string): boolean {
+  return GRANTS_FILE.test(normalisePosix(path.replace(/^file:\/\//, "").replace(/^@/, ""), cwd));
 }
 
 const WRITE_ALL_ARGS = new Set(["tee", "touch", "truncate", "rm", "unlink", "shred", "mv", "cp", "ln", "install", "rsync", "rmdir"]);
 const REMOVES_DIRS = new Set(["rm", "mv", "rmdir", "rsync"]);
 
 /** The loop control path a file-writing command touches, if any. */
-function loopControlWrite(stripped: string[], cwd?: string): string | undefined {
+function loopControlWrite(stripped: string[], cwd?: string, options: LoopControlOptions = {}): string | undefined {
   if (stripped.length === 0) return undefined;
   const head = basename(stripped[0]);
   const args = stripped.slice(1);
@@ -1739,14 +1773,99 @@ function loopControlWrite(stripped: string[], cwd?: string): string | undefined 
     if (inPlace) candidates = args;
   } else if (head === "loop-state" && args[0] === "append") candidates = args.slice(1);
   for (const c of candidates) {
-    if (isLoopControlPath(c, cwd)) return c;
+    if (isLoopControlPath(c, cwd, options)) return c;
     if (REMOVES_DIRS.has(head) && LOOP_CONTROL_DIR.test(normalisePosix(c, cwd))) return c;
   }
   return undefined;
 }
 
-function loopControlReason(path: string): string {
+function loopControlReason(path: string, cwd?: string): string {
+  if (isGrantsPath(path, cwd)) return `loop-guard: lanes may not write '${path}': codex/grants-* belongs to the root.`;
   return `loop-guard: lanes may not write '${path}': codex/ops-*, codex/state-* and codex/goal-* belong to the root.`;
+}
+
+// ---------------------------------------------------------------------------
+// Protocol 2 bash write targets (SEAMS S1/S8), best effort: redirection targets plus the files a
+// common file-writing command writes. Unlike the loop control check above, `cp`, `install`, `ln`
+// and `rsync` count only their destination, so copying a run-dir file out stays a read. The
+// extension's `protectedPath` decides what each candidate means.
+// ---------------------------------------------------------------------------
+
+const WRITES_EVERY_ARG = new Set(["tee", "touch", "truncate", "rm", "unlink", "shred", "mv", "rmdir"]);
+const WRITES_DESTINATION = new Set(["cp", "install", "ln", "rsync"]);
+
+function fileWriteCandidates(stripped: string[]): string[] {
+  if (stripped.length === 0) return [];
+  const head = basename(stripped[0]);
+  const args = stripped.slice(1);
+  const operands = (list: string[]) => list.map((a) => a.replace(/^--?[A-Za-z-]+=/, "")).filter((a) => a.length > 0 && !a.startsWith("-"));
+  if (WRITES_EVERY_ARG.has(head)) return operands(args);
+  if (WRITES_DESTINATION.has(head)) {
+    const targets: string[] = [];
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === "-t" && args[i + 1] !== undefined) targets.push(args[i + 1]);
+      else if (args[i].startsWith("--target-directory=")) targets.push(args[i].slice("--target-directory=".length));
+    }
+    if (targets.length) return targets;
+    const positional = operands(args);
+    return positional.length > 1 ? [positional[positional.length - 1]] : [];
+  }
+  if (head === "dd") return args.filter((a) => a.startsWith("of=")).map((a) => a.slice(3));
+  if (head === "sed" || head === "perl" || head === "ruby") {
+    const inPlace = args.some((a) => a.startsWith("--in-place") || (/^-[A-Za-z]/.test(a) && !a.startsWith("--") && a.slice(1).includes("i")));
+    if (inPlace) return operands(args);
+  }
+  return [];
+}
+
+function protectedWrite(paths: string[], context: LaneContext): string | undefined {
+  if (!context.proto || !context.protectedPath) return undefined;
+  for (const path of paths) {
+    const reason = context.protectedPath(path);
+    if (reason) return reason;
+  }
+  return undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Protocol 2 root rule (SEAMS S8): `loop-state` events from the extension, the daemon and the
+// dispatcher are written by those writers, never by the root: a root call may not carry
+// `--by ext|daemon|dispatcher` (either spelling) or an event on stdin with a `by` field.
+// ---------------------------------------------------------------------------
+
+const FORGED_BY = new Set(["ext", "daemon", "dispatcher"]);
+const STDIN_BY_FIELD = /"by"\s*:/;
+
+/** loop-state's own arguments when `stripped` runs it (directly or as `python3 <path>/loop-state`). */
+function loopStateArgs(stripped: string[]): string[] | undefined {
+  if (stripped.length === 0) return undefined;
+  const head = basename(stripped[0]);
+  if (head === "loop-state") return stripped.slice(1);
+  if (PYTHON_INTERPRETER.test(head) && stripped[1] !== undefined && basename(stripped[1]) === "loop-state") return stripped.slice(2);
+  return undefined;
+}
+
+function loopStateRefusal(stripped: string[], rawCommand: string): string | undefined {
+  const args = loopStateArgs(stripped);
+  if (!args) return undefined;
+  const positional: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    let by: string | undefined;
+    if (args[i] === "--by") by = args[++i];
+    else if (args[i].startsWith("--by=")) by = args[i].slice("--by=".length);
+    else {
+      positional.push(args[i]);
+      continue;
+    }
+    if (by !== undefined && FORGED_BY.has(by)) {
+      return `loop-guard: a root loop-state call may not carry --by ${by}; the extension, daemon and dispatcher write their own events.`;
+    }
+  }
+  // `loop-state append <log>` with no event reads the event as JSON from stdin.
+  if (positional[0] === "append" && positional.length === 2 && STDIN_BY_FIELD.test(rawCommand)) {
+    return "loop-guard: a root loop-state event read from stdin may not carry a \"by\" field; append it without one and loop-state records it as the root's.";
+  }
+  return undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -1797,10 +1916,10 @@ function looseSegments(clean: string): string[][] {
 }
 
 /** The lane rules at one loose segment's command position(s). */
-function fallbackLaneCheck(segment: string[]): string | undefined {
+function fallbackLaneCheck(segment: string[], proto = false): string | undefined {
   let words = stripWrappers(stripReservedWords(segment));
   for (let guard = 0; guard < 8 && words.length; guard++) {
-    const forbidden = laneForbiddenCommand(words);
+    const forbidden = laneForbiddenCommand(words, proto);
     if (forbidden) return forbidden;
     const head = basename(words[0]);
     if (head === "eval") {
@@ -1853,20 +1972,31 @@ export function fallbackScan(text: string, role: Role, depth = 0, pushGranted = 
         if (expanded) return block(fallbackReason(expanded.reason ?? ""));
       }
     }
+    const words = stripWrappers(stripReservedWords(segment));
     if (role === "lane") {
-      const forbidden = fallbackLaneCheck(segment);
+      const forbidden = fallbackLaneCheck(segment, lane.proto);
       if (forbidden) {
         // An ops grant never applies here: input the parser cannot read stays refused.
         return block(fallbackReason(`'${forbidden}' ${LANE_FORBIDDEN_REASON}.`));
       }
-      const control = loopControlWrite(stripWrappers(stripReservedWords(segment)), lane.cwd);
-      if (control) return block(fallbackReason(loopControlReason(control)));
+      const control = loopControlWrite(words, lane.cwd, { grants: lane.proto });
+      if (control) return block(fallbackReason(loopControlReason(control, lane.cwd)));
+    }
+    if (lane.proto) {
+      if (role === "root") {
+        const forged = loopStateRefusal(words, text);
+        if (forged) return block(fallbackReason(forged));
+      }
+      const write = protectedWrite(fileWriteCandidates(words), lane);
+      if (write) return block(fallbackReason(write));
     }
   }
-  if (role === "lane") {
-    for (const m of clean.matchAll(FALLBACK_REDIRECT)) {
-      if (isLoopControlPath(m[1], lane.cwd)) return block(fallbackReason(loopControlReason(m[1])));
+  for (const m of clean.matchAll(FALLBACK_REDIRECT)) {
+    if (role === "lane" && isLoopControlPath(m[1], lane.cwd, { grants: lane.proto })) {
+      return block(fallbackReason(loopControlReason(m[1], lane.cwd)));
     }
+    const write = protectedWrite([m[1]], lane);
+    if (write) return block(fallbackReason(write));
   }
   return allow();
 }
@@ -1947,10 +2077,19 @@ export function evaluateBashCommand(
       }
     }
 
+    if (lane.proto) {
+      if (role === "root") {
+        const forged = loopStateRefusal(stripped, command);
+        if (forged) return block(forged);
+      }
+      const write = protectedWrite(fileWriteCandidates(stripped), lane);
+      if (write) return block(write);
+    }
+
     if (role === "lane") {
-      const control = loopControlWrite(stripped, lane.cwd);
-      if (control) return block(loopControlReason(control));
-      const forbidden = classifyLaneForbidden(stripped);
+      const control = loopControlWrite(stripped, lane.cwd, { grants: lane.proto });
+      if (control) return block(loopControlReason(control, lane.cwd));
+      const forbidden = classifyLaneForbidden(stripped, { proto: lane.proto });
       if (forbidden) {
         if (!lane.ops) return block(`loop-guard: '${forbidden.label}' ${LANE_FORBIDDEN_REASON}.`);
         const refusal = opsRefusal(rawSegment, stripped, forbidden, lane.ops);
@@ -1961,9 +2100,11 @@ export function evaluateBashCommand(
 
   if (role === "lane") {
     for (const target of parsed.writeTargets) {
-      if (isLoopControlPath(target, lane.cwd)) return block(loopControlReason(target));
+      if (isLoopControlPath(target, lane.cwd, { grants: lane.proto })) return block(loopControlReason(target, lane.cwd));
     }
   }
+  const redirected = protectedWrite(parsed.writeTargets, lane);
+  if (redirected) return block(redirected);
 
   for (const script of parsed.interpreterScripts) {
     const decision = fallbackScan(script, role, 0, pushGranted, lane);

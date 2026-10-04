@@ -16,8 +16,17 @@ import { installRequestCeiling, installRetryBackoff } from "../request-ceiling/i
 import { bindLaneIdentity } from "./push-grant.ts";
 import { evaluateOpsLaunch, QUERY_LAUNCH_EVENT } from "./ops.ts";
 import { evaluateBashCommand, evaluateBgWait, evaluateSubagentCall, evaluateWatchProcess, isAsyncSubagentLaunch } from "./rules.ts";
+import { bashProtectedPath, protoActive, runDirFromEnv, toolWriteRefusal } from "./guard-paths.ts";
+import { planPushes, recordPushes, type PlannedPush } from "./push-log.ts";
 
 const ASYNC_COMPLETE_EVENT = "subagent:async-complete";
+
+/** Protocol 2: the longest `bash` timeout (seconds) the root may set; longer waits go through
+ *  `watch_start`, so the watchdog never reads a long silent turn as a stall. */
+export const ROOT_BASH_TIMEOUT_MAX_S = 900;
+
+/** Custom messages that wake the root: a lane return, a watcher exit and a fired timer. */
+const WAKE_MESSAGES: ReadonlySet<string> = new Set(["subagent-notify", "loop-watch", "loop-wake"]);
 
 /** The run id of an async launch from its tool result (pi-subagents 0.75.0): `details.runId`, else
  *  `details.asyncId`, else the `Async: <agent> [<id>]` text. */
@@ -33,6 +42,16 @@ export function launchedRunId(result: unknown): string | undefined {
 }
 
 export default function (pi: ExtensionAPI) {
+  // The loop run dir the launcher exported. Protocol 2 refusals and the push log apply only while
+  // its `loop-pi-proto` marker exists (SEAMS S0), which loop-continuation writes when it arms.
+  const runDir = runDirFromEnv();
+  const proto = () => protoActive(runDir);
+  // Pushes planned at tool_call (remote branches read before the command runs), by tool call id.
+  const pendingPushes = new Map<string, PlannedPush[]>();
+  // `subagent` status targets (run id, or "*" for the fleet) checked since the last wake.
+  const statusSinceWake = new Set<string>();
+  const wake = () => statusSinceWake.clear();
+
   let asyncRunsActive = 0;
   // Tool call ids of qualifying async launches whose tool execution has not ended yet.
   const pendingAsyncLaunches = new Set<string>();
@@ -72,6 +91,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_start", (_event, ctx: ExtensionContext) => {
+    wake();
     const sessionId = ctx.sessionManager.getSessionId();
     const extensions: { id: string; path: string }[] = [
       { id: "loop-guard-lane", path: fileURLToPath(new URL("./lane.ts", import.meta.url)) },
@@ -96,6 +116,15 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_shutdown", () => {
     childRegistration?.dispose();
     childRegistration = undefined;
+  });
+
+  pi.on("session_compact", () => {
+    wake();
+  });
+
+  pi.on("input", () => {
+    wake();
+    return { action: "continue" as const };
   });
 
   // Tracks "is any async subagent run active" for the watch_process root rule
@@ -142,6 +171,20 @@ export default function (pi: ExtensionAPI) {
     if (message.role === "custom" && message.customType === "subagent-notify") {
       asyncRunsActive = Math.max(0, asyncRunsActive - 1);
     }
+    if (message.role === "custom" && typeof message.customType === "string" && WAKE_MESSAGES.has(message.customType)) wake();
+  });
+
+  // Push log (SEAMS S1): a successful root bash call that pushed appends one line per moved branch.
+  pi.on("tool_execution_end", async (event) => {
+    const pushes = pendingPushes.get(event.toolCallId);
+    if (pushes === undefined) return;
+    pendingPushes.delete(event.toolCallId);
+    if (event.isError || runDir === undefined) return;
+    try {
+      await recordPushes(pushes, { runDir, actor: "root", agent: null, lane: null });
+    } catch {
+      // The push log is evidence for the audit; a write failure never fails the tool call.
+    }
   });
 
   // Shared path for any tool that ultimately runs a shell command: the builtin
@@ -155,7 +198,12 @@ export default function (pi: ExtensionAPI) {
     command: string,
     ctx: ExtensionContext,
   ): Promise<ToolCallEventResult | void> => {
-    const decision = evaluateBashCommand(command, "root");
+    const p2 = proto();
+    const decision = evaluateBashCommand(command, "root", 0, true, {
+      cwd: ctx.cwd,
+      proto: p2,
+      protectedPath: p2 ? bashProtectedPath("root", ctx.cwd, runDir) : undefined,
+    });
     if (decision.warning) {
       ctx.ui.notify(decision.warning, "warning");
     } else if (decision.block) {
@@ -176,10 +224,29 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("tool_call", async (event: ToolCallEvent, ctx: ExtensionContext): Promise<ToolCallEventResult | void> => {
     if (isToolCallEventType("bash", event)) {
-      return evaluateShellLikeToolCall(event.input.command, ctx);
+      const timeout = (event.input as { timeout?: unknown }).timeout;
+      if (proto() && typeof timeout === "number" && timeout > ROOT_BASH_TIMEOUT_MAX_S) {
+        return {
+          block: true,
+          reason:
+            `loop-guard: a root \`bash\` timeout of ${timeout} s is over ${ROOT_BASH_TIMEOUT_MAX_S} s; the watchdog reads a turn that ` +
+            "long as stalled. Run the work under `watch_start` and end the turn; its exit wakes the root.",
+        };
+      }
+      const verdict = await evaluateShellLikeToolCall(event.input.command, ctx);
+      if (verdict?.block) return verdict;
+      if (proto() && runDir !== undefined) {
+        const pushes = await planPushes(event.input.command, ctx.cwd);
+        if (pushes.length) pendingPushes.set(event.toolCallId, pushes);
+      }
+      return verdict;
     }
 
     if (event.toolName === "edit" || event.toolName === "write") {
+      if (proto()) {
+        const refusal = toolWriteRefusal((event.input as Record<string, unknown>).path, ctx.cwd, "root", runDir);
+        if (refusal) return { block: true, reason: refusal };
+      }
       const agentDir = getAgentDir();
       const scripts = hookScriptsToRun(agentDir, ["backlog-guard.py"]);
       const hooks = await runHookScripts(scripts, event.toolName, event.input as Record<string, unknown>, ctx.cwd);
@@ -206,6 +273,18 @@ export default function (pi: ExtensionAPI) {
         return wrongModel;
       }
       const input = event.input as Record<string, unknown>;
+      if (input.action === "status" && proto()) {
+        const target = typeof input.id === "string" ? input.id : typeof input.runId === "string" ? input.runId : "*";
+        if (statusSinceWake.has(target)) {
+          return {
+            block: true,
+            reason:
+              `loop-guard: \`subagent\` status for '${target}' was already read and nothing has woken the root since. ` +
+              "Never poll between wakes: end the turn; a lane return, a loop-watch or a loop-wake wakes the root.",
+          };
+        }
+        statusSinceWake.add(target);
+      }
       const decision = evaluateSubagentCall(input);
       if (decision.block) {
         return { block: true, reason: decision.reason };
@@ -215,7 +294,7 @@ export default function (pi: ExtensionAPI) {
         return { block: true, reason: ops.reason };
       }
       if (input.action === undefined && typeof input.agent === "string" && typeof input.task === "string") {
-        bindLaneIdentity(input, input.agent, ops.entry);
+        bindLaneIdentity(input, input.agent, ops.entry, { runDir });
         if (ops.entry) pendingOps.set(event.toolCallId, { surface: ops.entry.surface, async: isAsyncSubagentLaunch(input) });
       } else {
         // Only a single launch is bound; a model-supplied binding never reaches any other shape.
