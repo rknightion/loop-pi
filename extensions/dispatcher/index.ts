@@ -78,6 +78,13 @@ export function completionText(data: any): string {
   return typeof data?.summary === "string" ? data.summary : "";
 }
 
+/** True when pi-subagents reports the run failed, timed out or ended mid-reply. Its lane-return block,
+ * if any, is then evidence only: a timed-out lane's last text can hold a complete block it never finished. */
+export function runFailed(data: any): boolean {
+  const first = Array.isArray(data?.results) ? data.results[0] : undefined;
+  return data?.success === false || first?.success === false || first?.timedOut === true || first?.outputPartial === true;
+}
+
 /** The Envelope table has no objective column: use the backlog task's title, else name the task. The title
  * also fills the brief header when the Envelope cell gave none. */
 async function objectiveFor(task: TaskSpec, repo: string): Promise<string> {
@@ -123,7 +130,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.events.on("subagent:async-complete", (data: any) => {
-    if (active && typeof data?.runId === "string") active.complete(data.runId, completionText(data));
+    if (active && typeof data?.runId === "string") active.complete(data.runId, completionText(data), runFailed(data));
   });
 
   const rpc = (method: string, params: unknown, timeoutMs: number) =>

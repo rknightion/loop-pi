@@ -175,6 +175,21 @@ test("a run pi-subagents calls completed but that returned no lane-return block 
   assert.equal(log[1].status, "failed");
 });
 
+test("a run that failed or timed out is recorded failed and unlanded whatever its lane-return block says", async () => {
+  const r = makeRepo();
+  const h = harness({ reportPath: r.report, cwd: r.repo });
+  h.start();
+  h.call("tc1", { agent: "lane-worker", task: BRIEF });
+  h.result("tc1", "Async: lane-worker [run1]", { runId: "run1" });
+  const block = LANE_RETURN("complete").replace('"sha":null,"landed":false', '"sha":"abc1234","landed":true');
+  h.emit("subagent:async-complete", { runId: "run1", sessionId: SESS, success: false, results: [{ success: false, timedOut: true, output: block }] });
+  const log = await until(() => events(r.log).length >= 2 && events(r.log));
+  assert.equal(log[1].ev, "return");
+  assert.equal(log[1].status, "failed");
+  assert.equal(log[1].landed, false);
+  assert.equal(log[1].sha, "abc1234", "the reported SHA stays as evidence");
+});
+
 test("invalid lane-return fields are dropped and the rest recorded", async () => {
   const r = makeRepo();
   const h = harness({ reportPath: r.report, cwd: r.repo });

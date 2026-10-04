@@ -141,6 +141,13 @@ export interface LaneReturn {
   coderabbit?: { ran: boolean; major: number; unreviewed: number } | null;
   questions: string[];
   parsed: boolean;
+  /** pi-subagents reported the run failed or timed out; the block's own claims are evidence only. */
+  runFailed?: boolean;
+}
+
+/** A failed run's return: never complete and never landed, whatever its block says. */
+export function failedRunReturn(r: LaneReturn): LaneReturn {
+  return { ...r, status: r.status === "complete" ? "failed" : r.status, landed: false, runFailed: true };
 }
 
 function lastFenced(text: string, tag: string): string | undefined {

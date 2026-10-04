@@ -65,6 +65,18 @@ const isStr = (v: unknown): v is string => typeof v === "string" && v !== "";
 /** The `return` event for a finished run. The status is the block's: a run with no block, or with
  *  a block whose status is not one of the four, is `failed` whatever pi-subagents reported, as the
  *  dispatcher's parseLaneReturn reads it. Fields of a block that do not fit the schema are dropped. */
+/** True when pi-subagents reports the run failed, timed out or ended mid-reply (async-complete payload). */
+export function runFailed(data: Record<string, unknown>): boolean {
+  const first = Array.isArray(data.results) ? (data.results[0] as Record<string, unknown> | undefined) : undefined;
+  return data.success === false || first?.success === false || first?.timedOut === true || first?.outputPartial === true;
+}
+
+/** A failed run's block is evidence only: never complete and never landed. */
+export function failedRunBlock(block: Record<string, unknown> | null): Record<string, unknown> | null {
+  if (!block) return block;
+  return { ...block, status: block.status === "complete" ? "failed" : block.status, landed: false };
+}
+
 export function returnEvent(lane: string, run: string, block: Record<string, unknown> | null): Record<string, unknown> {
   const ev: Record<string, unknown> = { ev: "return", lane, run };
   const fromBlock = block && typeof block.status === "string" && STATUSES.has(block.status) ? block.status : null;

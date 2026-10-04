@@ -8,7 +8,7 @@ import { test } from "node:test";
 import { parseLaneReturn, parseTriage, retryAgent, taskBrief } from "./brief.ts";
 import { globsIntersect, guardedHits, ownedOverlap, ownedWithin } from "./glob.ts";
 import { dispatcherEligible, parseGoal, parseLoopMd, preGreenEligible, type TaskSpec } from "./goal.ts";
-import { backlogTitle, completionText, onCloseCommands } from "./index.ts";
+import { backlogTitle, completionText, onCloseCommands, runFailed } from "./index.ts";
 import { parseLaunch, stateLogFor } from "./launch.ts";
 import { parseBrief } from "../loop-state/core.ts";
 import { Dispatcher, type Ports } from "./scheduler.ts";
@@ -485,6 +485,41 @@ test("a refused spawn parks the task; a landed SHA missing from main parks inste
   assert.deepEqual(ports.done, ["T3"]);
 });
 
+test("a run that failed or timed out never counts as complete, even with a complete lane-return block", SCHED, async () => {
+  const work = new FakePorts();
+  const w = new Dispatcher(plan([spec("T1", ["a/**"])], 1), work);
+  w.start();
+  await w.settled();
+  work.live.delete("r1");
+  w.complete("r1", landed("s1"), true);
+  await w.settled();
+  assert.deepEqual(work.ofEv("land"), [], "no land from a failed run");
+  assert.equal(work.spawns[1].agent, "triager");
+  assert.equal(work.ofEv("return")[0].status, "failed");
+  work.live.delete("r2");
+  w.complete("r2", triage({ decision: "split", split: [brief7("part one", "a/one/**", "one ok")] }), true);
+  await w.settled();
+  assert.deepEqual(work.ofEv("admit").filter((e) => e.source === "loop-created"), [], "a failed triager's split is not acted on");
+  assert.deepEqual(work.ofEv("park").map((e) => [e.task, e.needs]), [["T1", "defect"]]);
+  assert.equal(work.spawns.length, 2, "no retry or split lane after a failed triager");
+
+  const ports = new FakePorts();
+  const d = new Dispatcher(plan([spec("T1", ["a/**"]), spec("T2", ["b/**"]), spec("T3", ["c/**"])], 1), ports);
+  const closed = d.start();
+  await d.settled();
+  await finish(d, ports, "r1", landed("s1"));
+  const gate = ports.spawns.find((s) => s.agent === "gate-runner")!;
+  ports.live.delete(gate.runId);
+  d.complete(gate.runId, greenGate, true);
+  await d.settled();
+  assert.deepEqual(ports.ofEv("accept").map((e) => [e.task, e.accepted]), [["T1", false]], "a timed-out gate is red");
+  assert.deepEqual(ports.ofEv("gate").map((e) => e.exit), [null], "its block's exit 0 is not recorded as the gate exit");
+  const t2 = ports.spawns.find((s) => /Task: T2 /.test(s.brief))!;
+  await finish(d, ports, t2.runId, landed("s2"));
+  assert.equal(await closed, "blocked");
+  assert.deepEqual(ports.done, []);
+});
+
 test("a completion that arrives before its spawn reply is kept and handled", SCHED, async () => {
   const ports = new FakePorts();
   const d = new Dispatcher(plan([spec("T1", ["a/**"]), spec("T2", ["b/**"]), spec("T3", ["c/**"])], 1), ports);
@@ -522,6 +557,12 @@ test("onClose argv arrays get {log} and {report}; malformed entries are dropped"
 test("completion text prefers the run's output, then the summary; backlog titles parse", () => {
   assert.equal(completionText({ results: [{ output: "OUT" }], summary: "S" }), "OUT");
   assert.equal(completionText({ results: [{}], summary: "S" }), "S");
+  assert.equal(runFailed({ success: true, results: [{ success: true }] }), false);
+  assert.equal(runFailed({ results: [{ output: "OUT" }] }), false, "no outcome fields: not failed");
+  assert.equal(runFailed({ success: false, results: [{ success: true }] }), true);
+  assert.equal(runFailed({ results: [{ success: false }] }), true);
+  assert.equal(runFailed({ results: [{ timedOut: true }] }), true);
+  assert.equal(runFailed({ results: [{ success: true, outputPartial: true }] }), true);
   assert.equal(backlogTitle("File: x\n\nTask T-1 - Fix the thing\n=====\n"), "Fix the thing");
   assert.equal(backlogTitle("nothing"), undefined);
 });

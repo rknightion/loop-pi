@@ -9,17 +9,17 @@ public statement of those contracts.
 
 ## Runtime facts
 
-- pi 1.0.1 loads `.ts` extensions through jiti. An entry file default-exports
+- pi 1.0.2 loads `.ts` extensions through jiti. An entry file default-exports
   `(pi: ExtensionAPI) => void | Promise<void>`. Type imports come from
   `@earendil-works/pi-coding-agent`; `@earendil-works/pi-ai` and `typebox` are pi's dependencies,
-  not ours, and resolve through pi's loader at runtime. pi 1.0.1 publishes no
+  not ours, and resolve through pi's loader at runtime. pi 1.0.2 publishes no
   `npm-shrinkwrap.json`, so npm hoists them to the top-level `node_modules`; never rely on either
   layout (`tsconfig.json` lists both, and the loop-wait test hook resolves from pi's directory).
 - **Project trust (pi-subagents 0.75.0):** children follow the parent session's project trust, so
   with `defaultProjectTrust: "never"` a child no longer loads the target repository's `.pi/`
   settings, system prompt files, skills or extensions. Agent discovery is not trust-gated:
   repository `.pi/agents` and `.agents/*.md` still outrank the home's agents. `loop-pi-preflight` stays.
-- **Tool list (pi 1.0.1 / pi-subagents 0.75.0):** `toolActivation` is `"eager"`; never `"auto"`.
+- **Tool list (pi 1.0.2 / pi-subagents 0.75.0):** `toolActivation` is `"eager"`; never `"auto"`.
   codex-lb never acknowledges a request carrying an `additional_tools` item, which pi sends for a
   mid-conversation tool addition when a model's `compat.supportsAdditionalTools` is true. The overlay
   sets that and `supportsToolSearch` false for every family model, so a changed tool list is resent
@@ -82,7 +82,7 @@ public statement of those contracts.
 ## Request ceiling
 
 `extensions/request-ceiling/` is installed by both loop-guard entries (`installRequestCeiling`), so
-the root and every lane carry it. pi 1.0.1 has no wall-clock bound on a streaming request:
+the root and every lane carry it. pi 1.0.2 has no wall-clock bound on a streaming request:
 `httpIdleTimeoutMs` is an idle timer reset by every streamed event, so a model that keeps streaming
 reasoning never trips it, and the provider `timeoutMs` (`retry.provider.timeoutMs`) is cleared once
 response headers arrive. The output budget is pi's model `maxTokens` (sent as `max_output_tokens`),
@@ -106,7 +106,7 @@ set per model in the home's `models.json` `modelOverrides`.
 ## Retry backoff
 
 `installRetryBackoff` (in `extensions/request-ceiling/`, `backoff.ts` for the pure delay function)
-is installed by both loop-guard entries next to `installRequestCeiling`. pi 1.0.1's agent-level
+is installed by both loop-guard entries next to `installRequestCeiling`. pi 1.0.2's agent-level
 retry waits `retryDelayMs(settings.retry, attempt)` (`pi-ai` `utils/retry.js`): `baseDelayMs *
 2^(n-1)` capped at `maxAgentDelayMs`, no jitter and no split by status. That wait cannot be replaced
 from an extension, so the extension adds a wait in front of it.
@@ -225,7 +225,11 @@ before any `await`. A missing reply means the provider extension is not loaded; 
   closeout` and `loopPi.onClose` (argv lists with `{log}` and `{report}`) before it exits.
   A composed gate is green only for a parsed return with status `complete`, `exit` 0 and a `sha`
   that is null or the gated tip; the `gate` event records the reported exit (null stays null) and
-  SHA. A pre-green land `loop-state` refuses is recorded as an after-green land plus a park, and
+  SHA. A run pi-subagents reports failed or timed out (`success: false` at the top level or on
+  `results[0]`, `results[0].timedOut` or `results[0].outputPartial`) never counts as complete or landed,
+  whatever its lane-return block says; the dispatcher records its gate exit as null and parks the task of a failed triager, and `loop-state`
+  records the return as failed and unlanded with the block's other fields kept as evidence.
+  A pre-green land `loop-state` refuses is recorded as an after-green land plus a park, and
   stops new work. The dispatcher reads LOOP.md exactly as `loop-state` does (nothing stripped).
 - Red baseline: LOOP.md may carry `baseline-red: <TASK-ID> - <reason>` (main is known red; the named
   task owns making it green). `loop-state` refuses `land mode=pre-green` in that repo, and the

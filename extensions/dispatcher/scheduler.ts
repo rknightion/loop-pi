@@ -11,7 +11,7 @@
 // - accept and Done only after complete, landed and a green composed gate.
 // - A red composed gate stops new work; running lanes drain and the loop closes `blocked`.
 
-import { ATTEMPT_CEILING, gateBrief, parseLaneReturn, parseTriage, retryAgent, taskBrief, triageBrief, type LaneReturn } from "./brief.ts";
+import { ATTEMPT_CEILING, failedRunReturn, gateBrief, parseLaneReturn, parseTriage, retryAgent, taskBrief, triageBrief, type LaneReturn } from "./brief.ts";
 import { ownedOverlap, ownedWithin, guardedHits } from "./glob.ts";
 import type { TaskSpec } from "./goal.ts";
 
@@ -81,7 +81,7 @@ export class Dispatcher {
   private readonly order: string[] = [];
   private readonly tasks = new Map<string, TaskState>();
   private readonly lanes = new Map<string, Lane>();
-  private readonly early = new Map<string, string>();
+  private readonly early = new Map<string, { text: string; failed: boolean }>();
   private laneSeq = 0;
   private readonly markedDone: string[] = [];
   private gateRunning = false;
@@ -137,15 +137,16 @@ export class Dispatcher {
     return this.done;
   }
 
-  /** A lane finished: `text` is its final message. Unknown run ids are kept until their spawn reply. */
-  complete(runId: string, text: string): void {
+  /** A lane finished: `text` is its final message, `failed` whether pi-subagents reported the run failed or
+   * timed out. Unknown run ids are kept until their spawn reply. */
+  complete(runId: string, text: string, failed = false): void {
     this.serial(async () => {
       const lane = this.lanes.get(runId);
       if (!lane) {
-        this.early.set(runId, text);
+        this.early.set(runId, { text, failed });
         return;
       }
-      await this.handleReturn(runId, lane, text);
+      await this.handleReturn(runId, lane, text, failed);
       await this.pump();
     });
   }
@@ -212,7 +213,7 @@ export class Dispatcher {
     const early = this.early.get(result.runId);
     if (early !== undefined) {
       this.early.delete(result.runId);
-      await this.handleReturn(result.runId, lane, early);
+      await this.handleReturn(result.runId, lane, early.text, early.failed);
     }
     return true;
   }
@@ -255,13 +256,17 @@ export class Dispatcher {
     this.reason = "blocked";
   }
 
-  private async handleReturn(runId: string, lane: Lane, text: string): Promise<void> {
+  private async handleReturn(runId: string, lane: Lane, text: string, failed = false): Promise<void> {
     this.lanes.delete(runId);
-    const r = parseLaneReturn(text);
+    const r = failed ? failedRunReturn(parseLaneReturn(text)) : parseLaneReturn(text);
     await this.ports.append(returnEvent(lane.lane, runId, r));
     if (lane.kind === "gate") return this.handleGate(lane, r);
     const t = this.tasks.get(lane.tasks[0])!;
-    if (lane.kind === "triage") return this.handleTriage(t, text, lane.lane);
+    if (lane.kind === "triage") {
+      // A failed or timed-out triager's decision block may be unfinished: park rather than act on it.
+      if (failed) return this.park(t, "defect", `triager ${lane.lane} failed or timed out`, lane.lane);
+      return this.handleTriage(t, text, lane.lane);
+    }
     t.lastReturn = lastReturnBlock(text);
     if (r.status === "complete" && r.landed && r.sha) {
       t.sha = r.sha;
@@ -303,8 +308,12 @@ export class Dispatcher {
     // SHA is recorded against that SHA, never as a gate of this batch's tip.
     const onTip = r.sha === null || r.sha === lane.sha;
     const green = r.parsed && r.status === "complete" && r.exit === 0 && onTip;
-    await this.ports.append({ ev: "gate", scope: "composed", sha: r.sha ?? lane.sha!, cmd: this.plan.composedGate, exit: r.exit, lane: lane.lane });
-    const red = !r.parsed
+    // A failed or timed-out gate run reported no real exit, whatever its block claims.
+    const exit = r.runFailed ? null : r.exit;
+    await this.ports.append({ ev: "gate", scope: "composed", sha: r.sha ?? lane.sha!, cmd: this.plan.composedGate, exit, lane: lane.lane });
+    const red = r.runFailed
+      ? `composed gate run at ${lane.sha} failed or timed out`
+      : !r.parsed
       ? `composed gate at ${lane.sha} returned no lane-return block`
       : !onTip
         ? `composed gate ran on ${r.sha}, not the batch tip ${lane.sha}`

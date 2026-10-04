@@ -11,7 +11,7 @@ import { existsSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { type Brief, deriveLogPath, parseBrief, parseLaneReturn, returnEvent, runIdFromText } from "./core.ts";
+import { type Brief, deriveLogPath, failedRunBlock, parseBrief, parseLaneReturn, returnEvent, runFailed, runIdFromText } from "./core.ts";
 
 export const DIGEST_CUSTOM_TYPE = "loop-state-digest";
 const CLI_TIMEOUT_MS = 10_000;
@@ -121,7 +121,8 @@ export default function (pi: ExtensionAPI) {
     const first = results[0];
     const candidates = [first?.summary, first?.output, data.summary];
     const text = candidates.find((c): c is string => typeof c === "string" && c.includes("lane-return")) ?? candidates.find((c): c is string => typeof c === "string") ?? "";
-    const event = returnEvent(info.lane, runId, parseLaneReturn(text));
+    const block = parseLaneReturn(text);
+    const event = returnEvent(info.lane, runId, runFailed(data) ? failedRunBlock(block) : block);
     let result = await append(event, log);
     if (result.code === 2) {
       // The parsed block did not validate; keep the fact of the return.
