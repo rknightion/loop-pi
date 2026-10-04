@@ -8,6 +8,14 @@ test("parseBrief reads the header line and an optional Deadline line", () => {
   assert.deepEqual(parseBrief("Lane: A · Task: B · Tier: routine"), { lane: "A", task: "B", tier: "routine" });
 });
 
+test("parseBrief takes the bare task id when the header carries its title", () => {
+  assert.deepEqual(parseBrief("Lane: L1 · Task: T-7 (stop the e2e lane test racing) · Tier: routine"), {
+    lane: "L1",
+    task: "T-7",
+    tier: "routine",
+  });
+});
+
 test("parseBrief rejects anything but the header on the first non-empty line", () => {
   assert.equal(parseBrief("Objective: x\nLane: L1 · Task: T1 · Tier: routine"), null);
   assert.equal(parseBrief("Lane: L1 · Task: T1 · Tier: sloppy"), null);

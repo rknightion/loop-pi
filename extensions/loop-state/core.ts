@@ -8,9 +8,9 @@ export interface Brief {
   deadline?: string;
 }
 
-const HEADER_RE = /^Lane:\s*(\S+?)\s*·\s*Task:\s*(\S+?)\s*·\s*Tier:\s*(routine|guarded)\b/;
+const HEADER_RE = /^Lane:\s*(\S+?)\s*·\s*Task:\s*(\S+?)(?:\s*\([^·]*\))?\s*·\s*Tier:\s*(routine|guarded)\b/;
 
-/** The brief's first non-empty line is `Lane: <id> · Task: <id> · Tier: routine|guarded`. */
+/** The brief's first non-empty line is `Lane: <id> · Task: <id> [(<title>)] · Tier: routine|guarded`. */
 export function parseBrief(text: unknown): Brief | null {
   if (typeof text !== "string") return null;
   const lines = text.split(/\r?\n/);

@@ -200,7 +200,7 @@ before any `await`. A missing reply means the provider extension is not loaded; 
   dispatcher alike. `loop-state` folds a `gate-runner` dispatch into a live lane only, never a task.
 - Root extensions also include `loop-state/index.ts`: it appends `dispatch` and `return` to
   `codex/state-<stem>-loop<N>.jsonl` (sibling of the report) through `<agentDir>/bin/loop-state`
-  for `subagent` calls whose brief starts `Lane: <id> · Task: <id> · Tier: ...`, and injects the
+  for `subagent` calls whose brief starts `Lane: <id> · Task: <id> [(<title>)] · Tier: ...`, and injects the
   recovery digest (`loop-state-digest`, no turn) after compaction and at session start.
   pi-subagents' async events carry `sessionId` as the parent's session file path
   (`getSessionFile() ?? getSessionId()`) and `deadlineAt` in epoch ms.
