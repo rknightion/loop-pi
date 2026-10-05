@@ -1113,3 +1113,88 @@ test("proto: an unparseable command still gets the run-dir and loop-state refusa
   assert.equal(parseCommand(loopState, "root"), null);
   assert.equal(evaluateBashCommand(loopState, "root", 0, true, P2).block, true);
 });
+
+// Protocol 2 root loop-state hardening: a `by=` k=v other than root, stdin from a file (which the
+// guard cannot read), and `--run-dir` (which would point the call at another run's facts).
+const ROOT_LOOP_STATE_DENY_P2 = [
+  "loop-state append codex/state-a-loop1.jsonl land task=T-1 mode=after-green by=ext",
+  "loop-state append codex/state-a-loop1.jsonl park task=T-1 by=lane",
+  "python3 $HOME/.loop-pi-x/bin/loop-state append codex/state-a-loop1.jsonl close reason=done by=daemon",
+  "loop-state append codex/state-a-loop1.jsonl < /tmp/event.json",
+  "loop-state append codex/state-a-loop1.jsonl </tmp/event.json",
+  "cd /repo && loop-state append codex/state-a-loop1.jsonl 0< event.json",
+  "loop-state append codex/state-a-loop1.jsonl land task=T-1 mode=after-green --run-dir /tmp/other-run",
+  "loop-state append codex/state-a-loop1.jsonl close reason=budget --run-dir=/tmp/other-run",
+  "loop-state digest codex/state-a-loop1.jsonl --run-dir /tmp/other-run",
+];
+
+for (const command of ROOT_LOOP_STATE_DENY_P2) {
+  test(`proto root: loop-state by=, stdin from a file and --run-dir are refused: ${command}`, () => {
+    const decision = evaluateBashCommand(command, "root", 0, true, P2);
+    assert.equal(decision.block, true, command);
+    assert.match(decision.reason ?? "", /loop-state/);
+  });
+  test(`legacy root (no marker): loop-state by=, stdin file and --run-dir keep today's verdict: ${command}`, () => {
+    assert.equal(evaluateBashCommand(command, "root", 0, true, LEGACY).block, false, command);
+  });
+}
+
+test("proto root: loop-state by=root, a by word inside another value, a heredoc and a digest stay allowed", () => {
+  for (const command of [
+    "loop-state append codex/state-a-loop1.jsonl land task=T-1 mode=after-green by=root",
+    "loop-state append codex/state-a-loop1.jsonl judgement text=by=ext",
+    "loop-state append codex/state-a-loop1.jsonl <<'EOF'\n{\"ev\":\"judgement\",\"text\":\"x < y\"}\nEOF",
+    "loop-state digest codex/state-a-loop1.jsonl < /dev/null",
+    "sort < /tmp/x.txt && loop-state check codex/state-a-loop1.jsonl",
+  ]) {
+    const decision = evaluateBashCommand(command, "root", 0, true, P2);
+    assert.equal(decision.block, false, `${command}: ${decision.reason ?? ""}`);
+  }
+});
+
+test("proto root: an unparseable loop-state call with by=, a stdin file or --run-dir is still refused (fallback scan)", () => {
+  for (const command of [
+    "loop-state append codex/state-a-loop1.jsonl land task=T by=ext 'oops",
+    "loop-state append codex/state-a-loop1.jsonl < /tmp/e.json 'oops",
+    "loop-state append codex/state-a-loop1.jsonl land --run-dir /tmp/r 'oops",
+  ]) {
+    assert.equal(parseCommand(command, "root"), null, command);
+    assert.equal(evaluateBashCommand(command, "root", 0, true, P2).block, true, command);
+  }
+});
+
+// Protocol 2 root fence: the root never writes the planner's files (ops, grants, launch, goal).
+const ROOT_CONTROL_BASH_WRITES = [
+  "echo x > codex/goal-2026-10-04-loop3.md",
+  "printf '%s' '{}' >> /repo/codex/ops-2026-10-04-loop3.json",
+  "jq . /tmp/g.json | tee codex/grants-2026-10-04-loop3.json",
+  "cp /tmp/launch.txt codex/launch-2026-10-04-loop3.txt",
+  "mv codex/goal-2026-10-04-loop3.md /tmp/goal.md",
+  "sed -i '' 's/tier: routine/tier: guarded/' codex/goal-2026-10-04-loop3.md",
+  "rm codex/launch-*",
+  "bash -c 'echo x > codex/ops-2026-10-04-loop3.json'",
+];
+
+for (const command of ROOT_CONTROL_BASH_WRITES) {
+  test(`proto root: a bash write into codex/ops|grants|launch|goal-* is refused: ${command}`, () => {
+    const decision = evaluateBashCommand(command, "root", 0, true, P2);
+    assert.equal(decision.block, true, command);
+    assert.match(decision.reason ?? "", /root may not write/);
+  });
+  test(`legacy root (no marker): a bash write into a planner file keeps today's verdict: ${command}`, () => {
+    assert.equal(evaluateBashCommand(command, "root", 0, true, LEGACY).block, false, command);
+  });
+}
+
+test("proto root: reading planner files and writing state and report files stay allowed", () => {
+  for (const command of [
+    "cat codex/goal-2026-10-04-loop3.md",
+    "cp codex/goal-2026-10-04-loop3.md /tmp/goal.md",
+    "sha256sum codex/grants-2026-10-04-loop3.json > /tmp/sum",
+    "echo x >> codex/report-2026-10-04-loop3.md",
+    "loop-state append codex/state-2026-10-04-loop3.jsonl judgement text=x",
+  ]) {
+    const decision = evaluateBashCommand(command, "root", 0, true, P2);
+    assert.equal(decision.block, false, `${command}: ${decision.reason ?? ""}`);
+  }
+});

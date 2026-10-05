@@ -46,8 +46,10 @@ commit in `before..after` must satisfy one of:
 - it lies in some `old..new` range of the push log (`--push-log FILE`, default
   `<run-dir>/push-log.jsonl`, lines `{"repo", "ref", "old", "new", ...}`) for that repository and ref;
 - it touches only paths under `backlog/`;
-- its author or committer is a member of the repository's `bot_actors` list in the grants file (a
-  name equal to the login, or a GitHub noreply address `<id>+<login>@users.noreply.github.com`).
+- it lies in a range that a member of the repository's `bot_actors` list in the grants file (exact
+  bot logins: letters, digits and hyphens followed by `[bot]`) itself pushed or merged inside the snapshot window,
+  according to GitHub's activity API (push records, never author or committer metadata; missing
+  evidence grants nothing).
 Anything else is UNGRANTED and named in a `note:` line. The fast-forward check still applies. A
 derived `HEAD` move follows the default branch's verdict. Other refs, tags and releases are
 unchanged. Without the marker every rule above is skipped and behaviour is as before.
@@ -453,8 +455,9 @@ def validate_automation(grants_by_repo: dict) -> None:
     for grants in grants_by_repo.values():
         if isinstance(grants, dict) and "bot_actors" in grants:
             actors = grants["bot_actors"]
-            if not isinstance(actors, list) or not all(isinstance(a, str) and a for a in actors):
-                raise ValueError("bot_actors must be a list of nonempty login strings")
+            if not isinstance(actors, list) or not all(
+                    isinstance(a, str) and re.fullmatch(r"[A-Za-z0-9-]+\[bot\]", a) for a in actors):
+                raise ValueError("bot_actors must be a list of exact GitHub App bot logins ending in [bot]")
         if not isinstance(grants, dict) or "automation" not in grants:
             continue
         items = grants["automation"]
@@ -492,18 +495,10 @@ def snapshot_time(value: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def automation_actor(repo: str, remote: str, ref: str, old: str, new: str,
-                     items: list[dict], defaults: list[str | None],
-                     times: tuple[str, str]) -> str | None:
-    """Read push records, never commit metadata. Unknown or incomplete evidence fails closed."""
-    if (not ref.startswith("refs/heads/") or ref == "refs/heads/main"
-            or None in defaults or ref in defaults):
-        return None
-    candidates = [item["actor"] for item in items if
-                  item.get("ref") == ref or
-                  ("ref_prefix" in item and ref.startswith(item["ref_prefix"]))]
-    if not candidates:
-        return None
+def activity_entries(repo: str, remote: str, ref: str, times: tuple[str, str]) -> list[dict] | None:
+    """GitHub activity-API push records for `ref` inside the snapshot window, oldest first.
+    Push records only, never commit metadata. None when the evidence is missing, unreadable
+    or empty, so callers grant nothing."""
     try:
         start, end = map(snapshot_time, times)
         if start >= end:
@@ -543,6 +538,27 @@ def automation_actor(repo: str, remote: str, ref: str, old: str, new: str,
         # API is newest first. Preserve chronological order even for equal timestamps.
         entries.reverse()
         entries.sort(key=lambda entry: snapshot_time(entry["timestamp"]))
+        return entries
+    except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
+def automation_actor(repo: str, remote: str, ref: str, old: str, new: str,
+                     items: list[dict], defaults: list[str | None],
+                     times: tuple[str, str]) -> str | None:
+    """Read push records, never commit metadata. Unknown or incomplete evidence fails closed."""
+    if (not ref.startswith("refs/heads/") or ref == "refs/heads/main"
+            or None in defaults or ref in defaults):
+        return None
+    candidates = [item["actor"] for item in items if
+                  item.get("ref") == ref or
+                  ("ref_prefix" in item and ref.startswith(item["ref_prefix"]))]
+    if not candidates:
+        return None
+    entries = activity_entries(repo, remote, ref, times)
+    if not entries:
+        return None
+    try:
         zero = "0" * 40
         expected = old or zero
         for entry in entries:
@@ -554,8 +570,35 @@ def automation_actor(repo: str, remote: str, ref: str, old: str, new: str,
                 return None
             expected = entry["after"]
         return entries[0]["actor"]["login"] if expected == (new or zero) else None
-    except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError, AttributeError):
+    except (KeyError, TypeError, AttributeError):
         return None
+
+
+BOT_PUSH_TYPES = {"push", "force_push", "pr_merge", "merge_queue_merge"}
+
+
+def bot_pushed_commits(repo: str, remote: str, ref: str, bot_logins: list[str],
+                       times: tuple[str, str]) -> set[str]:
+    """Commits inside a `before..after` range that a declared bot actor itself pushed or merged
+    in the snapshot window, per GitHub's activity API. Commit author/committer metadata is never
+    read: it is forgeable. Missing or incomplete evidence grants nothing."""
+    if not bot_logins:
+        return set()
+    covered: set[str] = set()
+    for entry in activity_entries(repo, remote, ref, times) or []:
+        try:
+            if (entry["ref"] != ref or entry["actor"]["login"] not in bot_logins
+                    or entry["activity_type"] not in BOT_PUSH_TYPES
+                    or not re.fullmatch(r"[0-9a-f]{40}", entry["before"])
+                    or not re.fullmatch(r"[0-9a-f]{40}", entry["after"])
+                    or entry["before"] == ZERO_SHA):
+                continue
+            commits = rev_list(repo, f"{entry['before']}..{entry['after']}")
+        except (KeyError, TypeError):
+            continue
+        if commits:
+            covered.update(commits)
+    return covered
 
 
 PROTO_MARKER = "loop-pi-proto"
@@ -620,29 +663,9 @@ def touches_only_backlog(repo: str, sha: str) -> bool:
     return result.returncode == 0 and bool(paths) and all(p.startswith("backlog/") for p in paths)
 
 
-def is_bot_identity(name: str, email: str, logins: list[str]) -> bool:
-    for login in logins:
-        want = login.lower()
-        if name.lower() == want:
-            return True
-        m = re.fullmatch(r"(?:\d+\+)?(.+)@users\.noreply\.github\.com", email, re.IGNORECASE)
-        if m and m.group(1).lower() == want:
-            return True
-    return False
-
-
-def authored_by_bot(repo: str, sha: str, logins: list[str]) -> bool:
-    if not logins:
-        return False
-    result = run(["git", "-C", repo, "log", "-1", "--format=%an%x00%ae%x00%cn%x00%ce", sha])
-    parts = result.stdout.rstrip("\n").split("\0")
-    if result.returncode != 0 or len(parts) != 4:
-        return False
-    return is_bot_identity(parts[0], parts[1], logins) or is_bot_identity(parts[2], parts[3], logins)
-
-
 def default_move_verdict(repo: str, remote: str, ref: str, before_sha: str, after_sha: str,
-                         push_log: list[dict], bot_logins: list[str]) -> tuple[bool, list[str]]:
+                         push_log: list[dict], bot_logins: list[str],
+                         times: tuple[str, str] = ("", "")) -> tuple[bool, list[str]]:
     """Protocol 2: is every commit in before..after accounted for? Returns (covered, notes)."""
     fetched, reason = fetch_ref(repo, remote, ref)
     if not fetched:
@@ -651,11 +674,17 @@ def default_move_verdict(repo: str, remote: str, ref: str, before_sha: str, afte
     if commits is None:
         return False, [f"cannot list commits {before_sha[:12]}..{after_sha[:12]}"]
     logged = logged_commits(repo, ref, push_log)
+    bot_pushed: set[str] | None = None
     notes = []
     for sha in commits:
-        if sha in logged or touches_only_backlog(repo, sha) or authored_by_bot(repo, sha, bot_logins):
+        if sha in logged or touches_only_backlog(repo, sha):
             continue
-        notes.append(f"commit {sha[:12]} is not in a logged push, is not backlog-only and has no declared bot author")
+        if bot_pushed is None:
+            bot_pushed = bot_pushed_commits(repo, remote, ref, bot_logins, times)
+        if sha in bot_pushed:
+            continue
+        notes.append(f"commit {sha[:12]} is not in a logged push, is not backlog-only and was not pushed "
+                     "or merged by a declared bot actor")
     return not notes, notes
 
 
@@ -722,7 +751,7 @@ def compare_repo(name: str, before: dict, after: dict, grants: list[str] | dict,
                 before_sha, after_sha = b.get("refs", {}).get(ref), a.get("refs", {}).get(ref)
                 if before_sha and after_sha and before_sha != after_sha:
                     verdicts[ref] = default_move_verdict(name, remote, ref, before_sha, after_sha,
-                                                         proto["push_log"], bot_logins)
+                                                         proto["push_log"], bot_logins, times)
                 else:
                     verdicts[ref] = (False, [])
             return verdicts[ref]

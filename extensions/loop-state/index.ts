@@ -17,10 +17,11 @@ import { isAbsolute, join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { type Brief, deriveLogPath, failedRunBlock, parseBrief, parseLaneReturn, returnEvent, runFailed, runIdFromText } from "./core.ts";
-import { capNotifyMessage, contentText, NOTIFY_CUSTOM_TYPE, RETURN_CAP_BYTES } from "./return-cap.ts";
+import { capNotifyMessage, type CompletionInfo, completionInfo, contentText, NOTIFY_CUSTOM_TYPE, RETURN_CAP_BYTES } from "./return-cap.ts";
 
 export const DIGEST_CUSTOM_TYPE = "loop-state-digest";
 const CLI_TIMEOUT_MS = 10_000;
+const MAX_COMPLETIONS = 256;
 
 interface CliResult {
   code: number;
@@ -69,6 +70,9 @@ export default function (pi: ExtensionAPI) {
   const started = new Map<string, { deadlineAt?: string }>();
   const dispatched = new Map<string, { lane: string; task: string }>();
   const pendingComplete = new Map<string, Record<string, unknown>>();
+  // Structured async-complete facts by run id, for the return cap's saved-output path (S6).
+  const completions = new Map<string, CompletionInfo>();
+  const completionFor = (runId: string) => completions.get(runId);
 
   function warn(message: string) {
     if (warned.has(message)) return;
@@ -210,7 +214,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("message_end", (event) => {
     try {
-      const replacement = capNotifyMessage(event.message as { role?: string; customType?: string; content?: unknown }, process.env.LOOP_PI_RUN_DIR);
+      const replacement = capNotifyMessage(event.message as { role?: string; customType?: string; content?: unknown }, process.env.LOOP_PI_RUN_DIR, completionFor);
       if (replacement) return { message: replacement as typeof event.message };
     } catch (error) {
       warn(`return cap: ${String(error)}`);
@@ -225,7 +229,7 @@ export default function (pi: ExtensionAPI) {
         const m = message as { role?: string; customType?: string; content?: unknown };
         if (m.role !== "custom" || m.customType !== NOTIFY_CUSTOM_TYPE) return message;
         if (Buffer.byteLength(contentText(m.content), "utf8") <= RETURN_CAP_BYTES) return message;
-        const replacement = capNotifyMessage(m, process.env.LOOP_PI_RUN_DIR);
+        const replacement = capNotifyMessage(m, process.env.LOOP_PI_RUN_DIR, completionFor);
         if (!replacement) return message;
         changed = true;
         return replacement as typeof message;
@@ -282,6 +286,12 @@ export default function (pi: ExtensionAPI) {
     const d = data as Record<string, unknown>;
     if (typeof d.runId !== "string") return;
     if (typeof d.sessionId === "string" && d.sessionId !== sessionId) return;
+    const info = completionInfo(d);
+    if (info) {
+      completions.delete(info.runId);
+      completions.set(info.runId, info);
+      if (completions.size > MAX_COMPLETIONS) completions.delete(completions.keys().next().value!);
+    }
     const runId = d.runId;
     enqueue(() => handleComplete(runId, d));
   });

@@ -260,8 +260,11 @@ paths are exact, bash write detection is best-effort.
 
 - **Arming** happens in the `input` hook: "You are the root" plus one report path, or a bare
   `launch-*` path. It refuses (returns `handled`, no model turn) with no run dir, a cwd whose git
-  toplevel is not the goal's repository, a goal `## Run` `host:` other than this machine, or a
-  missing goal; incident `incidents/root/<sid>-<UTC>-arm-refused.json`. A first input naming a
+  toplevel is not the goal's repository, a goal `## Run` `host:` other than this machine, a
+  missing goal, or a launch `Ops grants:` / `Audit grants:` line whose path or sha256 differs from
+  the goal's `## Authority` `ops:` / `audit grants:` line (a goal `none` or no line means the launch
+  carries none; a relative goal path resolves against the goal's repository); incident
+  `incidents/root/<sid>-<UTC>-arm-refused.json`. A first input naming a
   `codex/goal-*.md` path that does not arm gets a visible relaunch warning. On success it writes the
   marker, freezes `Ops grants:` and the optional `Audit grants: <abs> sha256=<hex>` (copy at
   `<run dir>/audit-grants.json`; a bad hash gives none and an `incidents/ops/` record of class
@@ -271,13 +274,22 @@ paths are exact, bash write detection is best-effort.
   `loop-pi-proto`; `harness-facts.jsonl`
   `{v:1, ts, kind: compaction-failed|quota-exhausted|context-overflow, session, detail}`;
   `push-log.jsonl` `{v:1, ts, actor: root|lane, agent, lane, repo, remote, ref, old, new}` written
-  by loop-guard after every successful push (`old` from `ls-remote` before it); `audit-grants.json`;
+  by loop-guard after every successful push (`old` from `ls-remote` before it; `new` is the local
+  commit the refspec's source named, logged only when the remote ref now equals it, so a foreign
+  push after it is never absorbed and a no-op push logs nothing) and every successful `gh pr merge`
+  (`old` the remote base branch before, `new` the PR's merge commit, only when it is MERGED and the
+  base branch equals it); `repo` is the main checkout (`dirname` of the common git dir, so linked
+  worktrees match), `--show-toplevel` only as a fallback; `audit-grants.json`;
   `returns/<runId>.md`; `worktrees/<lane-id>/`. The lane binding carries optional `runDir`.
 - **Return cap** (loop-state, `message_end`, plus the `context` hook for already-stored messages): a
   `subagent-notify` message over 16,384 bytes becomes its first 6,144 bytes, an omission line naming
   the full copy, its last 8,192 bytes and the `lane-return` block if it is not in the tail. The
   `return` event is parsed from the uncapped payload. With no run dir it is left uncapped. The
-  dispatcher's RPC completion path applies the same cap.
+  dispatcher's RPC completion path applies the same cap. The full copy is pi-subagents' saved output
+  only when its structured completion (the async-complete payload's single result `savedOutputPath`,
+  for the notify's own last `Retention-managed async directory:` line) or a reference-only marker on
+  the first line of the lane's output names it; a path in the return body is never used. Otherwise
+  `returns/<runId>.md`.
 - **Closeout**: `/loop-closeout` (loop-wait) emits `pi.events.emit("loop-closeout", {lines, pending})`
   after its sweep; loop-continuation runs
   `loop-pi-audit closeout --run-dir <rd> [--grants <rd>/audit-grants.json --grants-sha256 <hex>] --push-log <rd>/push-log.jsonl`,
@@ -292,16 +304,22 @@ paths are exact, bash write detection is best-effort.
   branch `loop/<run-dir basename>/<lane-id>`, created at `tool_call` and undone if the launch fails.
   A root `land` or `park` for that task (read from the state log) removes it once the lane's run has
   ended; a merged branch is deleted, an unmerged one kept. The closeout sweep and pi quit remove the
-  rest. State entry type `lane-worktrees-state`.
-- **loop-guard, root**: refuses `loop-state` with `--by ext|daemon|dispatcher` or a stdin `by`
-  field, edit/write into the run dir or `~/repos/agent-docs/authority/`, a second `subagent` status
-  for the same target with no wake since (a return, `loop-watch`, `loop-wake`, input, session start
-  or compaction), and `bash` timeouts over 900 s. **Lanes**: `codex/grants-*` and authority writes,
-  `gh pr merge` outside an ops `release` surface.
+  rest. A worktree whose `git status --porcelain` is not empty is never removed: it and its branch
+  are kept and listed as `kept dirty`. After a session start, runs recorded earlier count as live
+  until pi-subagents' `<async dir>/status.json` `state` is terminal (anything but `queued` or
+  `running`); no status file keeps the worktree. State entry type `lane-worktrees-state`.
+- **loop-guard, root**: refuses `loop-state` with `--by ext|daemon|dispatcher`, a `by=` field other
+  than `root`, `--run-dir`, a stdin `by` field or an `append` event on stdin from a file (`< file`),
+  edit/write into the run dir, `~/repos/agent-docs/authority/` or the planner's
+  `codex/ops-*`, `codex/grants-*`, `codex/launch-*` and `codex/goal-*` (exact for edit/write, best
+  effort for bash), a second `subagent` status for the same target with no wake since (a return,
+  `loop-watch`, `loop-wake`, input, session start or compaction), and `bash` timeouts over 900 s.
+  **Lanes**: `codex/grants-*` and authority writes, `gh pr merge` outside an ops `release` surface.
 - **loop-state**: `land` is `after-green` only (legacy `pre-green` lines still check and digest);
   `revert` by root with `reason=root-decision`; `park needs=budget`; `close reason=budget` needs a
   `compaction-failed` or `quota-exhausted` fact; judgements up to 4 KB; one `open` per log.
 - **loop-pi-audit**: under the marker a default-branch move is granted only when every commit in
   `before..after` lies in a push-log `old..new` range for that repo and ref, touches only
-  `backlog/`, or has a declared `bot_actors` author or committer. A default-branch grant entry is
+  `backlog/`, or lies in a range a declared `bot_actors` login (`<login>[bot]`) itself pushed or
+  merged, per GitHub's activity API; commit metadata grants nothing. A default-branch grant entry is
   ignored with a warning.

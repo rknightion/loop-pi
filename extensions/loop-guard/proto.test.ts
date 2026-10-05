@@ -135,6 +135,37 @@ test("proto root: edit and write into the authority registry are refused (~ and 
   }
 });
 
+test("proto root: edit and write into codex/ops-*, grants-*, launch-* and goal-* are refused, through any spelling", async () => {
+  const r = root();
+  await mkdir(join(scratch, "links"), { recursive: true });
+  await symlink(join(cwd, "codex"), join(scratch, "links", "codex-link"));
+  for (const [tool, path] of [
+    ["write", "codex/ops-2026-10-04-loop3.json"],
+    ["edit", "codex/grants-2026-10-04-loop3.json"],
+    ["write", join(cwd, "codex", "launch-2026-10-04-loop3.txt")],
+    ["edit", `@${join(cwd, "codex", "goal-2026-10-04-loop3.md")}`],
+    ["write", join(cwd, "codex", "GOAL-2026-10-04-loop3.md")],
+    ["write", join(scratch, "links", "codex-link", "goal-2026-10-04-loop3.md")],
+  ]) {
+    const result = await r.call(tool, { path, content: "x", edits: [] });
+    assert.equal(blocked(result), true, `${tool} ${path}`);
+    assert.match(result.reason, /root may not write/, path);
+  }
+  const bash = await r.call("bash", { command: "echo x > codex/goal-2026-10-04-loop3.md" });
+  assert.equal(blocked(bash), true);
+  assert.match(bash.reason, /root may not write/);
+  for (const path of ["codex/state-2026-10-04-loop3.jsonl", "codex/report-2026-10-04-loop3.md", "codex/notes-goal.md"]) {
+    const result = await r.call("write", { path, content: "x" });
+    assert.equal(blocked(result), false, `${path}: ${result?.reason}`);
+  }
+  process.env.LOOP_PI_RUN_DIR = legacyRunDir;
+  const legacy = root();
+  for (const path of ["codex/goal-2026-10-04-loop3.md", "codex/ops-2026-10-04-loop3.json"]) {
+    const result = await legacy.call("write", { path, content: "x" });
+    assert.equal(blocked(result), false, `legacy ${path}: ${result?.reason}`);
+  }
+});
+
 test("proto root: writes elsewhere stay allowed", async () => {
   const r = root();
   for (const path of ["codex/report-repo-loop1.md", join(scratch, "runs", "other.md"), "LOOP.md"]) {

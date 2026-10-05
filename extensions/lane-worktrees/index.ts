@@ -14,9 +14,16 @@
 //
 // Only `cwd`, `isolation` and `worktree` are touched; loop-guard's rewrite is `extensionBindings`.
 // Both handlers mutate the same input object, so their order does not matter.
+//
+// A worktree with uncommitted changes (`git status --porcelain` not empty) is never removed: it is
+// kept and named "kept dirty" in the warning and the sweep line. After a session start (reload or
+// resume) the runs recorded before it have unknown liveness: they count as live until pi-subagents'
+// own status file for the run (`<async dir>/status.json`, `state` other than queued or running) says
+// the run ended. No status file means unknown, and the worktree is kept.
 
 import { execFile } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import type { CustomEntry, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { deriveLogPath } from "../loop-state/core.ts";
@@ -33,8 +40,12 @@ interface Tree {
   branch: string;
   repo: string;
   runs: string[];
+  /** Run id -> the pi-subagents async directory its launch result named (`details.asyncDir`). */
+  asyncDirs?: Record<string, string>;
   /** A land or park arrived while a run of this lane was live: remove once none is. */
   release?: "land" | "park";
+  /** A release found uncommitted changes, so the worktree was kept. */
+  keptDirty?: boolean;
 }
 
 interface Persisted {
@@ -61,6 +72,34 @@ function git(cwd: string, args: string[]): Promise<Git> {
   });
 }
 
+// pi-subagents' terminal run states (`runs/background/async-job-tracker.js`, isTerminalJobStatus);
+// `queued` and `running` are its active states (`active-run-index.js`, isActiveAsyncState).
+const ENDED_STATES = new Set(["complete", "failed", "partial", "paused", "stopped", "rejected"]);
+
+/** pi-subagents' async run root (`src/shared/types.js`: PI_SUBAGENTS_TEMP_ROOT, else tmpdir/pi-subagents-uid-<uid>). */
+function defaultAsyncRoot(): string | null {
+  const configured = process.env.PI_SUBAGENTS_TEMP_ROOT?.trim();
+  if (configured) return join(resolve(configured), "async-subagent-runs");
+  if (typeof process.getuid === "function") return join(tmpdir(), `pi-subagents-uid-${process.getuid()}`, "async-subagent-runs");
+  return null;
+}
+
+/** Whether pi-subagents' status file says the run ended; false when it is active, absent or unreadable. */
+export function runEndedPerStatus(runId: string, asyncDir: string | undefined): boolean {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(runId)) return false;
+  const dir = asyncDir && isAbsolute(asyncDir) && basename(asyncDir) === runId ? asyncDir : (() => {
+    const root = defaultAsyncRoot();
+    return root ? join(root, runId) : null;
+  })();
+  if (!dir) return false;
+  try {
+    const status = JSON.parse(readFileSync(join(dir, "status.json"), "utf8")) as { state?: unknown };
+    return typeof status?.state === "string" && ENDED_STATES.has(status.state);
+  } catch {
+    return false;
+  }
+}
+
 function real(path: string): string {
   try {
     return realpathSync(path);
@@ -75,6 +114,8 @@ export default function (pi: ExtensionAPI) {
   let sessionKey = "";
   let lastCtx: ExtensionContext | null = null;
   const live = new Set<string>();
+  // Runs recorded before the last session start whose end this runtime has not seen.
+  const unknown = new Set<string>();
   // Tool call id -> the lane a launch or resume belongs to, and whether this call made its worktree.
   const pending = new Map<string, { lane: string; created: boolean; branchCreated: boolean }>();
   const bashCalls = new Set<string>();
@@ -122,7 +163,16 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  const isLive = (tree: Tree) => tree.runs.some((id) => live.has(id));
+  const runLive = (tree: Tree, id: string): boolean => {
+    if (live.has(id)) return true;
+    if (!unknown.has(id)) return false;
+    if (runEndedPerStatus(id, tree.asyncDirs?.[id])) {
+      unknown.delete(id);
+      return false;
+    }
+    return true;
+  };
+  const isLive = (tree: Tree) => tree.runs.some((id) => runLive(tree, id));
 
   /** The default branch refs a lane branch may have been merged into: origin's HEAD, then the root's branch. */
   async function defaultRefs(repo: string): Promise<string[]> {
@@ -147,11 +197,14 @@ export default function (pi: ExtensionAPI) {
     return false;
   }
 
-  async function removeWorktree(repo: string, path: string): Promise<boolean> {
-    if (!existsSync(path)) return true;
+  /** Remove a clean worktree. One with uncommitted changes, or whose status cannot be read, is kept. */
+  async function removeWorktree(repo: string, path: string): Promise<"removed" | "dirty" | "failed"> {
+    if (!existsSync(path)) return "removed";
+    const status = await git(path, ["status", "--porcelain"]);
+    if (status.code !== 0 || status.stdout.trim() !== "") return "dirty";
     const r = await git(repo, ["worktree", "remove", "--force", path]);
     if (r.code !== 0) warn(`could not remove ${path}: ${r.stderr.trim()}`);
-    return r.code === 0;
+    return r.code === 0 ? "removed" : "failed";
   }
 
   /** Remove a lane's worktree; after a land delete its branch when merged, after a park keep it. */
@@ -161,7 +214,15 @@ export default function (pi: ExtensionAPI) {
       persist();
       return;
     }
-    if (!(await removeWorktree(tree.repo, tree.path))) return;
+    const removed = await removeWorktree(tree.repo, tree.path);
+    if (removed === "dirty") {
+      delete tree.release;
+      tree.keptDirty = true;
+      persist();
+      warn(`kept dirty: ${tree.lane} (${tree.path}) has uncommitted changes after the ${why} of ${tree.task}; not removed`);
+      return;
+    }
+    if (removed !== "removed") return;
     trees.delete(tree.lane);
     persist();
     if (why === "land" && (await merged(tree.repo, tree.branch))) {
@@ -178,6 +239,8 @@ export default function (pi: ExtensionAPI) {
     for (const event of events) {
       for (const tree of [...trees.values()]) if (tree.task === event.task) await release(tree, event.ev);
     }
+    // A release that waited on a run whose end was only visible in pi-subagents' status file.
+    for (const tree of [...trees.values()]) if (tree.release && !isLive(tree)) await release(tree, tree.release);
   }
 
   /** The closeout sweep: remove every remaining worktree (live lanes' are kept), delete merged branches. */
@@ -187,6 +250,7 @@ export default function (pi: ExtensionAPI) {
     const root = join(dir, "worktrees");
     let removed = 0;
     const keptLive: string[] = [];
+    const keptDirty: string[] = [];
     const failed: string[] = [];
     const repos = new Set<string>();
     const names = existsSync(root) ? readdirSync(root) : [];
@@ -203,9 +267,13 @@ export default function (pi: ExtensionAPI) {
         continue;
       }
       repos.add(repo);
-      if (await removeWorktree(repo, path)) {
+      const outcome = await removeWorktree(repo, path);
+      if (outcome === "removed") {
         removed++;
         trees.delete(name);
+      } else if (outcome === "dirty") {
+        keptDirty.push(name);
+        if (tree) tree.keptDirty = true;
       } else {
         failed.push(name);
       }
@@ -221,7 +289,7 @@ export default function (pi: ExtensionAPI) {
       for (const ref of refs.stdout.split("\n").map((l) => l.trim()).filter(Boolean)) {
         const branch = ref.replace(/^refs\/heads\//, "");
         const lane = branch.slice(branch.lastIndexOf("/") + 1);
-        if (keptLive.includes(lane)) continue;
+        if (keptLive.includes(lane) || keptDirty.includes(lane)) continue;
         if (await merged(repo, branch)) {
           if ((await git(repo, ["branch", "-D", branch])).code === 0) deleted++;
         } else {
@@ -233,6 +301,7 @@ export default function (pi: ExtensionAPI) {
     const parts = [`lane-worktrees: removed ${removed} worktree(s), deleted ${deleted} merged branch(es)`];
     parts.push(unmerged.length ? `kept unmerged: ${unmerged.join(", ")}` : "no unmerged lane branches");
     if (keptLive.length) parts.push(`kept live: ${keptLive.join(", ")}`);
+    if (keptDirty.length) parts.push(`kept dirty: ${keptDirty.join(", ")}`);
     if (failed.length) parts.push(`could not remove: ${failed.join(", ")}`);
     return parts.join("; ");
   }
@@ -247,6 +316,7 @@ export default function (pi: ExtensionAPI) {
     sessionKey = ctx.sessionManager.getSessionFile?.() ?? ctx.sessionManager.getSessionId();
     trees.clear();
     live.clear();
+    unknown.clear();
     lastSeq = null;
     for (const entry of ctx.sessionManager.getBranch()) {
       if (entry.type === "custom" && entry.customType === STATE_CUSTOM_TYPE) {
@@ -256,6 +326,8 @@ export default function (pi: ExtensionAPI) {
         lastSeq = typeof data?.lastSeq === "number" ? data.lastSeq : null;
       }
     }
+    // This runtime saw none of these runs start, so it cannot see them end: liveness is unknown.
+    for (const tree of trees.values()) for (const id of tree.runs) unknown.add(id);
   });
 
   pi.on("tool_call", async (event, ctx) => {
@@ -328,8 +400,7 @@ export default function (pi: ExtensionAPI) {
     const runId = launchedRunId(event.result);
     if (event.isError && !runId) {
       // Blocked or failed before a run started: undo only what this call made.
-      if (p.created) {
-        await removeWorktree(tree.repo, tree.path);
+      if (p.created && (await removeWorktree(tree.repo, tree.path)) === "removed") {
         if (p.branchCreated) await git(tree.repo, ["branch", "-D", tree.branch]);
         trees.delete(p.lane);
         persist();
@@ -337,12 +408,17 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     if (runId && !tree.runs.includes(runId)) tree.runs.push(runId);
+    const asyncDir = (event.result as { details?: { asyncDir?: unknown } } | undefined)?.details?.asyncDir;
+    if (runId && typeof asyncDir === "string" && isAbsolute(asyncDir)) tree.asyncDirs = { ...tree.asyncDirs, [runId]: asyncDir };
     persist();
   });
 
   pi.events.on("subagent:async-started", (data) => {
     const d = data as { id?: unknown; sessionId?: unknown } | null;
-    if (typeof d?.id === "string" && d.sessionId === sessionKey) live.add(d.id);
+    if (typeof d?.id === "string" && d.sessionId === sessionKey) {
+      live.add(d.id);
+      unknown.delete(d.id);
+    }
   });
 
   pi.events.on("subagent:async-complete", (data) => {
@@ -350,6 +426,7 @@ export default function (pi: ExtensionAPI) {
     const id = typeof d?.runId === "string" ? d.runId : typeof d?.id === "string" ? d.id : undefined;
     if (!id) return;
     live.delete(id);
+    unknown.delete(id);
     for (const tree of [...trees.values()]) {
       if (tree.release && tree.runs.includes(id) && !isLive(tree)) void release(tree, tree.release);
     }

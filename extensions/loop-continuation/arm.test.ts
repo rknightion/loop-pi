@@ -7,7 +7,7 @@ import { hostname } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { checkArm, envelopeTaskIds, type ArmEnv } from "./arm.ts";
-import { cleanupFixtures, fakePi, fresh, goalText, initRepo, loopFixture } from "./test-fixture.ts";
+import { addAuthority, cleanupFixtures, fakePi, fresh, goalText, initRepo, loopFixture } from "./test-fixture.ts";
 
 after(cleanupFixtures);
 
@@ -181,6 +181,7 @@ test("Audit grants are frozen into the run dir with their digest and exposed on 
   const grantsPath = join(f.repo, "codex", "grants-x-loop3.json");
   const grants = JSON.stringify({ [f.repo]: { refs: [], automation: [] }, bot_actors: ["release-app[bot]"] });
   writeFileSync(grantsPath, grants);
+  addAuthority(f, `audit grants: ${grantsPath} sha256=${sha(grants)}`);
   const pi = await fakePi({ agentDir: f.agentDir, cwd: f.repo, runDir: f.runDir });
   try {
     await pi.input(`${f.launch}\nAudit grants: ${grantsPath} sha256=${sha(grants)}`);
@@ -197,6 +198,8 @@ test("Audit grants are frozen into the run dir with their digest and exposed on 
   }
 
   const g = loopFixture();
+  // The goal and the launch agree on the digest; the file does not match it, so the freeze refuses it.
+  addAuthority(g, `audit grants: ${join(g.repo, "codex", "grants.json")} sha256=${"0".repeat(64)}`);
   const pi2 = await fakePi({ agentDir: g.agentDir, cwd: g.repo, runDir: g.runDir });
   try {
     writeFileSync(join(g.repo, "codex", "grants.json"), "{}");
@@ -220,6 +223,7 @@ test("a launch file of the existing shape (cmd line, goal named in the text, Ops
   const ops = JSON.stringify({ v: 1, ops: [{ surface: "deploy:svc", kind: "deploy", allow: ["just deploy"], secret_paths: [] }] });
   const opsPath = join(f.repo, "codex", "ops-2026-10-04-loop3.json");
   writeFileSync(opsPath, ops);
+  addAuthority(f, `ops: ${opsPath} sha256=${sha(ops)}`);
   const launchFile = join(f.repo, "codex", "launch-2026-10-04-loop3.txt");
   writeFileSync(
     launchFile,
@@ -259,5 +263,55 @@ test("a goal whose ## Run lacks root-model still arms, with a warning that open 
     assert.ok(pi.notes.some((n) => n.type === "warning" && /open was not appended.*root-model/.test(n.message)), JSON.stringify(pi.notes));
   } finally {
     pi.restore();
+  }
+});
+
+test("the launch's Ops and Audit grants lines must be the goal's ## Authority ops and audit grants lines, or the arm is refused", async () => {
+  const opsBody = JSON.stringify({ v: 1, ops: [{ surface: "deploy:svc", kind: "deploy", allow: ["just deploy"], secret_paths: [] }] });
+  const auditBody = JSON.stringify({ "/r": { refs: [] } });
+  const other = JSON.stringify({ v: 1, ops: [] });
+  type Case = { name: string; authority: (p: Record<string, string>) => string[]; launch: (p: Record<string, string>) => string[]; refused: RegExp | null };
+  const cases: Case[] = [
+    { name: "both match", authority: (p) => [`ops: ${p.ops} sha256=${sha(opsBody)}`, `audit grants: \`${p.audit}\` sha256=${sha(auditBody)}`], launch: (p) => [`Ops grants: ${p.ops} sha256=${sha(opsBody)}`, `Audit grants: ${p.audit} sha256=${sha(auditBody)}`], refused: null },
+    { name: "a repo-relative goal path", authority: () => [`ops: codex/ops-x-loop3.json sha256=${sha(opsBody)}`, "audit grants: none"], launch: (p) => [`Ops grants: ${p.ops} sha256=${sha(opsBody)}`], refused: null },
+    { name: "older goal: no audit grants line, no launch line", authority: (p) => [`ops: ${p.ops} sha256=${sha(opsBody)}`], launch: (p) => [`Ops grants: ${p.ops} sha256=${sha(opsBody)}`], refused: null },
+    { name: "goal ops none, launch carries Ops grants", authority: () => ["ops: none", "audit grants: none"], launch: (p) => [`Ops grants: ${p.ops} sha256=${sha(opsBody)}`], refused: /launch carries an Ops grants line but the goal's ## Authority ops is none/ },
+    { name: "goal has no ops line, launch carries Ops grants", authority: () => [], launch: (p) => [`Ops grants: ${p.ops} sha256=${sha(opsBody)}`], refused: /Ops grants line but the goal's ## Authority ops is absent/ },
+    { name: "goal audit none, launch carries Audit grants", authority: () => ["ops: none", "audit grants: none"], launch: (p) => [`Audit grants: ${p.audit} sha256=${sha(auditBody)}`], refused: /Audit grants line but the goal's ## Authority audit grants is none/ },
+    { name: "no goal audit line, launch carries Audit grants", authority: () => ["ops: none"], launch: (p) => [`Audit grants: ${p.audit} sha256=${sha(auditBody)}`], refused: /Audit grants line but the goal's ## Authority audit grants is absent/ },
+    { name: "a different ops file with its own valid digest", authority: (p) => [`ops: ${p.ops} sha256=${sha(opsBody)}`], launch: (p) => [`Ops grants: ${p.other} sha256=${sha(other)}`], refused: /Ops grants file .*ops-wide\.json is not the goal's ops file/ },
+    { name: "the same ops file, another digest", authority: (p) => [`ops: ${p.ops} sha256=${sha(opsBody)}`], launch: (p) => [`Ops grants: ${p.ops} sha256=${sha(other)}`], refused: /Ops grants sha256 .* is not the goal's ops sha256/ },
+    { name: "a goal ops file the launch omits", authority: (p) => [`ops: ${p.ops} sha256=${sha(opsBody)}`], launch: () => [], refused: /names .*ops-x-loop3\.json but the launch has no Ops grants line/ },
+    { name: "a different audit grants digest", authority: (p) => ["ops: none", `audit grants: ${p.audit} sha256=${sha(auditBody)}`], launch: (p) => [`Audit grants: ${p.audit} sha256=${"0".repeat(64)}`], refused: /Audit grants sha256 0+ is not the goal's audit grants sha256/ },
+  ];
+  for (const c of cases) {
+    const f = loopFixture();
+    const p = { ops: join(f.repo, "codex", "ops-x-loop3.json"), audit: join(f.repo, "codex", "grants-x-loop3.json"), other: join(f.repo, "codex", "ops-wide.json") };
+    writeFileSync(p.ops, opsBody);
+    writeFileSync(p.audit, auditBody);
+    writeFileSync(p.other, other);
+    addAuthority(f, ...c.authority(p));
+    const pi = await fakePi({ agentDir: f.agentDir, cwd: f.repo, runDir: f.runDir });
+    try {
+      const result = await pi.input([f.launch, ...c.launch(p)].join("\n"));
+      if (c.refused === null) {
+        assert.deepEqual(result, { action: "continue" }, `${c.name}: ${JSON.stringify(pi.notes)}`);
+        assert.equal(rootIncidents(f.agentDir).length, 0, c.name);
+        assert.equal(pi.query().reportPath, f.report, c.name);
+        continue;
+      }
+      assert.deepEqual(result, { action: "handled" }, c.name);
+      const incidents = rootIncidents(f.agentDir);
+      assert.equal(incidents.length, 1, c.name);
+      assert.equal(incidents[0].body.class, "loop-arm-refused", c.name);
+      assert.match(incidents[0].body.reason, c.refused, c.name);
+      assert.ok(pi.notes.some((n) => n.type === "error" && c.refused!.test(n.message)), `${c.name}: the reason is shown`);
+      assert.equal(pi.query().reportPath, null, `${c.name}: not armed`);
+      assert.equal(pi.query().ops, null, `${c.name}: no ops frozen`);
+      assert.equal(existsSync(join(f.runDir, "loop-pi-proto")), false, `${c.name}: no marker`);
+      assert.equal(existsSync(join(f.runDir, "audit-grants.json")), false, `${c.name}: no audit grants copy`);
+    } finally {
+      pi.restore();
+    }
   }
 });

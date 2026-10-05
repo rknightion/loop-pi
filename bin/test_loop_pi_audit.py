@@ -4,6 +4,7 @@ runnable as `python3 -m unittest bin.test_loop_pi_audit -v` from `pi/`, or
 directly as a script. Builds scratch git repos with a local bare "remote"
 (file-path, no network) under a temp dir.
 """
+import datetime
 import hashlib
 import json
 import os
@@ -11,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -1075,24 +1077,91 @@ class ProtoDefaultBranchTests(unittest.TestCase):
         again = self.closeout(self.grants({self.repo: ["HEAD"]}))
         self.assertEqual(again.returncode, 1, again.stdout + again.stderr)
 
-    def test_a_bot_commit_and_a_bot_merge_pass_only_for_declared_actors(self):
+    def github_fixture(self, entries, gh_fails=False):
+        """Make the remote look like a GitHub repo and `gh api` answer with `entries` (activity records).
+        `git remote get-url` is the only git call faked; everything else is the real git."""
+        for name in ("git", "gh"):
+            path = os.path.join(self.gh_bin, name)
+            if os.path.lexists(path):
+                os.unlink(path)
+        feed = os.path.join(self.tmp, "activity.json")
+        with open(feed, "w", encoding="utf-8") as fh:
+            json.dump([entries], fh)
+        with open(os.path.join(self.gh_bin, "git"), "w", encoding="utf-8") as fh:
+            fh.write('#!/bin/sh\ncase "$*" in *"remote get-url"*) echo https://github.com/export/audit-fixture.git; '
+                     f'exit 0;; esac\nexec {GIT} "$@"\n')
+        with open(os.path.join(self.gh_bin, "gh"), "w", encoding="utf-8") as fh:
+            fh.write('#!/bin/sh\ncase "$1" in api) ' + ("exit 1" if gh_fails else f"/bin/cat {feed}; exit 0")
+                     + ";; esac\necho '[]'\n")
+        for name in ("git", "gh"):
+            os.chmod(os.path.join(self.gh_bin, name), 0o755)
+
+    def activity(self, before, after, actor=None, kind="push", ref="refs/heads/main"):
+        return {"ref": ref, "before": before, "after": after, "activity_type": kind,
+                "timestamp": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "actor": {"login": actor or self.BOT}}
+
+    def bot_commit_on_main(self):
+        """A commit on main whose author AND committer metadata name the bot, pushed by a human."""
         self.ready()
-        author = f"{self.BOT} <{self.BOT_EMAIL}>"
-        git(self.other, "checkout", "-q", "-b", "renovate/x")
-        self.commit(self.other, "dep.txt", "bump", author=author)
-        git(self.other, "checkout", "-q", "main")
-        subprocess.run([GIT, "-C", self.other, "merge", "--no-ff", "-q", "-m", "merge bump", "renovate/x"],
-                       check=True, capture_output=True, text=True, timeout=60,
-                       env={**os.environ, "GIT_COMMITTER_NAME": self.BOT, "GIT_COMMITTER_EMAIL": self.BOT_EMAIL,
-                            "GIT_AUTHOR_NAME": self.BOT, "GIT_AUTHOR_EMAIL": self.BOT_EMAIL})
+        env = {"GIT_COMMITTER_NAME": self.BOT, "GIT_COMMITTER_EMAIL": self.BOT_EMAIL}
+        sha = self.commit(self.other, "dep.txt", "bump", author=f"{self.BOT} <{self.BOT_EMAIL}>", env=env)
         git(self.other, "push", "-q", "origin", "main")
+        time.sleep(1.1)  # snapshot times have one-second resolution and the window must be non-empty
+        return sha
+
+    def test_bot_metadata_alone_grants_nothing(self):
+        sha = self.bot_commit_on_main()
+        self.github_fixture([])
         declared = self.grants({self.repo: {"refs": ["HEAD"], "bot_actors": [self.BOT]}})
         result = self.closeout(declared)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        undeclared = self.grants({self.repo: ["HEAD"]}, "plain.json")
-        self.assertEqual(self.closeout(undeclared).returncode, 1)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(sha[:12], result.stdout)
+
+    def test_a_commit_in_a_range_the_declared_bot_pushed_or_merged_is_granted(self):
+        sha = self.bot_commit_on_main()
+        declared = self.grants({self.repo: {"refs": ["HEAD"], "bot_actors": [self.BOT]}})
+        for kind in ("push", "force_push", "pr_merge", "merge_queue_merge"):
+            with self.subTest(kind=kind):
+                self.github_fixture([self.activity(self.start, sha, kind=kind)])
+                result = self.closeout(declared)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_activity_that_does_not_show_the_declared_bot_grants_nothing(self):
+        sha = self.bot_commit_on_main()
+        declared = self.grants({self.repo: {"refs": ["HEAD"], "bot_actors": [self.BOT]}})
+        elsewhere = "1" * 40
+        cases = {
+            "other actor": ([self.activity(self.start, sha, actor="other-app[bot]")], False),
+            "human actor": ([self.activity(self.start, sha, actor="someone")], False),
+            "range excludes the commit": ([self.activity(self.start, elsewhere)], False),
+            "ref mismatch": ([self.activity(self.start, sha, ref="refs/heads/other")], False),
+            "creation record": ([self.activity("0" * 40, sha)], False),
+            "unrelated type": ([self.activity(self.start, sha, kind="branch_creation")], False),
+            "api failure": ([], True),
+        }
+        for label, (entries, fails) in cases.items():
+            with self.subTest(label):
+                self.github_fixture(entries, gh_fails=fails)
+                result = self.closeout(declared)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn(sha[:12], result.stdout)
+
+    def test_an_undeclared_bot_is_not_granted_even_with_its_push_records(self):
+        sha = self.bot_commit_on_main()
+        self.github_fixture([self.activity(self.start, sha)])
+        self.assertEqual(self.closeout(self.grants({self.repo: ["HEAD"]}, "plain.json")).returncode, 1)
         wrong = self.grants({self.repo: {"refs": ["HEAD"], "bot_actors": ["other-app[bot]"]}}, "wrong.json")
         self.assertEqual(self.closeout(wrong).returncode, 1)
+
+    def test_every_bot_actors_entry_must_be_an_exact_bot_login(self):
+        self.ready()
+        for bad in ("renovate", "[bot]", "", "renovate[BOT]", "a b[bot]", "renovate[bot]x", "ren.ovate[bot]"):
+            with self.subTest(entry=bad):
+                grants = self.grants({self.repo: {"refs": [], "bot_actors": [self.BOT, bad]}}, "bad.json")
+                result = self.closeout(grants)
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn("bot_actors", result.stderr)
 
     def test_a_default_branch_ref_grant_is_ignored_with_a_warning(self):
         self.ready()

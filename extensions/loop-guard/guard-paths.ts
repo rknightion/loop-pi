@@ -11,7 +11,7 @@
 import { existsSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, basename as pathBasename, isAbsolute, join, resolve } from "node:path";
-import { isGrantsPath, isLoopControlPath } from "./rules.ts";
+import { isGrantsPath, isLoopControlPath, rootControlReason } from "./rules.ts";
 
 export const RUN_DIR_ENV = "LOOP_PI_RUN_DIR";
 export const PROTO_MARKER = "loop-pi-proto";
@@ -137,8 +137,16 @@ export function isLoopControlToolPath(raw: unknown, cwd: string, grants = false)
   return isLoopControlPath(absolute, undefined, { grants }) || isLoopControlPath(realPath(absolute), undefined, { grants });
 }
 
+/** True when an edit/write tool path is one of the planner's files the root may not write under
+ *  protocol 2 (`codex/ops-*`, `codex/grants-*`, `codex/launch-*`, `codex/goal-*`), either spelling. */
+export function isRootControlToolPath(raw: string, cwd: string): boolean {
+  const absolute = toolPath(raw, cwd);
+  return isLoopControlPath(absolute, undefined, { root: true }) || isLoopControlPath(realPath(absolute), undefined, { root: true });
+}
+
 /** Protocol 2 refusal for an edit/write tool path: the run dir and the authority registry for
- *  root and lanes, and `codex/grants-*` for lanes. Call only while the marker exists. */
+ *  root and lanes, `codex/grants-*` for lanes, and the planner's files (`codex/ops|grants|launch|goal-*`)
+ *  for the root. Call only while the marker exists. */
 export function toolWriteRefusal(raw: unknown, cwd: string, role: GuardRole, runDir: string | undefined): string | undefined {
   if (typeof raw !== "string") return undefined;
   const absolute = toolPath(raw, cwd);
@@ -151,5 +159,6 @@ export function toolWriteRefusal(raw: unknown, cwd: string, role: GuardRole, run
   if (role === "lane" && (isGrantsPath(absolute) || isGrantsPath(realPath(absolute)))) {
     return `loop-guard: lanes may not write '${raw}': codex/grants-* belongs to the root.`;
   }
+  if (role === "root" && isRootControlToolPath(raw, cwd)) return rootControlReason(raw);
   return undefined;
 }

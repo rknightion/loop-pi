@@ -79,11 +79,17 @@ function setup(opts: { marker?: boolean } = {}) {
       const result = await handlers.get("tool_call")!({ type: "tool_call", toolName: "subagent", toolCallId: id, input }, ctx);
       return { id, input, result };
     },
-    async end(id: string, opts: { runId?: string; isError?: boolean; toolName?: string }) {
+    async end(id: string, opts: { runId?: string; isError?: boolean; toolName?: string; asyncDir?: string }) {
+      const details = { ...(opts.runId ? { runId: opts.runId } : {}), ...(opts.asyncDir ? { asyncDir: opts.asyncDir } : {}) };
       await handlers.get("tool_execution_end")!(
-        { type: "tool_execution_end", toolCallId: id, toolName: opts.toolName ?? "subagent", isError: opts.isError ?? false, result: { details: opts.runId ? { runId: opts.runId } : {} } },
+        { type: "tool_execution_end", toolCallId: id, toolName: opts.toolName ?? "subagent", isError: opts.isError ?? false, result: { details } },
         ctx,
       );
+    },
+    /** A reload or resume: a new session_start over the persisted state entries. */
+    reload() {
+      const branch = entries.map((e) => ({ type: "custom", customType: e.customType, data: JSON.parse(JSON.stringify(e.data)) }));
+      handlers.get("session_start")!({ type: "session_start", reason: "reload" }, { ...ctx, sessionManager: { ...ctx.sessionManager, getBranch: () => branch } });
     },
     /** The root runs `loop-state append ... land|park` in bash after `event` was appended to the log. */
     async loopState(event: Record<string, unknown>) {
@@ -296,4 +302,88 @@ test("helpers: brief landing, lane id safety, root land and park events after a 
     { seq: 3, by: "root", ev: "park", task: "C" },
   ].map((e) => JSON.stringify(e)).join("\n");
   assert.deepEqual(landParkEvents(log, 1), { events: [{ ev: "park", task: "C", seq: 3 }], maxSeq: 3 });
+});
+
+test("a worktree with uncommitted changes is never removed: park and the closeout sweep keep it and say kept dirty", async () => {
+  const s = setup();
+  try {
+    const a = await s.launch(brief("L1", "T1"));
+    await s.end(a.id, { runId: "run-1" });
+    const b = await s.launch(brief("L2", "T2"));
+    await s.end(b.id, { runId: "run-2" });
+    const p1 = join(s.runDir, "worktrees", "L1");
+    const p2 = join(s.runDir, "worktrees", "L2");
+    writeFileSync(join(p1, "wip.txt"), "uncommitted candidate work");
+    writeFileSync(join(p2, ".gitignore"), "changed tracked file\n");
+
+    await s.loopState({ ev: "park", task: "T1", reason: "r", needs: "owner" });
+    assert.equal(existsSync(join(p1, "wip.txt")), true, "an untracked file keeps the worktree");
+    assert.ok(s.notes.some((n) => /kept dirty: L1 .*uncommitted changes/.test(n)), JSON.stringify(s.notes));
+    await s.loopState({ ev: "land", task: "T2", sha: "x", gate: "g", mode: "after-green" });
+    assert.equal(existsSync(p2), true, "a modified tracked file keeps the worktree");
+
+    const lines: string[] = [];
+    const pending: Promise<unknown>[] = [];
+    s.emit("loop-closeout", { lines, pending });
+    await Promise.all(pending);
+    assert.equal(existsSync(join(p1, "wip.txt")), true);
+    assert.equal(existsSync(p2), true);
+    assert.deepEqual(branches(s.repo).sort(), [`loop/${basename(s.runDir)}/L1`, `loop/${basename(s.runDir)}/L2`], "a dirty lane's branch is kept");
+    assert.match(lines[0], /removed 0 worktree\(s\).*kept dirty: L1, L2/);
+  } finally {
+    s.restore();
+  }
+});
+
+test("after a reload a recorded run counts as live until pi-subagents' status file says it ended", async () => {
+  const s = setup();
+  const subRoot = fresh("lw-sub-");
+  const previousRoot = process.env.PI_SUBAGENTS_TEMP_ROOT;
+  process.env.PI_SUBAGENTS_TEMP_ROOT = subRoot;
+  const status = (dir: string, state: string) => {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "status.json"), JSON.stringify({ runId: basename(dir), state, mode: "single", startedAt: 1 }));
+  };
+  try {
+    // L1's launch result named its async dir; L2's did not, so its status is looked up under the temp root.
+    const asyncDir1 = join(subRoot, "elsewhere", "run-1");
+    const a = await s.launch(brief("L1", "T1"));
+    s.emit("subagent:async-started", { id: "run-1", sessionId: "/sessions/s.jsonl" });
+    await s.end(a.id, { runId: "run-1", asyncDir: asyncDir1 });
+    status(asyncDir1, "running");
+    const b = await s.launch(brief("L2", "T2"));
+    s.emit("subagent:async-started", { id: "run-2", sessionId: "/sessions/s.jsonl" });
+    await s.end(b.id, { runId: "run-2" });
+    const c = await s.launch(brief("L3", "T3"));
+    s.emit("subagent:async-started", { id: "run-3", sessionId: "/sessions/s.jsonl" });
+    await s.end(c.id, { runId: "run-3" });
+    // run-3 has no status file at all: its liveness cannot be determined.
+
+    s.reload();
+    const p = (lane: string) => join(s.runDir, "worktrees", lane);
+    await s.loopState({ ev: "land", task: "T1", sha: "x", gate: "g", mode: "after-green" });
+    await s.loopState({ ev: "park", task: "T2", reason: "r", needs: "owner" });
+    await s.loopState({ ev: "park", task: "T3", reason: "r", needs: "owner" });
+    assert.equal(existsSync(p("L1")), true, "status running: live");
+    assert.equal(existsSync(p("L2")), true, "no status file yet: unknown, kept");
+    assert.equal(existsSync(p("L3")), true, "no status file: unknown, kept");
+
+    const lines: string[] = [];
+    const pending: Promise<unknown>[] = [];
+    s.emit("loop-closeout", { lines, pending });
+    await Promise.all(pending);
+    assert.match(lines[0], /kept live: L1, L2, L3/);
+
+    // pi-subagents records the ends; the waiting releases go through on the next state-log read.
+    status(asyncDir1, "complete");
+    status(join(subRoot, "async-subagent-runs", "run-2"), "paused");
+    await s.loopState({ ev: "judgement", text: "later" });
+    assert.equal(existsSync(p("L1")), false, "status complete: released");
+    assert.equal(existsSync(p("L2")), false, "status paused (terminal for pi-subagents): released");
+    assert.equal(existsSync(p("L3")), true, "still unknown: kept");
+  } finally {
+    if (previousRoot === undefined) delete process.env.PI_SUBAGENTS_TEMP_ROOT;
+    else process.env.PI_SUBAGENTS_TEMP_ROOT = previousRoot;
+    s.restore();
+  }
 });

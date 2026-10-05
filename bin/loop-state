@@ -8,7 +8,8 @@
 
 Stdlib only; runs under Python 3.9 (macOS /usr/bin/python3).
 
-Run dir (`--run-dir DIR` on append, else $LOOP_PI_RUN_DIR): when it holds `loop-pi-proto`, a
+Run dir (`--run-dir DIR` on append, else $LOOP_PI_RUN_DIR; a $LOOP_PI_RUN_DIR that holds
+`loop-pi-proto` wins over a different `--run-dir`, with a warning): when it holds `loop-pi-proto`, a
 `close reason=budget` needs a `compaction-failed` or `quota-exhausted` fact in its
 `harness-facts.jsonl`. Without the marker nothing about the run dir changes any verdict.
 
@@ -229,6 +230,8 @@ def parse_kv(ev, pairs):
         key, raw = token.split("=", 1)
         if not key:
             raise Rejected("empty key in %r" % token)
+        if key == "by":
+            raise Rejected("by is not a k=v field; use --by")
         if key in ("v", "seq", "ts", "ev"):
             raise Rejected("%s is set by loop-state" % key)
         if key in out:
@@ -750,7 +753,16 @@ def _pop_run_dir(args):
 def cmd_append(args):
     by, rest = _pop_by(args)
     run_dir, rest = _pop_run_dir(rest)
-    run_dir = run_dir or os.environ.get("LOOP_PI_RUN_DIR") or None
+    env_dir = os.environ.get("LOOP_PI_RUN_DIR") or None
+    if env_dir and os.path.isfile(os.path.join(env_dir, "loop-pi-proto")):
+        # The environment's marked run dir is authoritative: an agent-supplied --run-dir must not
+        # point the budget-close check at a dir without the marker or the facts.
+        if run_dir and os.path.realpath(run_dir) != os.path.realpath(env_dir):
+            sys.stderr.write("loop-state: warning: ignoring --run-dir %s; LOOP_PI_RUN_DIR %s holds "
+                             "loop-pi-proto and is used instead\n" % (run_dir, env_dir))
+        run_dir = env_dir
+    else:
+        run_dir = run_dir or env_dir
     if not rest:
         raise Rejected("usage: loop-state append <log> [<ev> k=v ...] [--by ...]")
     log_path, rest = rest[0], rest[1:]

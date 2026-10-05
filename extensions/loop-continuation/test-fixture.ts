@@ -18,6 +18,11 @@ export function fresh(prefix = "loop-cont-"): string {
   return dir;
 }
 
+/** Append `## Authority` lines (it is the goal's last section), e.g. `ops: <path> sha256=<hex>`. */
+export function addAuthority(fixture: { goal: string }, ...lines: string[]): void {
+  writeFileSync(fixture.goal, `${lines.join("\n")}\n`, { flag: "a" });
+}
+
 export function cleanupFixtures(): void {
   while (made.length) rmSync(made.pop()!, { recursive: true, force: true });
 }

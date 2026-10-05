@@ -151,10 +151,11 @@ loop-pi-audit closeout --grants grants.json --grants-sha256 <hex> --push-log pus
   per successfully updated ref with `repo`, `ref`, `old` and `new`.
 - A `refs/heads/<default branch>` entry in the grants file is ignored, with a warning. The move is
   granted only when every commit in `before..after` lies in some logged `old..new` range for that
-  repository and ref, or touches only paths under `backlog/`, or has an author or committer
-  listed in that repository's `bot_actors` (a login such as `some-app[bot]`, matched against the
-  commit's name or its GitHub noreply address `<id>+<login>@users.noreply.github.com`). Anything
-  else is `UNGRANTED` and printed in a `note:` line. A foreign commit between two logged pushes is
+  repository and ref, or touches only paths under `backlog/`, or lies in a range that a login in
+  that repository's `bot_actors` itself pushed or merged inside the snapshot window, according to
+  GitHub's activity API (push records, never commit author or committer metadata; missing evidence
+  grants nothing). Every `bot_actors` entry must be an exact App bot login (`^[A-Za-z0-9-]+\[bot\]$`),
+  or the grants file is refused with exit 2. Anything else is `UNGRANTED` and printed in a `note:` line. A foreign commit between two logged pushes is
   therefore flagged, as is any commit after the last logged push. The fast-forward check still
   applies, and a derived `HEAD` move follows the default branch's verdict.
 - Other branches, tags and releases are judged exactly as before. `bot_actors` sits beside `refs`
@@ -168,8 +169,9 @@ loop-pi-audit closeout --grants grants.json --grants-sha256 <hex> --push-log pus
 A log takes one `open`. Only `land mode=after-green` is accepted for new appends (older logs with
 `pre-green` still check and digest). `revert` accepts `reason=root-decision`. `park needs=budget`
 is valid; `close reason=budget` in a protocol 2 run (`--run-dir DIR` or `LOOP_PI_RUN_DIR`) is
-refused unless `harness-facts.jsonl` records a `compaction-failed` or `quota-exhausted` fact. A
-string-list field accepts a JSON array or a comma-separated string, `judgement` text may be 4,096
+refused unless `harness-facts.jsonl` records a `compaction-failed` or `quota-exhausted` fact. When
+`LOOP_PI_RUN_DIR` holds `loop-pi-proto`, a different `--run-dir` is ignored with a warning. `by` is
+not a `k=v` field; use `--by`. A string-list field accepts a JSON array or a comma-separated string, `judgement` text may be 4,096
 bytes, and an unknown field's error lists the event's allowed fields.
 
 ## Limits, stated plainly

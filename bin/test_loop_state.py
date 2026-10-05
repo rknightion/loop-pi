@@ -143,6 +143,16 @@ class ValidationTests(Base):
         self.assertEqual(self.events()[1]["by"], "root")
         self.reject("close", "reason=budget", "--by", "nobody", needle="by must be one of")
 
+    def test_by_is_not_a_kv_field_but_the_flag_still_works(self):
+        r = self.append(*OPEN, "by=ext", ok=False)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("use --by", r.stderr)
+        self.assertFalse(os.path.exists(self.log))
+        self.append(*OPEN, "--by", "ext")
+        self.assertEqual(self.events()[0]["by"], "ext")
+        self.append("close", "reason=owner-stop", "--by=daemon")
+        self.assertEqual(self.events()[1]["by"], "daemon")
+
     def test_json_on_stdin(self):
         self.append(stdin=json.dumps({"ev": "close", "reason": "owner-stop"}))
         self.assertEqual(self.events()[0]["reason"], "owner-stop")
@@ -284,6 +294,29 @@ class BudgetCloseTests(Base):
             self.facts("context-overflow", kind)
             r = self.close_budget("--run-dir", self.run_dir)
             self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_a_different_run_dir_argument_cannot_displace_the_marked_environment_dir(self):
+        self.mark_proto()
+        decoy = os.path.join(self.repo, "decoy")
+        os.makedirs(decoy)
+        r = self.close_budget("--run-dir", decoy, env={"LOOP_PI_RUN_DIR": self.run_dir})
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn(self.REFUSAL, r.stderr)
+        self.assertIn("ignoring --run-dir", r.stderr)
+        self.assertFalse(os.path.exists(self.log))
+        # The same dir named twice is not a conflict, and a licensed budget close still goes through.
+        self.facts("quota-exhausted")
+        r = self.close_budget("--run-dir", self.run_dir, env={"LOOP_PI_RUN_DIR": self.run_dir})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("ignoring", r.stderr)
+
+    def test_an_unmarked_environment_dir_does_not_override_the_argument(self):
+        self.mark_proto()
+        unmarked = os.path.join(self.repo, "unmarked")
+        os.makedirs(unmarked)
+        r = self.close_budget("--run-dir", self.run_dir, env={"LOOP_PI_RUN_DIR": unmarked})
+        self.assertEqual(r.returncode, 2)
+        self.assertIn(self.REFUSAL, r.stderr)
 
     def test_without_the_marker_budget_close_is_as_before(self):
         self.assertEqual(self.close_budget("--run-dir", self.run_dir).returncode, 0)

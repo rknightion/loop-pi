@@ -79,8 +79,8 @@ export const C3_AGENTS: ReadonlySet<string> = new Set([
 // ---------------------------------------------------------------------------
 
 /** `target` is set on a `redir` op: the word a redirection writes to (`>`, `>>`, `>|`, `&>`,
- *  `<>`, `N>&M`). Input redirections carry no target. */
-type Op = { op: string; target?: string };
+ *  `<>`, `N>&M`). An input redirection (`<`, `N<`, `<&N`) carries no target and sets `input`. */
+type Op = { op: string; target?: string; input?: true };
 type Token = string | Op;
 
 function isOp(tok: Token): tok is Op {
@@ -115,7 +115,7 @@ function lex(command: string): Token[] | null {
 
   const flush = () => {
     if (started) {
-      if (redirect) tokens.push({ op: "redir", ...(redirect === "out" ? { target: word } : {}) });
+      if (redirect) tokens.push({ op: "redir", ...(redirect === "out" ? { target: word } : { input: true as const }) });
       else tokens.push(word);
       redirect = null;
       word = "";
@@ -254,37 +254,44 @@ function lex(command: string): Token[] | null {
   }
   if (quote) return null; // unterminated quote
   flush();
-  if (redirect) tokens.push({ op: "redir" }); // operator with no file word: keep it out of every segment
+  if (redirect) tokens.push({ op: "redir", ...(redirect === "in" ? { input: true as const } : {}) }); // operator with no file word: keep it out of every segment
   return tokens;
 }
 
 /** Split lexed tokens into segments at `;`, `&&`, `||`, `|`, newline, `&`,
  *  `(` and `)`.
  *  Returns the segments, whether each one pipes its stdout into the next
- *  (`pipesToNext[i]`), whether a bare background `&` operator occurred, and
+ *  (`pipesToNext[i]`), whether each one reads stdin from an input redirection
+ *  (`stdinRedirected[i]`), whether a bare background `&` operator occurred, and
  *  every file a redirection writes to. */
 function splitSegments(tokens: Token[]): {
   segments: string[][];
   pipesToNext: boolean[];
+  stdinRedirected: boolean[];
   hasBackground: boolean;
   writeTargets: string[];
 } {
   const segments: string[][] = [];
   const pipesToNext: boolean[] = [];
+  const stdinRedirected: boolean[] = [];
   const writeTargets: string[] = [];
   let current: string[] = [];
+  let currentInput = false;
   let hasBackground = false;
   const SEPARATORS = new Set([";", "&&", "||", "|", "\n", "&", "(", ")"]);
   for (const tok of tokens) {
     if (isOp(tok) && tok.op === "redir") {
       if (tok.target !== undefined) writeTargets.push(tok.target);
+      if (tok.input) currentInput = true;
     } else if (isOp(tok) && SEPARATORS.has(tok.op)) {
       if (tok.op === "&") hasBackground = true;
       if (current.length) {
         segments.push(current);
         pipesToNext.push(tok.op === "|");
+        stdinRedirected.push(currentInput);
       }
       current = [];
+      currentInput = false;
     } else if (!isOp(tok)) {
       current.push(tok);
     }
@@ -292,8 +299,9 @@ function splitSegments(tokens: Token[]): {
   if (current.length) {
     segments.push(current);
     pipesToNext.push(false);
+    stdinRedirected.push(currentInput);
   }
-  return { segments, pipesToNext, hasBackground, writeTargets };
+  return { segments, pipesToNext, stdinRedirected, hasBackground, writeTargets };
 }
 
 // ---------------------------------------------------------------------------
@@ -925,6 +933,9 @@ export interface ParsedCommand {
   interpreterScripts: string[];
   /** Every file an output redirection writes to, nested parses included. */
   writeTargets: string[];
+  /** The entries of `segments` (the same array objects) whose stdin is an input redirection
+   *  (`< file`, `N< file`, `<&N`), nested parses included. */
+  stdinRedirectedSegments: string[][];
 }
 
 const MAX_DEPTH = 8;
@@ -966,9 +977,10 @@ export function parseCommand(
   if (role === "lane" && hasUnextractedSubstitution(extracted.text)) return null;
   const tokens = lex(extracted.text);
   if (!tokens) return null;
-  const { segments: rawSegments, pipesToNext, hasBackground, writeTargets } = splitSegments(tokens);
+  const { segments: rawSegments, pipesToNext, stdinRedirected, hasBackground, writeTargets } = splitSegments(tokens);
 
   const segments: string[][] = [];
+  const stdinRedirectedSegments: string[][] = [];
   let hasBackgroundOperator = hasBackground;
   const interpreterScripts: string[] = [];
 
@@ -977,6 +989,7 @@ export function parseCommand(
     hasBackgroundOperator = hasBackgroundOperator || nested.hasBackgroundOperator;
     interpreterScripts.push(...nested.interpreterScripts);
     writeTargets.push(...nested.writeTargets);
+    stdinRedirectedSegments.push(...nested.stdinRedirectedSegments);
   };
 
   // Pull heredoc placeholders and here-string markers out of every segment,
@@ -1014,6 +1027,7 @@ export function parseCommand(
     // stripped above, so the commands inside are ordinary segments here.
     const segment = cleaned[s];
     if (segment.length) segments.push(segment);
+    if (segment.length && stdinRedirected[s]) stdinRedirectedSegments.push(segment);
     const stripped = stripWrappers(segment);
     const inner = unwrapShellC(stripped);
     if (inner !== null) {
@@ -1068,7 +1082,7 @@ export function parseCommand(
     absorb(nested);
   }
 
-  return { segments, hasBackgroundOperator, interpreterScripts, writeTargets };
+  return { segments, hasBackgroundOperator, interpreterScripts, writeTargets, stdinRedirectedSegments };
 }
 
 // ---------------------------------------------------------------------------
@@ -1698,10 +1712,16 @@ const LOOP_CONTROL_SAMPLES = ["ops-c-loop1.json", "state-c-loop1.jsonl", "goal-c
 // Protocol 2 (SEAMS S2/S8): the frozen audit grants source joins the lane deny list.
 const GRANTS_FILE = /(?:^|\/)codex\/grants-[^/]*$/i;
 const GRANTS_SAMPLE = "grants-c-loop1.json";
+// Protocol 2 root fence: the planner's files (ops, grants, launch, goal). The root writes its state
+// log through loop-state and its report, never its own authority.
+const ROOT_CONTROL_FILE = /(?:^|\/)codex\/(?:ops|grants|launch|goal)-[^/]*$/i;
+const ROOT_CONTROL_SAMPLES = ["ops-c-loop1.json", "grants-c-loop1.json", "launch-c-loop1.txt", "goal-c-loop1.md"];
 
 export interface LoopControlOptions {
   /** Protocol 2: also treat `codex/grants-*` as a loop control file. */
   grants?: boolean;
+  /** Protocol 2 root fence: match the planner's files (`codex/ops|grants|launch|goal-*`) instead. */
+  root?: boolean;
 }
 
 function normalisePosix(path: string, cwd?: string): string {
@@ -1739,14 +1759,14 @@ function globToRegExp(glob: string): RegExp | null {
 /** True when `path` names a loop control file, or a glob in a `codex` directory that could. */
 export function isLoopControlPath(path: string, cwd?: string, options: LoopControlOptions = {}): boolean {
   const p = normalisePosix(path.replace(/^file:\/\//, "").replace(/^@/, ""), cwd);
-  if (LOOP_CONTROL_FILE.test(p)) return true;
-  if (options.grants && GRANTS_FILE.test(p)) return true;
+  if (options.root ? ROOT_CONTROL_FILE.test(p) : LOOP_CONTROL_FILE.test(p)) return true;
+  if (!options.root && options.grants && GRANTS_FILE.test(p)) return true;
   const slash = p.lastIndexOf("/");
   const dir = slash >= 0 ? p.slice(0, slash) : "";
   const name = p.slice(slash + 1);
   if (/[*?[]/.test(name) && (LOOP_CONTROL_DIR.test(dir) || (dir === "" && LOOP_CONTROL_DIR.test(cwd ?? "")))) {
     const re = globToRegExp(name);
-    const samples = options.grants ? [...LOOP_CONTROL_SAMPLES, GRANTS_SAMPLE] : LOOP_CONTROL_SAMPLES;
+    const samples = options.root ? ROOT_CONTROL_SAMPLES : options.grants ? [...LOOP_CONTROL_SAMPLES, GRANTS_SAMPLE] : LOOP_CONTROL_SAMPLES;
     return re === null || samples.some((s) => re.test(s));
   }
   return false;
@@ -1777,6 +1797,26 @@ function loopControlWrite(stripped: string[], cwd?: string, options: LoopControl
     if (REMOVES_DIRS.has(head) && LOOP_CONTROL_DIR.test(normalisePosix(c, cwd))) return c;
   }
   return undefined;
+}
+
+/** Protocol 2 root fence, best effort for bash: the planner file a root command writes, if any.
+ *  Only written files count (a `cp` source is a read); removing or moving `codex` itself counts. */
+function rootControlWrite(stripped: string[], cwd?: string): string | undefined {
+  if (stripped.length === 0) return undefined;
+  const head = basename(stripped[0]);
+  for (const c of fileWriteCandidates(stripped)) {
+    if (isLoopControlPath(c, cwd, { root: true })) return c;
+    if (REMOVES_DIRS.has(head) && LOOP_CONTROL_DIR.test(normalisePosix(c, cwd))) return c;
+  }
+  return undefined;
+}
+
+/** The refusal for a root write into a planner file (edit/write tool paths and bash). */
+export function rootControlReason(path: string): string {
+  return (
+    `loop-guard: the root may not write '${path}': codex/ops-*, codex/grants-*, codex/launch-* and codex/goal-* ` +
+    "are the planner's, and a loop never changes its own authority. Record the change you need in a judgement or a park."
+  );
 }
 
 function loopControlReason(path: string, cwd?: string): string {
@@ -1830,7 +1870,9 @@ function protectedWrite(paths: string[], context: LaneContext): string | undefin
 // ---------------------------------------------------------------------------
 // Protocol 2 root rule (SEAMS S8): `loop-state` events from the extension, the daemon and the
 // dispatcher are written by those writers, never by the root: a root call may not carry
-// `--by ext|daemon|dispatcher` (either spelling) or an event on stdin with a `by` field.
+// `--by ext|daemon|dispatcher` (either spelling), a `by=` field other than root, an event on stdin
+// with a `by` field, an event on stdin from a file (`< file`, which the guard cannot read), or
+// `--run-dir` (loop-state reads the launcher's run dir itself).
 // ---------------------------------------------------------------------------
 
 const FORGED_BY = new Set(["ext", "daemon", "dispatcher"]);
@@ -1845,12 +1887,19 @@ function loopStateArgs(stripped: string[]): string[] | undefined {
   return undefined;
 }
 
-function loopStateRefusal(stripped: string[], rawCommand: string): string | undefined {
+const STDIN_FILE_REASON =
+  "loop-guard: a root `loop-state append` may not read its event from a file (`< file`); the guard cannot inspect it. " +
+  "Pass the event as `<ev> k=v ...` arguments or in a heredoc.";
+
+function loopStateRefusal(stripped: string[], rawCommand: string, stdinFromFile = false): string | undefined {
   const args = loopStateArgs(stripped);
   if (!args) return undefined;
   const positional: string[] = [];
   for (let i = 0; i < args.length; i++) {
     let by: string | undefined;
+    if (args[i] === "--run-dir" || args[i].startsWith("--run-dir=")) {
+      return "loop-guard: a root loop-state call may not pass --run-dir; loop-state reads the run dir the launcher set ($LOOP_PI_RUN_DIR).";
+    }
     if (args[i] === "--by") by = args[++i];
     else if (args[i].startsWith("--by=")) by = args[i].slice("--by=".length);
     else {
@@ -1861,12 +1910,26 @@ function loopStateRefusal(stripped: string[], rawCommand: string): string | unde
       return `loop-guard: a root loop-state call may not carry --by ${by}; the extension, daemon and dispatcher write their own events.`;
     }
   }
+  if (positional[0] !== "append") return undefined;
+  // `loop-state append <log> <ev> k=v ...`: a `by=` field other than root forges another writer.
+  for (const word of positional.slice(2)) {
+    if (word.startsWith("by=") && word !== "by=root") {
+      return `loop-guard: a root loop-state event may not carry '${word}'; the extension, daemon, dispatcher and lanes write their own events.`;
+    }
+  }
   // `loop-state append <log>` with no event reads the event as JSON from stdin.
-  if (positional[0] === "append" && positional.length === 2 && STDIN_BY_FIELD.test(rawCommand)) {
-    return "loop-guard: a root loop-state event read from stdin may not carry a \"by\" field; append it without one and loop-state records it as the root's.";
+  if (positional.length === 2) {
+    if (stdinFromFile) return STDIN_FILE_REASON;
+    if (STDIN_BY_FIELD.test(rawCommand)) {
+      return "loop-guard: a root loop-state event read from stdin may not carry a \"by\" field; append it without one and loop-state records it as the root's.";
+    }
   }
   return undefined;
 }
+
+/** Fallback scan only: the text has an input redirection (`<`, not a heredoc, here-string or
+ *  process substitution, which the precise parser reads). */
+const FALLBACK_STDIN_REDIRECT = /(?:^|[^<])<(?![<(])/;
 
 // ---------------------------------------------------------------------------
 // Public: evaluateBashCommand
@@ -1986,6 +2049,11 @@ export function fallbackScan(text: string, role: Role, depth = 0, pushGranted = 
       if (role === "root") {
         const forged = loopStateRefusal(words, text);
         if (forged) return block(fallbackReason(forged));
+        // The loose words cannot tell a redirected file from an argument: any input redirection
+        // in text that runs `loop-state append` is refused.
+        if (loopStateArgs(words)?.[0] === "append" && FALLBACK_STDIN_REDIRECT.test(text)) return block(fallbackReason(STDIN_FILE_REASON));
+        const control = rootControlWrite(words, lane.cwd);
+        if (control) return block(fallbackReason(rootControlReason(control)));
       }
       const write = protectedWrite(fileWriteCandidates(words), lane);
       if (write) return block(fallbackReason(write));
@@ -1994,6 +2062,9 @@ export function fallbackScan(text: string, role: Role, depth = 0, pushGranted = 
   for (const m of clean.matchAll(FALLBACK_REDIRECT)) {
     if (role === "lane" && isLoopControlPath(m[1], lane.cwd, { grants: lane.proto })) {
       return block(fallbackReason(loopControlReason(m[1], lane.cwd)));
+    }
+    if (role === "root" && lane.proto && isLoopControlPath(m[1], lane.cwd, { root: true })) {
+      return block(fallbackReason(rootControlReason(m[1])));
     }
     const write = protectedWrite([m[1]], lane);
     if (write) return block(fallbackReason(write));
@@ -2025,6 +2096,7 @@ export function evaluateBashCommand(
     );
   }
 
+  const stdinRedirected = new Set(parsed.stdinRedirectedSegments);
   for (const rawSegment of parsed.segments) {
     const stripped = stripWrappers(rawSegment);
     if (stripped.length === 0) continue;
@@ -2079,8 +2151,10 @@ export function evaluateBashCommand(
 
     if (lane.proto) {
       if (role === "root") {
-        const forged = loopStateRefusal(stripped, command);
+        const forged = loopStateRefusal(stripped, command, stdinRedirected.has(rawSegment));
         if (forged) return block(forged);
+        const control = rootControlWrite(stripped, lane.cwd);
+        if (control) return block(rootControlReason(control));
       }
       const write = protectedWrite(fileWriteCandidates(stripped), lane);
       if (write) return block(write);
@@ -2101,6 +2175,11 @@ export function evaluateBashCommand(
   if (role === "lane") {
     for (const target of parsed.writeTargets) {
       if (isLoopControlPath(target, lane.cwd, { grants: lane.proto })) return block(loopControlReason(target, lane.cwd));
+    }
+  }
+  if (role === "root" && lane.proto) {
+    for (const target of parsed.writeTargets) {
+      if (isLoopControlPath(target, lane.cwd, { root: true })) return block(rootControlReason(target));
     }
   }
   const redirected = protectedWrite(parsed.writeTargets, lane);

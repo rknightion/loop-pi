@@ -4,12 +4,17 @@
 // `<run dir>/returns/<run id>.md` unless pi-subagents already saved the lane's output to a file, whose
 // path is named instead. Used by the loop-state extension (LLM roots) and the dispatcher.
 //
+// The saved-output path comes only from pi-subagents' structured completion (the async-complete
+// payload's single result `savedOutputPath`, matched to the notify by its async directory line), or
+// from a reference-only marker that is the first line of the lane's output. Never from free text in
+// the return body: a lane can write any line there, and a wrong path loses the full text.
+//
 // Pure apart from `capNotifyContent`'s file write. Nothing here parses the `return` event: callers
 // parse it from the full text (the async-complete payload) before the message is rewritten.
 
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, isAbsolute, join } from "node:path";
 
 export const NOTIFY_CUSTOM_TYPE = "subagent-notify";
 export const RETURN_CAP_BYTES = 16_384;
@@ -75,26 +80,76 @@ export function contentText(content: unknown): string {
     .join("\n");
 }
 
-/** The async run id a pi-subagents completion names: the basename of its async directory line. */
-export function runIdFromNotify(text: string): string | null {
-  const m = /^Retention-managed async directory: (.+)$/m.exec(text);
-  if (m) {
-    const id = basename(m[1].trim());
-    if (/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id)) return id;
-  }
-  return null;
+const RUN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/** The async directory a pi-subagents completion names. Its correlation lines follow the result body,
+ *  so the last `Retention-managed async directory:` line is pi-subagents' own. */
+export function asyncDirFromNotify(text: string): string | null {
+  const re = /^Retention-managed async directory: (.+)$/gm;
+  let last: string | null = null;
+  for (let m = re.exec(text); m !== null; m = re.exec(text)) last = m[1].trim();
+  return last;
 }
 
-/** The saved-output file pi-subagents reported (`Output saved to: <abs> (...)`), when it exists. */
-export function savedOutputPath(text: string): string | null {
-  const re = /Output saved to: (\/[^\n]*?) \(\d/g;
-  let last: string | null = null;
-  for (let m = re.exec(text); m !== null; m = re.exec(text)) last = m[1];
-  if (!last) return null;
+/** The async run id a pi-subagents completion names: the basename of its (last) async directory line. */
+export function runIdFromNotify(text: string): string | null {
+  const dir = asyncDirFromNotify(text);
+  if (!dir) return null;
+  const id = basename(dir);
+  return RUN_ID_RE.test(id) ? id : null;
+}
+
+/** What pi-subagents' structured completion says about one run. */
+export interface CompletionInfo {
+  runId: string;
+  asyncDir: string | null;
+  /** The single result's saved output file, or null (none, several results, or not absolute). */
+  savedOutputPath: string | null;
+}
+
+/** The structured facts of a `subagent:async-complete` payload, or null without a run id. */
+export function completionInfo(data: unknown): CompletionInfo | null {
+  const d = data as { runId?: unknown; id?: unknown; asyncDir?: unknown; results?: unknown } | null;
+  const runId = typeof d?.runId === "string" ? d.runId : typeof d?.id === "string" ? d.id : null;
+  if (!runId || !RUN_ID_RE.test(runId)) return null;
+  const asyncDir = typeof d?.asyncDir === "string" && isAbsolute(d.asyncDir) ? d.asyncDir : null;
+  const results = Array.isArray(d?.results) ? (d.results as Record<string, unknown>[]) : [];
+  let saved: string | null = null;
+  if (results.length === 1 && results[0] && typeof results[0] === "object") {
+    const r = results[0];
+    const ref = r.outputReference as { path?: unknown } | string | undefined;
+    const candidate = typeof r.savedOutputPath === "string" ? r.savedOutputPath : typeof ref === "string" ? ref : typeof ref?.path === "string" ? ref.path : null;
+    if (candidate && isAbsolute(candidate)) saved = candidate;
+  }
+  return { runId, asyncDir, savedOutputPath: saved };
+}
+
+const MARKER_RE = /^Output saved to: (\/.+?) \(\d[^()]*, \d+ lines?\)\. Read this file if needed\.$/;
+const NOTIFY_HEADER_RE = /^(?:Background task|Detached foreground task) (?:completed|failed|paused|stopped): \*\*.+?\*\*/;
+
+/**
+ * The saved-output file named by a reference-only marker that is the first line of the lane's output:
+ * the first line of the text, or (in a pi-subagents completion) the first non-empty line after the
+ * header, after an optional `<agent>:` line. A marker anywhere else is body text and is ignored.
+ */
+export function firstLineSavedOutput(text: string): string | null {
+  const lines = text.split("\n");
+  let i = 0;
+  if (NOTIFY_HEADER_RE.test(lines[0] ?? "")) {
+    i = 1;
+    while (i < lines.length && lines[i].trim() === "") i++;
+    if (/^[A-Za-z0-9][\w.-]*:$/.test(lines[i] ?? "")) i++;
+  }
+  const m = MARKER_RE.exec((lines[i] ?? "").trimEnd());
+  return m ? m[1] : null;
+}
+
+function isFile(path: string | null): path is string {
+  if (!path) return false;
   try {
-    return statSync(last).isFile() ? last : null;
+    return statSync(path).isFile();
   } catch {
-    return null;
+    return false;
   }
 }
 
@@ -103,12 +158,24 @@ export function savedOutputPath(text: string): string | null {
  * when the text is within the cap, there is no run dir, or the full text could not be kept (an
  * uncapped message is better than a capped one whose full text is lost).
  */
-export function capNotifyContent(text: string, runDir: string | undefined): { text: string; fullPath: string } | null {
+export function capNotifyContent(
+  text: string,
+  runDir: string | undefined,
+  completion?: (runId: string) => CompletionInfo | undefined,
+): { text: string; fullPath: string } | null {
   if (Buffer.byteLength(text, "utf8") <= RETURN_CAP_BYTES) return null;
   if (!runDir || !existsSync(runDir)) return null;
-  let fullPath = savedOutputPath(text);
+  const runId = runIdFromNotify(text);
+  const known = runId ? completion?.(runId) : undefined;
+  // The structured completion must be the one this notify's own async directory line names.
+  const structured = known && (known.asyncDir === null || known.asyncDir === asyncDirFromNotify(text)) ? known.savedOutputPath : null;
+  let fullPath: string | null = isFile(structured) ? structured : null;
   if (!fullPath) {
-    const id = runIdFromNotify(text) ?? `notify-${createHash("sha256").update(text).digest("hex").slice(0, 16)}`;
+    const marker = firstLineSavedOutput(text);
+    if (isFile(marker)) fullPath = marker;
+  }
+  if (!fullPath) {
+    const id = runId ?? `notify-${createHash("sha256").update(text).digest("hex").slice(0, 16)}`;
     const dir = join(runDir, "returns");
     fullPath = join(dir, `${id}.md`);
     try {
@@ -126,8 +193,9 @@ export function capNotifyContent(text: string, runDir: string | undefined): { te
 export function capNotifyMessage<M extends { role?: string; customType?: string; content?: unknown }>(
   message: M,
   runDir: string | undefined,
+  completion?: (runId: string) => CompletionInfo | undefined,
 ): M | undefined {
   if (message.role !== "custom" || message.customType !== NOTIFY_CUSTOM_TYPE) return undefined;
-  const capped = capNotifyContent(contentText(message.content), runDir);
+  const capped = capNotifyContent(contentText(message.content), runDir, completion);
   return capped ? { ...message, content: capped.text } : undefined;
 }

@@ -8,7 +8,7 @@ import { chmodSync, readdirSync, readFileSync, rmSync, writeFileSync } from "nod
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { cleanupAll, FAUX_EXTENSION, ROOT_EXTENSION, startPiRpc, writeFauxScript } from "../loop-wait/test-helpers.ts";
-import { cleanupFixtures, fakePi, loopFixture } from "./test-fixture.ts";
+import { addAuthority, cleanupFixtures, fakePi, loopFixture } from "./test-fixture.ts";
 
 after(cleanupAll);
 after(cleanupFixtures);
@@ -18,11 +18,15 @@ const OPS = {
   ops: [{ surface: "deploy:site", kind: "deploy", allow: ["^just deploy( |$)"], secret_paths: ["kv/ci/site/token"] }],
 };
 
-/** A loop that passes the arm checks, loaded into index.ts through a fake ExtensionAPI. */
+/** A loop that passes the arm checks, loaded into index.ts through a fake ExtensionAPI. The goal's
+ *  `## Authority` `ops:` line is written to match the launch line (arm refuses a mismatch). */
 async function armedPi() {
   const f = loopFixture();
   const pi = await fakePi({ agentDir: f.agentDir, cwd: f.repo, runDir: f.runDir });
-  const launchText = (opsLine: string | null) => `${f.launch}${opsLine ? "\n" + opsLine : ""}`;
+  const launchText = (opsLine: string | null) => {
+    if (opsLine) addAuthority(f, opsLine.replace(/^Ops grants:/, "ops:"));
+    return `${f.launch}${opsLine ? "\n" + opsLine : ""}`;
+  };
   return { f, pi, launchText };
 }
 
