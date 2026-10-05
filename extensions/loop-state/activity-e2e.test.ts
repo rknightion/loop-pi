@@ -250,10 +250,13 @@ test("missing recorder keeps a durable timer outbox, replay and orderly shutdown
   }
 });
 
-test("real root activity heartbeats respect the 5-minute boundary and persisted log across restart, never idle", { timeout: 40_000 }, async () => {
+for (const pendingRestart of [false, true]) {
+test(`real root activity heartbeats respect the 5-minute boundary and persisted log across restart, never idle${pendingRestart ? " with pending restart append" : ""}`, { timeout: 40_000 }, async () => {
   const s = scaffold();
   const clockFile = join(s.dir, "clock");
   const base = Date.now();
+  const appendStarted = join(s.dir, "restart-append-started");
+  const appendRelease = join(s.dir, "restart-append-release");
   writeFileSync(clockFile, String(base));
   const clock = join(s.dir, "clock-extension.ts");
   writeFileSync(clock, `import {readFileSync} from "node:fs";
@@ -281,19 +284,47 @@ test("real root activity heartbeats respect the 5-minute boundary and persisted 
     await until(() => rows(s.log).length === 2);
     assert.equal(rows(s.log)[1].at, new Date(base + 300_000).toISOString());
     await crash(first);
+    if (pendingRestart) {
+      const localCli = join(s.agentDir, "bin", "loop-state");
+      unlinkSync(localCli); // Own fixture link: retain the genuine CLI without overwriting it.
+      writeFileSync(localCli, `#!/usr/bin/env python3
+import json, pathlib, subprocess, sys, time
+payload = sys.stdin.buffer.read()
+try:
+    event = json.loads(payload)
+except ValueError:
+    event = {}
+if event.get("ev") == "heartbeat" and event.get("at") == ${JSON.stringify(new Date(base + 300_001).toISOString())}:
+    pathlib.Path(${JSON.stringify(appendStarted)}).write_text("pending")
+    for _ in range(900):
+        if pathlib.Path(${JSON.stringify(appendRelease)}).exists():
+            break
+        time.sleep(0.01)
+    else:
+        sys.exit(1)
+sys.exit(subprocess.run([${JSON.stringify(BIN)}, *sys.argv[1:]], input=payload).returncode)
+`, { mode: 0o755 });
+    }
     writeFileSync(clockFile, String(base + 300_001));
     second = startPiRpc(opts);
     await prompt(second, "restart", "RESTART");
+    if (pendingRestart) await until(() => existsSync(appendStarted));
     await delay(150);
     assert.equal(rows(s.log).length, 2, "restart does not reset the persisted throttle");
     writeFileSync(clockFile, String(base + 600_000));
     await prompt(second, "next", "NEXT");
+    if (pendingRestart) {
+      assert.equal(rows(s.log).length, 2, "queued activity cannot invent a row before the pending CLI settles");
+      writeFileSync(appendRelease, "release");
+    }
     await until(() => rows(s.log).length === 3);
     assert.equal(rows(s.log)[2].at, new Date(base + 600_000).toISOString());
     assert.ok(rows(s.log).every(r => r.ev === "heartbeat" && r.by === "ext"));
     execFileSync(BIN, ["check", s.log]);
   } finally {
+    if (pendingRestart) writeFileSync(appendRelease, "release");
     await first.close();
     await second?.close();
   }
 });
+}

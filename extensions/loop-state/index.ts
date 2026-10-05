@@ -67,7 +67,7 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
   let lastCtx: ExtensionContext | null = null;
   let logPath: string | null = null;
   let chain: Promise<unknown> = Promise.resolve();
-  let lastHeartbeatAttempt: number | null = null;
+  let lastHeartbeatRecordedAt: number | null = null;
   const warned = new Set<string>();
   const briefs = new Map<string, Brief & { agent: string }>();
   const started = new Map<string, { deadlineAt?: string }>();
@@ -100,26 +100,28 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
   // The CLI's locked, persisted throttle is authoritative across root lifetimes.
   function rootActivity() {
     const at = Date.now();
-    if (lastHeartbeatAttempt !== null && at - lastHeartbeatAttempt < 300_000) return;
+    if (lastHeartbeatRecordedAt !== null && at - lastHeartbeatRecordedAt < 300_000) return;
     const log = resolveLog();
     if (!log) return;
-    lastHeartbeatAttempt = at;
+    // Pending attempts are not persisted timestamps. Keep observed activity queued so a
+    // suppressed restart append cannot discard a later exact-boundary event.
     enqueue(async () => {
+      // Earlier queued activity may have recorded a heartbeat since this event arrived.
+      if (lastHeartbeatRecordedAt !== null && at - lastHeartbeatRecordedAt < 300_000) return;
       const result = await append({ ev: "heartbeat", at: new Date(at).toISOString() }, log);
       if (result.code !== 0) {
-        lastHeartbeatAttempt = null;
+        lastHeartbeatRecordedAt = null;
         warn(`heartbeat not recorded: ${result.stderr.trim()}`);
       } else {
-        // A restart's first attempt can be suppressed by the persisted throttle. Cache
-        // the recorded time, not the attempt, or the next exact boundary would be delayed.
-        lastHeartbeatAttempt = null;
+        // The CLI's locked throttle remains authoritative across root lifetimes.
+        lastHeartbeatRecordedAt = null;
         try {
           for (const line of readFileSync(log, "utf8").split("\n").reverse()) {
             try {
               const row = JSON.parse(line);
               if (row.ev !== "heartbeat" || typeof row.at !== "string") continue;
               const recordedAt = Date.parse(row.at);
-              if (Number.isFinite(recordedAt)) { lastHeartbeatAttempt = recordedAt; break; }
+              if (Number.isFinite(recordedAt)) { lastHeartbeatRecordedAt = recordedAt; break; }
             } catch { /* Torn log lines held no complete heartbeat. */ }
           }
         } catch { /* CLI remains the authority even if this cache read fails. */ }
@@ -353,7 +355,7 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
     cwd = ctx.cwd;
     lastCtx = ctx;
     logPath = null;
-    lastHeartbeatAttempt = null;
+    lastHeartbeatRecordedAt = null;
     for (const timer of recoveryTimers) clearTimeout(timer);
     recoveryTimers.clear();
     handled.clear();
