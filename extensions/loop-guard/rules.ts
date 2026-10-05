@@ -1891,9 +1891,16 @@ const STDIN_FILE_REASON =
   "loop-guard: a root `loop-state append` may not read its event from a file (`< file`); the guard cannot inspect it. " +
   "Pass the event as `<ev> k=v ...` arguments or in a heredoc.";
 
+const RUN_DIR_ASSIGNMENT = /(?:^|[\s;&|(])LOOP_PI_RUN_DIR=/;
+const PIPED_INTO_APPEND = /\|\s*(?:\S*\/)?(?:python3?\s+\S*\/)?loop-state\s+append\s+\S+\s*(?:$|[;&|)])/;
+
 function loopStateRefusal(stripped: string[], rawCommand: string, stdinFromFile = false): string | undefined {
   const args = loopStateArgs(stripped);
   if (!args) return undefined;
+  if (RUN_DIR_ASSIGNMENT.test(rawCommand)) {
+    return "loop-guard: a root loop-state call may not set LOOP_PI_RUN_DIR; loop-state reads the run dir the launcher set.";
+  }
+  if (PIPED_INTO_APPEND.test(rawCommand)) return STDIN_FILE_REASON.replace("from a file (`< file`)", "from a pipe");
   const positional: string[] = [];
   for (let i = 0; i < args.length; i++) {
     let by: string | undefined;

@@ -1126,6 +1126,10 @@ const ROOT_LOOP_STATE_DENY_P2 = [
   "loop-state append codex/state-a-loop1.jsonl land task=T-1 mode=after-green --run-dir /tmp/other-run",
   "loop-state append codex/state-a-loop1.jsonl close reason=budget --run-dir=/tmp/other-run",
   "loop-state digest codex/state-a-loop1.jsonl --run-dir /tmp/other-run",
+  "LOOP_PI_RUN_DIR=/tmp/other loop-state append codex/state-a-loop1.jsonl close reason=budget",
+  "env LOOP_PI_RUN_DIR=/tmp/other loop-state append codex/state-a-loop1.jsonl close reason=budget",
+  "export LOOP_PI_RUN_DIR=/tmp/other; loop-state append codex/state-a-loop1.jsonl close reason=budget",
+  "cat /tmp/event.json | loop-state append codex/state-a-loop1.jsonl",
 ];
 
 for (const command of ROOT_LOOP_STATE_DENY_P2) {

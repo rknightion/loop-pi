@@ -200,7 +200,7 @@ export default function (pi: ExtensionAPI) {
   /** Remove a clean worktree. One with uncommitted changes, or whose status cannot be read, is kept. */
   async function removeWorktree(repo: string, path: string): Promise<"removed" | "dirty" | "failed"> {
     if (!existsSync(path)) return "removed";
-    const status = await git(path, ["status", "--porcelain"]);
+    const status = await git(path, ["status", "--porcelain", "--untracked-files=all"]);
     if (status.code !== 0 || status.stdout.trim() !== "") return "dirty";
     const r = await git(repo, ["worktree", "remove", "--force", path]);
     if (r.code !== 0) warn(`could not remove ${path}: ${r.stderr.trim()}`);
