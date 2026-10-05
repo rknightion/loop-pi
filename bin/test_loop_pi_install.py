@@ -42,6 +42,24 @@ def apply(prefix: Path, tgt, node: str = "/usr/bin/node") -> None:
         m.atomic_write(path, data, mode)
 
 
+class GateCliTests(unittest.TestCase):
+    def test_gate_wrapper_is_copied_installed_executable_and_drift_checked(self):
+        self.assertIn("loop-gate-lock", m.CLI_TOOLS)
+        self.assertIn("bin/loop-gate-lock", {rel for rel, _ in m.source_files()})
+        with tempfile.TemporaryDirectory(prefix="loop-pi-gate-install-") as tmp:
+            root = Path(tmp)
+            prefix = fake_prefix(root)
+            (prefix / "bin/loop-gate-lock").write_bytes((HERE / "loop-gate-lock").read_bytes())
+            tgt = target(root)
+            apply(prefix, tgt)
+            installed = tgt.bin_dir / "loop-gate-lock"
+            self.assertEqual(installed.read_bytes(), (HERE / "loop-gate-lock").read_bytes())
+            self.assertTrue(os.access(installed, os.X_OK))
+            self.assertFalse(m.drift(prefix, tgt, "/usr/bin/node"))
+            installed.write_text("drift\n")
+            self.assertIn(installed, [path for path, _, _ in m.drift(prefix, tgt, "/usr/bin/node")])
+
+
 class NodeReceiptTests(unittest.TestCase):
     """Drive the installer only in a child process fenced by a disposable HOME."""
 

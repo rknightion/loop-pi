@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""Run `loop-gate-lock <name>` under a per-machine lock declared in LOOP.md.
+
+Only `- gate: <name> | <exact command>` under `## Mutexes` declares a gate.
+Ordinary mutex prose is advisory. Lock identity depends only on the stable name,
+not the repository, worktree, pi home or command. Requires POSIX fcntl.flock.
+"""
+from __future__ import annotations
+
+import argparse
+import fcntl
+import hashlib
+import os
+import pwd
+import re
+import signal
+import stat
+import subprocess
+import sys
+from pathlib import Path
+
+NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+
+
+def parse_gates(text: str) -> dict[str, str]:
+    gates: dict[str, str] = {}
+    active = False
+    fence = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        marker = re.match(r"^(`{3,}|~{3,})", stripped)
+        if marker:
+            token = marker[1]
+            if fence is None:
+                fence = token
+            elif token[0] == fence[0] and len(token) >= len(fence):
+                fence = None
+            continue
+        if fence is not None:
+            continue
+        if re.match(r"^#{1,2}(?:\s|$)", stripped):
+            active = stripped == "## Mutexes"
+            continue
+        if not active or not re.match(r"^-\s+gate:", stripped):
+            continue
+        declaration = re.fullmatch(r"-\s+gate:\s*([^|]+)\|(.*)", stripped)
+        if not declaration:
+            raise ValueError("malformed explicit gate declaration in LOOP.md")
+        name, command = (part.strip() for part in declaration.groups())
+        if not NAME.fullmatch(name) or not command or "\0" in command:
+            raise ValueError("invalid gate name or empty command in LOOP.md")
+        if name in gates or command in gates.values():
+            raise ValueError("duplicate gate name or command in LOOP.md")
+        gates[name] = command
+    return gates
+
+
+def declared_command(name: str, cwd: Path, sha256: str | None = None) -> str:
+    # Match guard discovery, independent of all GIT_* and HOME environment variables.
+    directory = cwd
+    while not (directory / ".git").exists():
+        if directory.parent == directory:
+            raise ValueError("gate execution cwd is not in a worktree")
+        directory = directory.parent
+    data = (directory / "LOOP.md").read_bytes()
+    if sha256 is not None and hashlib.sha256(data).hexdigest() != sha256:
+        raise ValueError("approved gate declaration changed before execution")
+    gates = parse_gates(data.decode("utf-8"))
+    if name not in gates:
+        raise ValueError(f"gate '{name}' is not declared under LOOP.md ## Mutexes")
+    return gates[name]
+
+
+def account_lock_directory() -> Path:
+    # OS account metadata, never HOME, TMPDIR, pi home, or a caller lock override.
+    return Path(pwd.getpwuid(os.getuid()).pw_dir) / ".local/state/loop-pi/gate-locks"
+
+
+def validate_directory(fd: int, *, account_owned: bool, private: bool = False) -> None:
+    info = os.fstat(fd)
+    owners = {os.getuid()} if account_owned else {0, os.getuid()}
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid not in owners or
+            info.st_mode & 0o022 or (private and stat.S_IMODE(info.st_mode) != 0o700)):
+        raise ValueError("unsafe gate lock directory owner, type or permissions")
+
+
+def open_lock(name: str) -> int:
+    # Open each component relative to a held directory fd: no symlink traversal
+    # or pathname replacement between validation and lock-file creation.
+    home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    if not home.is_absolute():
+        raise ValueError("OS account home must be absolute")
+    directory_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        validate_directory(directory_fd, account_owned=False)
+        for part in home.parts[1:]:
+            next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+            validate_directory(directory_fd, account_owned=False)
+        validate_directory(directory_fd, account_owned=True)
+        for part in (".local", "state", "loop-pi", "gate-locks"):
+            try:
+                os.mkdir(part, mode=0o700, dir_fd=directory_fd)
+            except FileExistsError:
+                pass
+            next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+            validate_directory(directory_fd, account_owned=True, private=part == "gate-locks")
+        filename = hashlib.sha256(name.encode()).hexdigest() + ".lock"
+        # Never unlink: every waiter must flock this inode. FIFO/device/hardlink
+        # substitution fails before flock, without blocking on a forged FIFO.
+        fd = os.open(filename, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK,
+                     0o600, dir_fd=directory_fd)
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or
+                stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+            os.close(fd)
+            raise ValueError("unsafe gate lock file owner, type, permissions or links")
+        return fd
+    finally:
+        os.close(directory_fd)
+
+
+def run_locked(name: str, command: str, cwd: Path) -> int:
+    with os.fdopen(open_lock(name), "r+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        env = dict(os.environ)
+        for key in list(env):
+            if key.startswith("GIT_") or key in ("LOOP_PI_RUN_DIR", "LOOP_PI_REPO", "LOOP_PI_GATE_LOCK_DIR", "BASH_ENV", "ENV"):
+                env.pop(key, None)
+        env["PWD"] = str(cwd)
+        child = None
+        pending: list[int] = []
+
+        def forward(signum, _frame):
+            pending.append(signum)
+            if child is not None:
+                try:
+                    os.killpg(child.pid, signum)
+                except ProcessLookupError:
+                    pass
+
+        signals = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT)
+        previous = {sig: signal.signal(sig, forward) for sig in signals}
+        try:
+            # Share the flock fd with the child. Even SIGKILL of this supervisor
+            # cannot release the lock while the declared command is still alive.
+            child = subprocess.Popen(["/bin/bash", "-c", command], cwd=cwd, env=env,
+                                     start_new_session=True, pass_fds=(lock.fileno(),))
+            for sig in pending:
+                try:
+                    os.killpg(child.pid, sig)
+                except ProcessLookupError:
+                    pass
+            return child.wait()
+        finally:
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("name", help="stable gate name declared in this worktree's LOOP.md")
+    parser.add_argument("--cwd", help="guard-bound canonical execution working directory")
+    parser.add_argument("--sha256", help="guard-bound SHA-256 of the approved LOOP.md bytes")
+    args = parser.parse_args()
+    try:
+        if not NAME.fullmatch(args.name):
+            raise ValueError("invalid gate name")
+        if bool(args.cwd) != bool(args.sha256):
+            raise ValueError("gate execution binding requires both --cwd and --sha256")
+        if args.sha256 is not None and not re.fullmatch(r"[0-9a-f]{64}", args.sha256):
+            raise ValueError("invalid gate declaration digest")
+        cwd = Path(args.cwd).resolve(strict=True) if args.cwd else Path.cwd().resolve(strict=True)
+        if args.cwd and str(cwd) != args.cwd:
+            raise ValueError("gate execution cwd must be canonical and absolute")
+        result = run_locked(args.name, declared_command(args.name, cwd, args.sha256), cwd)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        print(f"loop-gate-lock: {error}", file=sys.stderr)
+        return 78
+    if result < 0:
+        sig = -result
+        signal.signal(sig, signal.SIG_DFL)
+        os.kill(os.getpid(), sig)
+        return 128 + sig  # fallback if the platform ignores the signal
+    return result
+
+
+if __name__ == "__main__":
+    sys.exit(main())

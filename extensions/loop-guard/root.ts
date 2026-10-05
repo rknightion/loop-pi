@@ -15,9 +15,10 @@ import { installModelFamily, subagentOverrideBlock } from "./model-family.ts";
 import { installRequestCeiling, installRetryBackoff } from "../request-ceiling/index.ts";
 import { bindLaneIdentity } from "./push-grant.ts";
 import { evaluateOpsLaunch, QUERY_LAUNCH_EVENT } from "./ops.ts";
-import { evaluateBashCommand, evaluateBgWait, evaluateSubagentCall, evaluateWatchProcess, isAsyncSubagentLaunch } from "./rules.ts";
+import { evaluateBashCommand, evaluateBgWait, evaluateSubagentCall, evaluateWatchProcess, isAsyncSubagentLaunch, wrappedGateCommands, bindGateExecution } from "./rules.ts";
+import { loadGateDeclarations } from "./gates.ts";
 import { bashProtectedPath, protoActive, runDirFromEnv, toolWriteRefusal } from "./guard-paths.ts";
-import { planPushes, recordPushes, type PlannedPush } from "./push-log.ts";
+import { planPushes, recordPushes, unloggedPushRefusal, type PlannedPush } from "./push-log.ts";
 
 const ASYNC_COMPLETE_EVENT = "subagent:async-complete";
 
@@ -197,9 +198,12 @@ export default function (pi: ExtensionAPI) {
   const evaluateShellLikeToolCall = async (
     command: string,
     ctx: ExtensionContext,
+    input: Record<string, unknown>,
   ): Promise<ToolCallEventResult | void> => {
     const p2 = proto();
+    const gates = loadGateDeclarations(ctx.cwd);
     const decision = evaluateBashCommand(command, "root", 0, true, {
+      gates,
       cwd: ctx.cwd,
       proto: p2,
       protectedPath: p2 ? bashProtectedPath("root", ctx.cwd, runDir) : undefined,
@@ -212,13 +216,21 @@ export default function (pi: ExtensionAPI) {
 
     const agentDir = getAgentDir();
     const scripts = hookScriptsToRun(agentDir, ["backlog-guard.py", "staging-guard.py"]);
-    const hooks = await runHookScripts(scripts, "bash", { command }, ctx.cwd);
-    if (hooks.denied) {
-      return { block: true, reason: hooks.reason };
+    const declaredCommands = wrappedGateCommands(command, gates);
+    for (const declared of declaredCommands) {
+      const unlogged = unloggedPushRefusal(declared, "watch_process");
+      if (unlogged) return { block: true, reason: "loop-guard: declared gates may not run git push or gh pr merge; run remote moves as separate audited bash commands." };
     }
-    for (const failure of hooks.adapterFailures) {
-      ctx.ui.notify(`loop-guard: hook adapter failure ignored for root: ${failure}`, "warning");
+    for (const effective of [command, ...declaredCommands]) {
+      const hooks = await runHookScripts(scripts, "bash", { command: effective }, ctx.cwd);
+      if (hooks.denied) {
+        return { block: true, reason: hooks.reason };
+      }
+      for (const failure of hooks.adapterFailures) {
+        ctx.ui.notify(`loop-guard: hook adapter failure ignored for root: ${failure}`, "warning");
+      }
     }
+    input.command = bindGateExecution(command, gates);
     return;
   };
 
@@ -233,7 +245,7 @@ export default function (pi: ExtensionAPI) {
             "long as stalled. Run the work under `watch_start` and end the turn; its exit wakes the root.",
         };
       }
-      const verdict = await evaluateShellLikeToolCall(event.input.command, ctx);
+      const verdict = await evaluateShellLikeToolCall(event.input.command, ctx, event.input as unknown as Record<string, unknown>);
       if (verdict?.block) return verdict;
       if (proto() && runDir !== undefined) {
         const pushes = await planPushes(event.input.command, ctx.cwd);
@@ -309,12 +321,12 @@ export default function (pi: ExtensionAPI) {
         return { block: true, reason: decision.reason };
       }
       const command = (event.input as Record<string, unknown>).command;
-      return evaluateShellLikeToolCall(typeof command === "string" ? command : "", ctx);
+      return evaluateShellLikeToolCall(typeof command === "string" ? command : "", ctx, event.input as Record<string, unknown>);
     }
 
     if (event.toolName === "watch_start") {
       const command = (event.input as Record<string, unknown>).command;
-      return evaluateShellLikeToolCall(typeof command === "string" ? command : "", ctx);
+      return evaluateShellLikeToolCall(typeof command === "string" ? command : "", ctx, event.input as Record<string, unknown>);
     }
 
     if (event.toolName === "bg_wait") {

@@ -26,6 +26,7 @@
 // receives them (see parseCommand).
 
 import type { OpsEntry } from "./ops.ts";
+import type { GateDeclarations } from "./gates.ts";
 
 export type Role = "root" | "lane";
 
@@ -1648,6 +1649,8 @@ export function secretWriteTarget(tokens: string[]): string | null {
 export interface LaneContext {
   /** The ops entry bound to this lane by the root (agents `ops` and `ops-probe` only). */
   ops?: OpsEntry;
+  /** Explicit LOOP.md heavy gates; prose mutexes are never inferred. */
+  gates?: GateDeclarations;
   /** The working directory, for resolving relative write targets. */
   cwd?: string;
   /** Protocol 2 (SEAMS S0): the run dir carries `loop-pi-proto`. Every refusal added for the
@@ -2108,6 +2111,41 @@ export function fallbackScan(text: string, role: Role, depth = 0, pushGranted = 
 // Public: evaluateBashCommand
 // ---------------------------------------------------------------------------
 
+/** Bind the only supported wrapper form after approval: a direct name-only invocation.
+ * Runtime handlers replace the model's tool input, never accept model-supplied binding flags. */
+export function bindGateExecution(command: string, declarations: GateDeclarations): string {
+  const parsed = parseCommand(command);
+  const segment = parsed?.segments[0];
+  if (!segment || basename(segment[0]) !== "loop-gate-lock") return command;
+  if (!declarations.cwd || !declarations.sha256) throw new Error("gate approval has no execution binding");
+  return `${segment.map(quoteForShell).join(" ")} --cwd ${quoteForShell(declarations.cwd)} --sha256 ${quoteForShell(declarations.sha256)}`;
+}
+
+/** Declared commands run by name-only wrappers, for the shared hook adapters. */
+export function wrappedGateCommands(command: string, declarations: GateDeclarations): string[] {
+  const parsed = parseCommand(command);
+  if (!parsed) return [];
+  return parsed.segments.flatMap((raw) => {
+    const words = stripWrappers(raw);
+    if (basename(words[0] ?? "") !== "loop-gate-lock" || words.length !== 2) return [];
+    const gate = declarations.gates.find((g) => g.name === words[1]);
+    return gate ? [gate.command] : [];
+  });
+}
+
+// Compare executable segments, not quoted inert text. Shell -c parents are redundant:
+// their parsed children carry the commands. Prefix wrappers do not hide naked gates.
+function gateSegments(parsed: ParsedCommand): string[][] {
+  return parsed.segments.map(stripWrappers).filter((s) => s.length && unwrapShellC(s) === null);
+}
+
+function containsGate(segments: string[][], signature: string[][]): boolean {
+  return signature.length > 0 && segments.some((_, start) => signature.every((wanted, i) => {
+    const actual = segments[start + i];
+    return actual !== undefined && wanted.length <= actual.length && wanted.every((word, j) => actual[j] === word);
+  }));
+}
+
 export function evaluateBashCommand(
   command: string,
   role: Role,
@@ -2119,7 +2157,27 @@ export function evaluateBashCommand(
     return block("loop-guard: a NUL character cannot appear in a command");
   }
   const parsed = parseCommand(command, role);
+  if (lane.gates?.error) return block(`loop-guard: ${lane.gates.error}`);
+  if (lane.gates?.gates.length) {
+    const segments = parsed ? gateSegments(parsed) : [];
+    for (const gate of lane.gates.gates) {
+      const declared = parseCommand(gate.command, role);
+      if (!declared) return block(`loop-guard: declared gate '${gate.name}' cannot be parsed.`);
+      if (containsGate(segments, gateSegments(declared)) || (!parsed && command.includes(gate.command))) {
+        return block(`loop-guard: declared gate '${gate.name}' must run through \`loop-gate-lock ${gate.name}\`.`);
+      }
+    }
+  }
+  if (!parsed && command.includes("loop-gate-lock")) {
+    return block("loop-guard: unparseable gate wrapper commands are refused; use a direct name-only invocation.");
+  }
   if (!parsed) return fallbackScan(command, role, 0, pushGranted, lane);
+  if (parsed.interpreterScripts.some((script) => script.includes("loop-gate-lock")) || parsed.segments.some((raw) => {
+    const words = stripWrappers(raw);
+    return isInterpreterHead(basename(words[0] ?? "")) && words.slice(1).some((arg) => arg.includes("loop-gate-lock"));
+  })) {
+    return block("loop-guard: gate wrappers inside interpreter code are unsupported; use a direct name-only invocation.");
+  }
 
   if (parsed.hasBackgroundOperator) {
     return block(
@@ -2133,6 +2191,25 @@ export function evaluateBashCommand(
     const stripped = stripWrappers(rawSegment);
     if (stripped.length === 0) continue;
     const head = basename(stripped[0]);
+
+    if (head === "loop-gate-lock") {
+      const gate = lane.gates?.gates.find((g) => g.name === stripped[1]);
+      if (stripped.length !== 2 || !gate) {
+        return block("loop-guard: loop-gate-lock takes exactly one declared gate name; execution binding flags are guard-owned.");
+      }
+      if (parsed.segments.length !== 1 || rawSegment.length !== 2 || rawSegment !== parsed.segments[0] ||
+          parsed.writeTargets.length || parsed.stdinRedirectedSegments.length || parsed.interpreterScripts.length ||
+          stripReservedWords(rawSegment).length !== rawSegment.length ||
+          !/^\s*(?:'[^']*'|"[^"$`]*"|[^\s;|&()<>`$]+)\s+(?:'[^']*'|"[^"$`]*"|[^\s;|&()<>`$]+)\s*$/.test(command)) {
+        return block("loop-guard: a declared gate requires a direct name-only wrapper invocation; context-changing prefixes and compound/unsupported shell forms are refused.");
+      }
+      const declared = parseCommand(gate.command, role);
+      if (!declared || declared.segments.some((s) => basename(stripWrappers(s)[0] ?? "") === "loop-gate-lock")) {
+        return block("loop-guard: nested gate wrappers are not supported in declarations.");
+      }
+      const decision = evaluateBashCommand(gate.command, role, gitAliasDepth, pushGranted, { ...lane, gates: undefined });
+      if (decision.block) return decision;
+    }
 
     if (head === "nohup" || head === "disown" || head === "setsid") {
       return block(`loop-guard: '${head}' detaches a process outside loop-wait; use watch_start instead.`);
