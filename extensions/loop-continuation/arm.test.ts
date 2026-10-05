@@ -139,7 +139,7 @@ test("checkArm also accepts the scutil LocalHostName, and refuses with both name
 test("loopPi.onIncident runs detached with {file}; a notifier that fails to start is ignored", async () => {
   const f = loopFixture();
   const out = join(fresh("loop-cont-notify-"), "notified.txt");
-  writeFileSync(join(f.agentDir, "settings.json"), JSON.stringify({ loopPi: { onIncident: ["sh", "-c", 'cat "$1" > "$2"', "sh", "{file}", out] } }));
+  writeFileSync(join(f.agentDir, "settings.json"), JSON.stringify({ loopPi: { onIncident: ["sh", "-c", 'cat "$1" > "$2.tmp" && mv "$2.tmp" "$2"', "sh", "{file}", out] } }));
   const pi = await fakePi({ agentDir: f.agentDir, cwd: f.repo, runDir: null });
   try {
     assert.deepEqual(await pi.input(f.launch), { action: "handled" });
