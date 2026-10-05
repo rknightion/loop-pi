@@ -744,7 +744,8 @@ class AutomationTests(unittest.TestCase):
         self.assertEqual(self.compare([], unavailable=True).returncode, 1)
 
     def test_invalid_items_are_usage_errors(self):
-        items = [{"ref": "refs/tags/v1", "actor": self.ACTOR},
+        items = [{"ref": "refs/pull/1/head", "actor": self.ACTOR},
+                 {"ref_prefix": "refs/tags/", "actor": self.ACTOR},
                  {"ref_prefix": "refs/heads/", "actor": self.ACTOR},
                  {"ref_prefix": "refs/heads/renovate", "actor": self.ACTOR},
                  {"ref": self.REF}, {"ref": self.REF, "actor": self.ACTOR, "unknown": True},
@@ -782,6 +783,182 @@ class AutomationTests(unittest.TestCase):
         self.assertEqual(self.compare([self.activity()], items=[item]).returncode, 0)
         other = self.REF + "-other"
         self.assertEqual(self.compare([self.activity(ref=other)], ref=other, items=[item]).returncode, 1)
+
+
+class ReleaseAutomationTests(unittest.TestCase):
+    """Real snapshot/compare CLI and git tags; only GitHub identity/API responses are fake."""
+
+    ACTOR = "release-please[bot]"
+    RC_ACTOR = "github-actions[bot]"
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="loop-pi-audit-release-test-")
+        self.repo, self.remote = init_repo_with_remote(self.tmp, "repo")
+        git(self.remote, "symbolic-ref", "HEAD", "refs/heads/main")
+        self.fake = make_bin_with_gh_stub(self.tmp)
+        os.unlink(os.path.join(self.fake, "git"))
+        self.url = "https://github.com/export/audit-fixture.git"
+        self.write_git_stub()
+        self.feed = os.path.join(self.tmp, "release.json")
+        self.calls = os.path.join(self.tmp, "calls.jsonl")
+        self.listing = []
+        self.set_api({})
+        self.before = os.path.join(self.tmp, "before.json")
+        self.after = os.path.join(self.tmp, "after.json")
+        self.env = {"PATH": self.fake}
+        snapshot(self.before, self.repo, env_overrides=self.env)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def write_git_stub(self):
+        path = os.path.join(self.fake, "git")
+        with open(path, "w") as fh:
+            fh.write('#!/bin/sh\ncase "$*" in *"remote get-url"*) echo ' + self.url
+                     + f'; exit 0;; esac\nexec {GIT} "$@"\n')
+        os.chmod(path, 0o755)
+
+    def set_api(self, response, fails=False, raw=None):
+        with open(self.feed, "w") as fh:
+            fh.write(json.dumps(response) if raw is None else raw)
+        with open(os.path.join(self.fake, "gh"), "w") as fh:
+            fh.write(f'#!{sys.executable}\nimport json, sys\n'
+                     f'with open({self.calls!r}, "a") as f: f.write(json.dumps(sys.argv[1:]) + "\\n")\n'
+                     'if sys.argv[1] == "api":\n'
+                     + ('    sys.exit(1)\n' if fails else
+                        f'    print(open({self.feed!r}).read()); sys.exit(0)\n'))
+            fh.write(f'print({json.dumps(self.listing)!r})\n')
+
+    def release(self, tag, actor=None, annotated=False):
+        git(self.repo, "tag", *(["-a", "-m", "release"] if annotated else []), tag)
+        git(self.repo, "push", "-q", "origin", tag)
+        self.listing = [{"tagName": tag}]
+        self.set_api({"tag_name": tag, "author": {"login": actor or self.ACTOR}})
+        snapshot(self.after, self.repo, env_overrides=self.env)
+
+    def compare(self, items=None):
+        grants = os.path.join(self.tmp, "grants.json")
+        with open(grants, "w") as fh:
+            json.dump({self.repo: {"automation": items if items is not None else [
+                {"ref_prefix": "refs/tags/v", "actor": self.ACTOR},
+                {"ref_prefix": "refs/tags/v", "actor": self.RC_ACTOR}]}}, fh)
+        return run_audit("compare", self.before, self.after, "--grants", grants,
+                         env_overrides=self.env)
+
+    def test_stable_and_rc_release_authors_cover_all_added_surfaces(self):
+        # Includes annotated peel, local tag and release; these are the actual closeout surfaces.
+        self.release("v1.2.3", annotated=True)
+        result = self.compare()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.count(f"[automation actor={self.ACTOR}]"), 4)
+        with open(self.calls) as fh:
+            calls = [json.loads(line) for line in fh if json.loads(line)[0] == "api"]
+        self.assertEqual(calls, [["api", "--hostname", "github.com",
+                                 "repos/export/audit-fixture/releases/tags/v1.2.3"]])
+        os.remove(self.calls)
+        git(self.repo, "tag", "-d", "v1.2.3")
+        git(self.repo, "push", "-q", "origin", "--delete", "v1.2.3")
+        self.release("v1.2.4-rc.7", actor=self.RC_ACTOR)
+        result = self.compare()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.count(f"[automation actor={self.RC_ACTOR}]"), 3)
+
+    def test_untrusted_missing_and_failed_release_lookups_refuse(self):
+        tag = "v1.2.3"
+        self.release(tag)
+        cases = [{"tag_name": tag, "author": {"login": "other-app[bot]"}},
+                 {"tag_name": tag, "author": {"login": "someone"}},
+                 {"tag_name": tag}, {"tag_name": tag, "author": None},
+                 {"tag_name": "v9.9.9", "author": {"login": self.ACTOR}}, [], None]
+        for response in cases:
+            with self.subTest(response=response):
+                self.set_api(response)
+                result = self.compare()
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertNotIn("[automation actor=", result.stdout)
+                self.assertEqual(result.stdout.count("[UNGRANTED]"), 3)
+        for kwargs in ({"fails": True}, {"raw": "not-json"}):
+            with self.subTest(kwargs=kwargs):
+                self.set_api({}, **kwargs)
+                self.assertEqual(self.compare().returncode, 1)
+
+    def test_exact_tag_grant_does_not_cover_another_tag(self):
+        self.release("v1.2.3")
+        self.assertEqual(self.compare([{"ref": "refs/tags/v1.2.3", "actor": self.ACTOR}]).returncode, 0)
+        self.assertEqual(self.compare([{"ref": "refs/tags/v1.2.4", "actor": self.ACTOR}]).returncode, 1)
+        self.assertEqual(self.compare([{"ref_prefix": "refs/heads/v", "actor": self.ACTOR}]).returncode, 2)
+
+    def test_existing_release_author_does_not_authorize_deletion_or_retag(self):
+        self.release("v1.2.3")
+        shutil.copyfile(self.after, self.before)
+        git(self.repo, "commit", "-q", "--allow-empty", "-m", "retag")
+        git(self.repo, "tag", "-f", "v1.2.3")
+        git(self.repo, "push", "-q", "--force", "origin", "v1.2.3")
+        snapshot(self.after, self.repo, env_overrides=self.env)
+        result = self.compare()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertNotIn("[automation actor=", result.stdout)
+        git(self.repo, "tag", "-d", "v1.2.3")
+        git(self.repo, "push", "-q", "origin", "--delete", "v1.2.3")
+        self.listing = []
+        self.set_api({"tag_name": "v1.2.3", "author": {"login": self.ACTOR}})
+        snapshot(self.after, self.repo, env_overrides=self.env)
+        result = self.compare()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("release removed: v1.2.3 [UNGRANTED]", result.stdout)
+        self.assertNotIn("[automation actor=", result.stdout)
+
+    def test_tag_author_does_not_cover_branch_or_unknown_remote_identity(self):
+        self.release("v1.2.3")
+        git(self.repo, "commit", "-q", "--allow-empty", "-m", "unlogged")
+        git(self.repo, "push", "-q", "origin", "main")
+        snapshot(self.after, self.repo, env_overrides=self.env)
+        result = self.compare()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("UNGRANTED derived HEAD", result.stdout)
+        self.assertIn("ref moved: refs/heads/main", result.stdout)
+        for url in ("https://forge.example.org/export/audit-fixture.git", self.remote):
+            with self.subTest(url=url):
+                self.url = url
+                self.write_git_stub()
+                for path in (self.before, self.after):
+                    with open(path) as fh:
+                        data = json.load(fh)
+                    data["repos"][self.repo]["remotes"]["origin"]["url"] = url
+                    with open(path, "w") as fh:
+                        json.dump(data, fh)
+                result = self.compare()
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertNotIn("[automation actor=", result.stdout)
+
+    def test_lookup_uses_snapshot_identity_not_a_reconfigured_live_remote(self):
+        self.release("v1.2.3")
+        self.url = "https://github.com/other/unrelated.git"
+        self.write_git_stub()
+        result = self.compare()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        with open(self.calls) as fh:
+            calls = [json.loads(line) for line in fh if json.loads(line)[0] == "api"]
+        self.assertEqual(calls, [["api", "--hostname", "github.com",
+                                 "repos/export/audit-fixture/releases/tags/v1.2.3"]])
+
+    def test_missing_or_changed_snapshot_identity_cannot_attribute_tags(self):
+        self.release("v1.2.3")
+        with open(self.after) as fh:
+            original = json.load(fh)
+        for url in (None, "https://github.com/other/unrelated.git"):
+            with self.subTest(url=url):
+                data = json.loads(json.dumps(original))
+                remote = data["repos"][self.repo]["remotes"]["origin"]
+                if url is None:
+                    remote.pop("url")
+                else:
+                    remote["url"] = url
+                with open(self.after, "w") as fh:
+                    json.dump(data, fh)
+                result = self.compare()
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertNotIn("[automation actor=", result.stdout)
 
 
 class OpsReleaseTests(unittest.TestCase):
