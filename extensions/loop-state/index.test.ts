@@ -49,7 +49,9 @@ function harness(opts: { reportPath?: string | null; cwd: string; sessionId?: st
   const bus = new Map<string, ((d: unknown) => void)[]>();
   const sent: { message: any; options: any }[] = [];
   const notes: { message: string; type?: string }[] = [];
+  const entries: any[] = [];
   const api = {
+    appendEntry: (customType: string, data: unknown) => entries.push({ type: "custom", customType, data }),
     on: (event: string, handler: Handler) => void handlers.set(event, handler),
     sendMessage: (message: unknown, options: unknown) => void sent.push({ message, options }),
     events: {
@@ -69,13 +71,14 @@ function harness(opts: { reportPath?: string | null; cwd: string; sessionId?: st
   const ctx = {
     cwd: opts.cwd,
     ui: { notify: (message: string, type?: string) => notes.push({ message, type }) },
-    sessionManager: { getSessionId: () => "sess-id", getSessionFile: () => opts.sessionId ?? "/homes/sessions/sess-1.jsonl" },
+    sessionManager: { getBranch: () => entries, getSessionId: () => "sess-id", getSessionFile: () => opts.sessionId ?? "/homes/sessions/sess-1.jsonl" },
   };
   return {
     sent,
     notes,
     ctx,
     start: () => handlers.get("session_start")!({ type: "session_start", reason: "startup" }, ctx),
+    shutdown: () => handlers.get("session_shutdown")?.({}, ctx),
     compact: () => handlers.get("session_compact")!({ type: "session_compact" }, ctx),
     call: (toolCallId: string, input: Record<string, unknown>) =>
       handlers.get("tool_call")!({ type: "tool_call", toolCallId, toolName: "subagent", input }, ctx),
@@ -135,6 +138,92 @@ test("dispatch then return are appended with by=ext, base from git and the lane-
   assert.equal(log[1].tail, undefined);
   assert.equal(execFileSync(BIN, ["check", r.log]).length, 0);
   assert.deepEqual(h.notes, []);
+});
+
+test("a refused resume falls back once and duplicate completions are ignored", async () => {
+  const r = makeRepo();
+  const h = harness({ reportPath: r.report, cwd: r.repo });
+  h.start();
+  let attempts = 0;
+  h.on("subagents:rpc:v1:request", (raw) => {
+    const request = raw as any;
+    attempts++;
+    assert.equal(request.method, "resume");
+    assert.equal(request.params.id, "run1");
+    h.emit(`subagents:rpc:v1:reply:${request.requestId}`, { version: 1, requestId: request.requestId, success: false, error: { message: "persisted session unavailable" } });
+  });
+  h.call("tc1", { agent: "lane-worker", task: BRIEF });
+  h.result("tc1", "", { runId: "run1" });
+  const completion = { runId: "run1", sessionId: SESS, success: true, results: [{ summary: "missing" }] };
+  h.emit("subagent:async-complete", completion);
+  h.emit("subagent:async-complete", completion);
+  await until(() => events(r.log).length === 2);
+  await new Promise(r => setTimeout(r, 100));
+  assert.equal(attempts, 1);
+  assert.equal(events(r.log).length, 2);
+  assert.equal(events(r.log)[1].status, "failed");
+});
+
+test("a failed original run stays failed after recovering a valid block", async () => {
+  const r = makeRepo();
+  const h = harness({ reportPath: r.report, cwd: r.repo });
+  h.start();
+  h.on("subagents:rpc:v1:request", (raw) => {
+    const request = raw as any;
+    h.emit(`subagents:rpc:v1:reply:${request.requestId}`, { version: 1, requestId: request.requestId, success: true, data: { details: { runId: "revived" } } });
+    // Completion can even arrive before the queued RPC caller has correlated its reply.
+    h.emit("subagent:async-complete", { runId: "revived", sessionId: SESS, success: true, results: [{ summary: LANE_RETURN("complete") }] });
+  });
+  h.call("tc1", { agent: "lane-worker", task: BRIEF });
+  h.result("tc1", "", { runId: "run1" });
+  h.emit("subagent:async-complete", { runId: "run1", sessionId: SESS, success: false, results: [{ summary: "missing" }] });
+  await until(() => events(r.log).length === 2);
+  assert.equal(events(r.log)[1].run, "run1");
+  assert.equal(events(r.log)[1].status, "failed");
+});
+
+test("a terminal revived run with lost completion falls back from package lifecycle proof", { timeout: 75_000 }, async () => {
+  const r = makeRepo();
+  const h = harness({ reportPath: r.report, cwd: r.repo });
+  const asyncDir = join(r.repo, "revived");
+  mkdirSync(asyncDir);
+  writeFileSync(join(asyncDir, "status.json"), JSON.stringify({ runId: "lost", sessionId: SESS, state: "failed" }));
+  h.start();
+  h.on("subagents:rpc:v1:request", (raw) => {
+    const request = raw as any;
+    h.emit(`subagents:rpc:v1:reply:${request.requestId}`, { version: 1, requestId: request.requestId, success: true, data: { details: { runId: "lost", asyncDir } } });
+  });
+  h.call("tc1", { agent: "lane-worker", task: BRIEF });
+  h.result("tc1", "", { runId: "run1" });
+  h.emit("subagent:async-complete", { runId: "run1", sessionId: SESS, results: [{ summary: "missing" }] });
+  await until(() => events(r.log).length === 2, 70_000);
+  h.shutdown();
+  assert.equal(events(r.log)[1].run, "run1");
+  assert.equal(events(r.log)[1].status, "failed");
+});
+
+test("a lost revived completion falls back after restart without another resume", async () => {
+  const r = makeRepo();
+  const h = harness({ reportPath: r.report, cwd: r.repo });
+  h.start();
+  let attempts = 0;
+  h.on("subagents:rpc:v1:request", (raw) => {
+    const request = raw as any;
+    attempts++;
+    h.emit(`subagents:rpc:v1:reply:${request.requestId}`, { version: 1, requestId: request.requestId, success: true, data: { details: { runId: "lost" } } });
+  });
+  h.call("tc1", { agent: "lane-worker", task: BRIEF });
+  h.result("tc1", "", { runId: "run1" });
+  h.emit("subagent:async-complete", { runId: "run1", sessionId: SESS, results: [{ summary: "missing" }] });
+  await until(() => attempts === 1);
+  h.shutdown();
+  h.start();
+  await until(() => events(r.log).length === 2);
+  h.emit("subagent:async-complete", { runId: "lost", sessionId: SESS, results: [{ summary: LANE_RETURN("complete") }] });
+  await new Promise(r => setTimeout(r, 100));
+  assert.equal(attempts, 1);
+  assert.equal(events(r.log).length, 2);
+  assert.equal(events(r.log)[1].status, "failed");
 });
 
 test("the run id is read from the launch text when details carry none, and Deadline comes from the brief", async () => {

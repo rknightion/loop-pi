@@ -196,8 +196,11 @@ before any `await`. A missing reply means the provider extension is not loaded; 
   `lane-policy.md` after a `<!-- lane-policy -->` marker instead. An overlay may replace
   `lane-policy.md`, so the return contract is not in it: every agent but `triager` carries the
   `lane-return` v2 block in its own body, and `triager` its `triage` block.
-- A return with no usable `lane-return` block is `failed`, for the loop-state extension and the
-  dispatcher alike. `loop-state` folds a `gate-runner` dispatch into a live lane only, never a task.
+- A return with no usable `lane-return` block is ultimately `failed`. Model-root `loop-state`
+  first attempts exactly one package-owned resume asking for the block, correlating the revived
+  run to the original lane and run; a refused resume or another missing block falls back to failed
+  without recursive resumes or duplicate accounting. The dispatcher retains immediate failed
+  behavior. `loop-state` folds a `gate-runner` dispatch into a live lane only, never a task.
 - Root extensions also include `loop-state/index.ts`: it appends `dispatch` and `return` to
   `codex/state-<stem>-loop<N>.jsonl` (sibling of the report) through `<agentDir>/bin/loop-state`
   for `subagent` calls whose brief starts `Lane: <id> · Task: <id> [(<title>)] · Tier: ...`, and injects the

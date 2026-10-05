@@ -88,8 +88,26 @@ test("a forced compaction is followed by a fresh loop-state-digest message", asy
   }
 });
 
-test("a real lane yields dispatch and return events through the subagent tool", async () => {
+for (const outcome of ["valid", "recovered", "missing-again", "resume-failed"] as const) {
+test(`a real lane yields one identity-preserving return: ${outcome}`, async () => {
   const s = scaffold();
+  const requests = join(s.repo, "rpc.jsonl");
+  const completions = join(s.repo, "completions.jsonl");
+  const observer = join(dirname(s.stub), "observer.ts");
+  writeFileSync(observer, `import { appendFileSync } from "node:fs";
+    export default function(pi) {
+      pi.events.on("subagents:rpc:v1:request", d => {
+        if (d.method === "resume") appendFileSync(${JSON.stringify(requests)}, JSON.stringify(d) + "\\n");
+      });
+      const seen = new Set();
+      pi.events.on("subagent:async-complete", d => {
+        if (seen.has(d.runId)) return;
+        seen.add(d.runId);
+        appendFileSync(${JSON.stringify(completions)}, JSON.stringify(d) + "\\n");
+        setTimeout(() => pi.events.emit("subagent:async-complete", d), 20);
+      });
+    }`);
+  writeFileSync(s.stub, readFileSync(s.stub, "utf8").replace("export default function (pi) {", "export default function (pi) { observe(pi);") + `\nimport observe from ${JSON.stringify(observer)};\n`);
   mkdirSync(join(s.agentDir, "agents"), { recursive: true });
   writeFileSync(
     join(s.agentDir, "settings.json"),
@@ -123,7 +141,8 @@ test("a real lane yields dispatch and return events through the subagent tool", 
         },
       ],
     },
-    { match: "CHILD_LANE_MARKER", once: true, text: `Finished.\n${block}` },
+    { match: "CHILD_LANE_MARKER", once: true, text: outcome === "valid" ? `Finished.\n${block}` : "Finished without a return block." },
+    { match: "Return only the missing fenced lane-return", text: outcome === "recovered" ? block : "Still missing.", ...(outcome === "resume-failed" ? { stopReason: "error" as const, errorMessage: "scripted child failure" } : {}) },
     { match: ".*", text: "ok" },
   ]);
   const session = startPiRpc({
@@ -157,8 +176,22 @@ test("a real lane yields dispatch and return events through the subagent tool", 
     assert.equal(ret.run, dispatch.run, "the return carries the run id the dispatch recorded");
     assert.deepEqual(
       { lane: ret.lane, status: ret.status, check: ret.check, exit: ret.exit },
-      { lane: "L1", status: "complete", check: "just check", exit: 0 },
+      outcome === "missing-again" || outcome === "resume-failed"
+        ? { lane: "L1", status: "failed", check: undefined, exit: undefined }
+        : { lane: "L1", status: "complete", check: "just check", exit: 0 },
     );
+    await new Promise(r => setTimeout(r, 500));
+    const rpc = (() => { try { return readFileSync(requests, "utf8").trim().split("\n").map(l => JSON.parse(l)); } catch { return []; } })();
+    assert.equal(rpc.length, outcome === "valid" ? 0 : 1, "exactly one authoritative resume only when missing");
+    if (rpc.length) {
+      assert.equal(rpc[0].params.id, dispatch.run);
+      assert.match(rpc[0].params.message, /lane L1/);
+      const finished = readFileSync(completions, "utf8").trim().split("\n").map(l => JSON.parse(l));
+      assert.equal(finished.length, 2);
+      assert.notEqual(finished[1].runId, dispatch.run, "package resume allocates a new run identity");
+      if (outcome === "recovered") assert.match(finished[1].results[0].summary, /"v":2/);
+    }
+    assert.equal(readFileSync(s.log, "utf8").trim().split("\n").length, 2, "replayed completions never double account");
     execFileSync(BIN, ["check", s.log]);
     const digest = execFileSync(BIN, ["digest", s.log], { encoding: "utf8" });
     assert.match(digest, /## Live lanes \(0\)/);
@@ -166,6 +199,8 @@ test("a real lane yields dispatch and return events through the subagent tool", 
     await session.close();
   }
 });
+
+}
 
 test("S6: a 3.37 MB lane return reaches the root at 16 KB or less with its lane-return block, and the return event keeps its fields", async () => {
   const s = scaffold();

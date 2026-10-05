@@ -12,7 +12,8 @@
 // is parsed from the async-complete payload, which holds the full text and is never rewritten.
 
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
@@ -22,6 +23,7 @@ import { capNotifyMessage, type CompletionInfo, completionInfo, contentText, NOT
 export const DIGEST_CUSTOM_TYPE = "loop-state-digest";
 const CLI_TIMEOUT_MS = 10_000;
 const MAX_COMPLETIONS = 256;
+const RECOVERY_STATE = "loop-state-return-recovery";
 
 interface CliResult {
   code: number;
@@ -70,6 +72,10 @@ export default function (pi: ExtensionAPI) {
   const started = new Map<string, { deadlineAt?: string }>();
   const dispatched = new Map<string, { lane: string; task: string }>();
   const pendingComplete = new Map<string, Record<string, unknown>>();
+  const handled = new Set<string>();
+  const resumedFrom = new Map<string, { run: string; failed: boolean }>();
+  const resumeAttempted = new Set<string>();
+  const recoveryTimers = new Set<ReturnType<typeof setTimeout>>();
   // Structured async-complete facts by run id, for the return cap's saved-output path (S6).
   const completions = new Map<string, CompletionInfo>();
   const completionFor = (runId: string) => completions.get(runId);
@@ -126,12 +132,86 @@ export default function (pi: ExtensionAPI) {
     return r.code === 0 && sha ? sha : "unknown";
   }
 
-  async function recordReturn(runId: string, data: Record<string, unknown>, log: string, info: { lane: string }) {
+  // pi-subagents 0.75.0 docs/extension-api.md and src/extension/rpc.js:
+  // resume uses the persisted child and returns data.details with a NEW async run id.
+  async function resumeForBlock(runId: string, lane: string): Promise<{ id: string; asyncDir?: string } | null> {
+    const requestId = randomUUID();
+    return new Promise((done) => {
+      const channel = `subagents:rpc:v1:reply:${requestId}`;
+      const timer = setTimeout(() => finish(null), CLI_TIMEOUT_MS);
+      let unsubscribe: (() => void) | undefined;
+      const finish = (id: { id: string; asyncDir?: string } | null) => {
+        clearTimeout(timer);
+        unsubscribe?.();
+        done(id);
+      };
+      unsubscribe = pi.events.on(channel, (raw) => {
+        const reply = raw as { version?: number; requestId?: string; success?: boolean; data?: { details?: { runId?: unknown; asyncId?: unknown; asyncDir?: unknown } }; error?: { message?: string } };
+        if (reply.version !== 1 || reply.requestId !== requestId) return;
+        const details = reply.data?.details;
+        const id = details?.runId ?? details?.asyncId;
+        if (reply.success === true && typeof id === "string" && id && id !== runId) finish({ id, ...(typeof details?.asyncDir === "string" ? { asyncDir: details.asyncDir } : {}) });
+        else {
+          warn(`resume for run ${runId} refused: ${reply.error?.message ?? "no new async run id"}`);
+          finish(null);
+        }
+      });
+      try {
+        pi.events.emit("subagents:rpc:v1:request", {
+          version: 1, requestId, method: "resume",
+          params: { id: runId, message: `Return only the missing fenced lane-return v2 JSON block for lane ${lane}, using the original brief and the work already performed. Do not repeat work, gate, review, commit or push. Preserve the original lane identity and report the original outcome honestly.` },
+        });
+      } catch (error) {
+        warn(`resume for run ${runId}: ${String(error)}`);
+        finish(null);
+      }
+    });
+  }
+
+  async function recordReturn(runId: string, data: Record<string, unknown>, log: string, info: { lane: string }, final = false) {
     const results = Array.isArray(data.results) ? (data.results as Record<string, unknown>[]) : [];
     const first = results[0];
     const candidates = [first?.summary, first?.output, data.summary];
     const text = candidates.find((c): c is string => typeof c === "string" && c.includes("lane-return")) ?? candidates.find((c): c is string => typeof c === "string") ?? "";
     const block = parseLaneReturn(text);
+    if (!block && !final && !resumeAttempted.has(runId)) {
+      resumeAttempted.add(runId);
+      const pending = { runId, data, log, info, phase: "pending" };
+      // Persist BEFORE launch: a restart must never issue a second resume.
+      pi.appendEntry(RECOVERY_STATE, pending);
+      const revived = await resumeForBlock(runId, info.lane);
+      if (revived) {
+        resumedFrom.set(revived.id, { run: runId, failed: runFailed(data) });
+        pi.appendEntry(RECOVERY_STATE, { ...pending, revived: revived.id });
+        // Published resume details own asyncDir. status.json's runId/sessionId/state
+        // are the package's lifecycle proof; never finalize a still-running child.
+        if (revived.asyncDir) {
+          const poll = (remaining: number) => {
+            const timer = setTimeout(() => {
+              recoveryTimers.delete(timer);
+              enqueue(async () => {
+                if (handled.has(revived.id)) return;
+                try {
+                  const status = JSON.parse(readFileSync(join(revived.asyncDir!, "status.json"), "utf8"));
+                  if (status.runId === revived.id && status.sessionId === sessionId &&
+                      ["complete", "failed", "partial", "paused", "stopped", "rejected"].includes(status.state)) {
+                    handled.add(revived.id);
+                    await recordReturn(runId, data, log, info, true);
+                    return;
+                  }
+                } catch { /* A missing artifact is not terminal proof. */ }
+                if (remaining > 1) poll(remaining - 1);
+                else warn(`resume for run ${runId} still lacks terminal proof; recovery remains pending`);
+              });
+            }, 60_000);
+            timer.unref();
+            recoveryTimers.add(timer);
+          };
+          poll(15);
+        }
+        return;
+      }
+    }
     const event = returnEvent(info.lane, runId, runFailed(data) ? failedRunBlock(block) : block);
     let result = await append(event, log);
     if (result.code === 2) {
@@ -140,6 +220,7 @@ export default function (pi: ExtensionAPI) {
       result = await append({ ev: "return", lane: info.lane, run: runId, status: event.status }, log);
     }
     if (result.code !== 0) warn(`return for run ${runId} not recorded: ${result.stderr.trim()}`);
+    else if (resumeAttempted.has(runId)) pi.appendEntry(RECOVERY_STATE, { runId, phase: "done" });
   }
 
   async function recordDispatch(runId: string, brief: Brief & { agent: string }) {
@@ -168,6 +249,7 @@ export default function (pi: ExtensionAPI) {
       const pending = pendingComplete.get(runId);
       if (pending) {
         pendingComplete.delete(runId);
+        handled.add(runId);
         await recordReturn(runId, pending, log, { lane: brief.lane });
       }
     } finally {
@@ -180,6 +262,15 @@ export default function (pi: ExtensionAPI) {
   }
 
   async function handleComplete(runId: string, data: Record<string, unknown>) {
+    if (handled.has(runId)) return;
+    const original = resumedFrom.get(runId);
+    if (original) {
+      handled.add(runId);
+      const log = resolveLog();
+      const info = dispatched.get(original.run);
+      if (log && info) await recordReturn(original.run, original.failed ? { ...data, success: false } : data, log, info, true);
+      return;
+    }
     const log = resolveLog();
     if (!log) return;
     const info = dispatched.get(runId);
@@ -188,6 +279,7 @@ export default function (pi: ExtensionAPI) {
       pendingComplete.set(runId, data);
       return;
     }
+    handled.add(runId);
     await recordReturn(runId, data, log, info);
   }
 
@@ -208,8 +300,31 @@ export default function (pi: ExtensionAPI) {
     cwd = ctx.cwd;
     lastCtx = ctx;
     logPath = null;
+    const recovery = new Map<string, { runId: string; phase: string; revived?: string; data?: Record<string, unknown>; log?: string; info?: { lane: string } }>();
+    for (const entry of ctx.sessionManager.getBranch()) {
+      if (entry.type !== "custom" || entry.customType !== RECOVERY_STATE) continue;
+      const d = entry.data as { runId: string; phase: string; revived?: string; data?: Record<string, unknown>; log?: string; info?: { lane: string } };
+      if (d && typeof d.runId === "string") {
+        const previous = recovery.get(d.runId);
+        recovery.set(d.runId, { ...previous, ...d });
+      }
+    }
+    for (const state of recovery.values()) {
+      handled.add(state.runId);
+      resumeAttempted.add(state.runId);
+      if (state.revived) handled.add(state.revived);
+      if (state.phase === "pending" && state.data && state.log && state.info) {
+        // Completion transport was lost on restart; retain the original failed outcome.
+        enqueue(() => recordReturn(state.runId, state.data!, state.log!, state.info!, true));
+      }
+    }
     // Let loop-continuation restore its launch state first.
     setImmediate(() => enqueue(injectDigest));
+  });
+
+  pi.on("session_shutdown", () => {
+    for (const timer of recoveryTimers) clearTimeout(timer);
+    recoveryTimers.clear();
   });
 
   pi.on("message_end", (event) => {
