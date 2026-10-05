@@ -1,10 +1,12 @@
 // S1 harness facts, S7 context-overflow incident and alerting, and the closeout audit through
 // index.ts against a fake ExtensionAPI.
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, constants, existsSync, openSync, readdirSync, readFileSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
+import { runOnIncident } from "./incident.ts";
 import { addAuthority, cleanupFixtures, fakePi, fresh, loopFixture } from "./test-fixture.ts";
 
 after(cleanupFixtures);
@@ -68,10 +70,73 @@ test("a request that ends on a usage limit after pi's retries is a quota-exhaust
   }
 });
 
+async function notifiedPath(out: string, completed: string, timeout = 10_000): Promise<string> {
+  const deadline = Date.now() + timeout;
+  while (!existsSync(completed) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+  assert.ok(existsSync(completed), "notifier did not complete");
+  return readFileSync(out, "utf8");
+}
+
+// Exercise the real detached collaborator, holding its redirected output open before printf.
+// A FIFO handshake (not a timing delay) controls when it can finish; read has a bounded timeout.
+test("onIncident readiness waits for successful completion, not an opened output file", async () => {
+  const dir = fresh("loop-cont-notifier-");
+  const out = join(dir, "incident-path.txt");
+  const completed = join(dir, "completed");
+  const opened = join(dir, "opened");
+  const release = join(dir, "release");
+  const file = join(dir, "incident.json");
+  execFileSync("mkfifo", [release]);
+  const fd = openSync(release, constants.O_RDWR);
+  let released = false;
+  try {
+    writeFileSync(join(dir, "settings.json"), JSON.stringify({ loopPi: { onIncident: [
+      "bash", "-c", '{ : > "$4"; read -r -t 10 release < "$5" && printf %s "$1"; } > "$2" && : > "$3"',
+      "bash", "{file}", out, completed, opened, release,
+    ] } }));
+    runOnIncident(dir, file);
+    const deadline = Date.now() + 10_000;
+    while (!existsSync(opened) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+    assert.ok(existsSync(opened), "notifier did not open output");
+    assert.equal(readFileSync(out, "utf8"), "", "redirection exists before printf writes");
+    assert.equal(existsSync(completed), false);
+    await assert.rejects(notifiedPath(out, completed, 100), /notifier did not complete/);
+    writeSync(fd, "release\n");
+    released = true;
+    assert.equal(await notifiedPath(out, completed), file);
+  } finally {
+    if (!released) writeSync(fd, "release\n");
+    closeSync(fd);
+  }
+});
+
+test("onIncident completion does not accept a wrong path, failed write or missing witness", async () => {
+  const dir = fresh("loop-cont-notifier-negative-");
+  const file = join(dir, "incident.json");
+  const out = join(dir, "incident-path.txt");
+  const completed = join(dir, "completed");
+  const configure = (script: string, output: string, witness: string) => {
+    writeFileSync(join(dir, "settings.json"), JSON.stringify({ loopPi: { onIncident: ["sh", "-c", script, "sh", "{file}", output, witness] } }));
+    runOnIncident(dir, file);
+  };
+  configure('printf %s wrong-path > "$2" && : > "$3"', out, completed);
+  await assert.rejects(async () => assert.equal(await notifiedPath(out, completed), file), { code: "ERR_ASSERTION", actual: "wrong-path", expected: file, operator: "strictEqual" });
+
+  const failed = join(dir, "failed-completion");
+  configure('printf %s "$1" > "$2" && : > "$3"', dir, failed);
+  await assert.rejects(notifiedPath(dir, failed, 100), /notifier did not complete/);
+  assert.equal(existsSync(failed), false, "a failed redirect cannot signal success");
+
+  const missing = join(dir, "missing-completion");
+  configure('printf %s "$1" > "$2"', join(dir, "unwitnessed-path.txt"), missing);
+  await assert.rejects(notifiedPath(join(dir, "unwitnessed-path.txt"), missing, 100), /notifier did not complete/);
+});
+
 test("context_length_exceeded with a live async lane writes the root incident, the fact and runs onIncident; without one only the fact", async () => {
   const { f, pi } = await armed();
   const out = join(fresh("loop-cont-notify-"), "incident-path.txt");
-  writeFileSync(join(f.agentDir, "settings.json"), JSON.stringify({ loopPi: { onIncident: ["sh", "-c", 'printf %s "$1" > "$2"', "sh", "{file}", out] } }));
+  const completed = `${out}.completed`;
+  writeFileSync(join(f.agentDir, "settings.json"), JSON.stringify({ loopPi: { onIncident: ["sh", "-c", 'printf %s "$1" > "$2" && : > "$3"', "sh", "{file}", out, completed] } }));
   try {
     const end = pi.handlers.get("message_end")!;
     const overflow = assistant("error", "context_length_exceeded: Your input exceeds the context window of this model.");
@@ -90,9 +155,7 @@ test("context_length_exceeded with a live async lane writes the root incident, t
     assert.equal(incidents[0].body.class, "loop-root-context-overflow");
     assert.deepEqual(incidents[0].body.live_runs, ["run-1"]);
     assert.equal(facts(f.runDir).filter((x) => x.kind === "context-overflow").length, 2);
-    const deadline = Date.now() + 10_000;
-    while (!existsSync(out) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
-    assert.equal(readFileSync(out, "utf8"), join(f.agentDir, "incidents", "root", incidents[0].name));
+    assert.equal(await notifiedPath(out, completed), join(f.agentDir, "incidents", "root", incidents[0].name));
 
     // A failed overflow recovery in a new episode while the lane is still live is its own incident.
     await end(assistant("stop"), pi.ctx());
