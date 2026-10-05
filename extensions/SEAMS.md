@@ -184,8 +184,12 @@ before any `await`. A missing reply means the provider extension is not loaded; 
   when an upload holds the lock. `agent_settled` and `session_shutdown` always upload, waiting up to
   120 s for the lock. A python wrapper inside the detached process group bounds each upload
   (checkpoint 90 s, lifecycle 180 s) and kills the group, lock included, so a hung upload outlives
-  neither its bound nor the pi process. The ticker exists because lanes run with `--no-extensions`,
-  so only the root's process can upload their transcripts. pi homes are Mac-only; without lockf,
+  neither its bound nor the pi process. Lanes load required child extensions even when their agent
+  files declare `extensions: []`: the dispatcher registers `loop-guard/lane.ts` and, when present,
+  `loop-wait/lane.ts` at `session_start` with `requireForAllRunners: true`. Registration failure
+  refuses dispatch; runners that cannot honour the required extensions are refused, and required
+  extension load or startup failure aborts the child before its task runs. This does not load
+  loop-continuation in lanes: the root's ticker uploads their transcripts. pi homes are Mac-only; without lockf,
   uploads are not serialised across processes.
   Ignore failures. The installer lays the script out only when an overlay provides it.
 - The agent set (the only names the root may spawn): `mapper`, `mapper-deep`, `gate-runner`,
