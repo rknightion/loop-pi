@@ -295,6 +295,12 @@ paths are exact, bash write detection is best-effort.
   any push through `watch_process`; an undetected one (a script file, a task runner) is unlogged and
   the audit reports it UNGRANTED; `audit-grants.json`;
   `returns/<runId>.md`; `worktrees/<lane-id>/`. The lane binding carries optional `runDir`.
+- **Ops command forms**: known interpreter network clients require a match against the frozen
+  surface's full enclosing command. Compound commands, nested shells and stdin scripts cannot
+  inherit a grant for only an inner invocation; wrapped forms require their complete form to be
+  explicitly allowed. Unparseable known-network commands always fail closed, including wildcard
+  grants. Granted literal curl/ssh forms and local-only parsing
+  remain usable. This is an honest-mistake fence, not a sandbox or a new endpoint permission.
 - **Return cap** (loop-state, `message_end`, plus the `context` hook for already-stored messages): a
   `subagent-notify` message over 16,384 bytes becomes its first 6,144 bytes, an omission line naming
   the full copy, its last 8,192 bytes and the `lane-return` block if it is not in the tail. The

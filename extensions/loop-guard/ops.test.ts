@@ -1,14 +1,178 @@
 // Ops grant class: the root's launch check, the lane binding parse and the surface lock.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { evaluateOpsLaunch, opsSurfaceLines, parseLaneBinding, validateOpsEntry, type OpsEntry } from "./ops.ts";
+import { evaluateOpsLaunch, knownInterpreterNetwork, opsSurfaceLines, parseLaneBinding, validateOpsEntry, type OpsEntry } from "./ops.ts";
+import laneExtension from "./lane.ts";
 import { acquireOpsLock, opsLockPath } from "./ops-lock.ts";
 import { bindLaneIdentity } from "./push-grant.ts";
-import { opsSubject, secretWriteTarget } from "./rules.ts";
+import { opsSubject, parseCommand, secretWriteTarget } from "./rules.ts";
+
+// All URLs below are synthetic; handlers are called directly and no shell payload executes.
+const NETWORK_CODE = [
+  'import urllib.request; req = urllib.request.Request("https://other.example.com/health"); print(urllib.request.urlopen(req).read())',
+  'from urllib.request import Request, urlopen; print(urlopen(Request("https://other.example.com/health")).read())',
+  'from urllib import request as r; r.urlopen("https://other.example.com/health")',
+  'from urllib import (request as r); r.urlopen("https://other.example.com/health")',
+  'from urllib import (\n parse,\n request as r,\n)\nr.urlopen("https://other.example.com/health")',
+  'from http import (client as h); h.HTTPSConnection("other.example.com")',
+  'import requests; print(requests.get("https://other.example.com/health").status_code)',
+  'import requests as r; session = r.Session(); session.get("https://other.example.com/health")',
+  'import requests.api as r; r.get("https://other.example.com/health")',
+  'if True: import requests as r; r.get("https://other.example.com/health")',
+  `value = 1 # user's comment\nimport requests as r\nr.get('https://other.example.com/health')`,
+  'if True: from urllib.request import urlopen as u; u("https://other.example.com/health")',
+  'import httpx as h; h.get("https://other.example.com/health")',
+  'import aiohttp; client = aiohttp.ClientSession()',
+  'import http.client; conn = http.client.HTTPSConnection("other.example.com")',
+  'from http import client as h; h.HTTPSConnection("other.example.com")',
+  'import socket as s; s.create_connection(("other.example.com", 443))',
+];
+
+for (const code of NETWORK_CODE) {
+  test(`network classifier: ${code}`, () => assert.equal(knownInterpreterNetwork(code), true));
+}
+
+test("network classifier: local JSON, URL parsing, printed code and comments are not network clients", () => {
+  for (const code of [
+    'import json; print(json.loads("{}"))',
+    'from urllib.parse import urlparse; print(urlparse("https://service.example.com/health"))',
+    'from urllib import (parse as request); print(request.urlparse("https://service.example.com/health"))',
+    'print("requests.get(endpoint)")',
+    'print("require(\\\"https\\\")")',
+    '# import requests\nimport json',
+    'import json; print(json.loads("{}")) # ; import requests',
+    'import json; print(json.loads(\'{"value":"# ; import requests"}\'))',
+    'import json; print(json.loads(\'{"code": "; import requests"}\'))',
+  ]) assert.equal(knownInterpreterNetwork(code), false, code);
+});
+
+test("ops network forms: real bash/watch_process handlers refuse clients, preserve helpers and honour explicit forms", { timeout: 30_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ops-network-handler-"));
+  const keys = ["PI_CODING_AGENT_DIR", "LOOP_PI_OPS_LOCK_DIR", "PI_SUBAGENT_EXTENSION_BINDINGS", "LOOP_PI_RUN_DIR", "LOOP_PI_REPO"];
+  const previous = keys.map((key) => process.env[key]);
+  process.env.PI_CODING_AGENT_DIR = dir;
+  process.env.LOOP_PI_OPS_LOCK_DIR = join(dir, "locks");
+  delete process.env.LOOP_PI_RUN_DIR;
+  delete process.env.LOOP_PI_REPO;
+  const escapePattern = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const python = (code: string) => opsSubject(["python3", "-c", code]);
+  const explicit = python(NETWORK_CODE[0]);
+  const stdin = `python3 - <<'PY'\n${NETWORK_CODE[0]}\nPY`;
+  const wrapped = `env MODE=probe bash -c ${JSON.stringify(explicit)}`;
+  const grantedGroup = `( ${explicit} )`;
+  const alias = (name: string) => opsSubject(["git", "-c", `alias.${name}=!${explicit}`, name]);
+  const grantedAlias = alias("readback");
+  const expansionCode = 'import requests; requests.get("https://service.example.com/$PART")';
+  const literalExpansion = python(expansionCode);
+  const shellExpansion = `python3 -c "${expansionCode.replace(/"/g, '\\"')}"`;
+  const ungrantedGroups = [
+    `(${explicit})`,
+    `{ ${explicit}; }`,
+    `( ( ${explicit} ) )`,
+    `{\n${explicit}\n}`,
+    `( ${explicit} ) > result.json`,
+  ];
+  const normal = [
+    "curl -fsS https://service.example.com/health",
+    "ssh service.example.com uptime",
+    python('import json; print(json.loads("{}"))'),
+    python('from urllib.parse import urlparse; print(urlparse("https://service.example.com/health"))'),
+    python('print("requests.get(endpoint)")'),
+    "git status --short", "cat result.json", "ls -l result.json",
+    `cat <<'PY'\n${NETWORK_CODE[0]}\nPY`,
+    "python3 -m json.tool result.json",
+    `( ${python('import json; print(json.loads("{}"))')} )`,
+    `{ ${python('import json; print(json.loads("{}"))')}; }`,
+  ];
+  const blocked = [
+    ...NETWORK_CODE.map(python),
+    `env MODE=probe /usr/bin/python3 -c '${NETWORK_CODE[0]}'`,
+    `bash -c ${JSON.stringify(python(NETWORK_CODE[0]))}`,
+    stdin,
+    `cat <<'PY' | python3 -\n${NETWORK_CODE[0]}\nPY`,
+    `python3 <<< '${NETWORK_CODE[0]}'`,
+    'python3 -m requests https://other.example.com/health',
+    'node -e \'fetch("https://other.example.com/health")\'',
+    'node -e \'const https = require("https"); https.get("https://other.example.com/health")\'',
+    'node --input-type=module -e \'import axios from "axios"; axios.get("https://other.example.com/health")\'',
+    'ruby -e \'require "net/http"; Net::HTTP.get(URI("https://other.example.com/health"))\'',
+    'perl -e \'use HTTP::Tiny; HTTP::Tiny->new->get("https://other.example.com/health")\'',
+  ];
+  const handlers = new Map<string, ((...args: any[]) => any)[]>();
+  const load = (allow: string[], suffix: string) => {
+    const entry = { surface: `probe:synthetic-${suffix}`, kind: "probe", allow };
+    process.env.PI_SUBAGENT_EXTENSION_BINDINGS = JSON.stringify({ "loop-pi.guard/1": { agent: "ops-probe", surface: entry.surface, entry } });
+    handlers.clear();
+    laneExtension({ on(event: string, handler: (...args: any[]) => any) {
+      handlers.set(event, [...(handlers.get(event) ?? []), handler]); return () => {};
+    } } as any);
+  };
+  const ctx = { cwd: dir, ui: { notify() {} } };
+  const shutdown = async () => {
+    for (const handler of handlers.get("session_shutdown") ?? []) await handler({ type: "session_shutdown" }, ctx);
+  };
+  const verdict = async (toolName: string, command: string, expected: boolean) => {
+    const input = { command };
+    const result = await handlers.get("tool_call")![0]({ type: "tool_call", toolCallId: "synthetic", toolName, input }, ctx);
+    assert.equal(result?.block ?? false, expected, `${toolName}: ${command}: ${result?.reason ?? "allowed"}`);
+    if (expected) assert.match(result.reason, /known interpreter network command/);
+  };
+  try {
+    load(normal.slice(0, 2).map(escapePattern), "literal");
+    for (const toolName of ["bash", "watch_process"]) {
+      for (const command of normal) await verdict(toolName, command, false);
+      for (const command of blocked) await verdict(toolName, command, true);
+    }
+    await shutdown();
+    const subject = opsSubject(parseCommand(explicit)!.segments[0]);
+    load([escapePattern(subject), escapePattern(stdin), escapePattern(wrapped), escapePattern(grantedGroup), escapePattern(grantedAlias), escapePattern(literalExpansion)], "explicit");
+    for (const toolName of ["bash", "watch_process"]) {
+      await verdict(toolName, literalExpansion, false);
+      await verdict(toolName, shellExpansion, true);
+      await verdict(toolName, python('import json; print(json.loads("{}")) # ; import requests'), false);
+      await verdict(toolName, explicit, false);
+      await verdict(toolName, stdin, false);
+      await verdict(toolName, python(NETWORK_CODE[3]), true);
+      await verdict(toolName, `${explicit} extra`, true);
+      await verdict(toolName, `env MODE=other ${explicit}`, true);
+      await verdict(toolName, `bash -c ${JSON.stringify(explicit)}`, true);
+      await verdict(toolName, `env MODE=other bash -c ${JSON.stringify(explicit)}`, true);
+      await verdict(toolName, `echo local; ${explicit}`, true);
+      await verdict(toolName, wrapped, false);
+      for (const group of ungrantedGroups) await verdict(toolName, group, true);
+      await verdict(toolName, grantedGroup, false);
+      await verdict(toolName, alias("other"), true);
+      await verdict(toolName, `env MODE=other ${grantedAlias}`, true);
+      await verdict(toolName, grantedAlias, false);
+    }
+    await shutdown();
+    // Declaration discovery uses a worktree marker; no Git process or gate payload executes.
+    load([escapePattern(shellExpansion)], "explicit-expansion");
+    for (const toolName of ["bash", "watch_process"]) {
+      await verdict(toolName, shellExpansion, false);
+      await verdict(toolName, shellExpansion.replace("$PART", "$OTHER"), true);
+    }
+    await shutdown();
+    await writeFile(join(dir, ".git"), "");
+    await writeFile(join(dir, "LOOP.md"), `## Mutexes\n- gate: interpreter-probe | ${explicit}\n`);
+    load([escapePattern(subject)], "gate-direct");
+    for (const toolName of ["bash", "watch_process"]) await verdict(toolName, "loop-gate-lock interpreter-probe", true);
+    await shutdown();
+    load([escapePattern("loop-gate-lock interpreter-probe")], "gate-wrapper");
+    for (const toolName of ["bash", "watch_process"]) await verdict(toolName, "loop-gate-lock interpreter-probe", false);
+    await shutdown();
+    load([".*"], "unparseable");
+    await verdict("bash", "python3 -c 'import requests; requests.get(endpoint)", true);
+  } finally {
+    await shutdown();
+    keys.forEach((key, i) => { if (previous[i] === undefined) delete process.env[key]; else process.env[key] = previous[i]; });
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 
 const DEPLOY: OpsEntry = { surface: "deploy:svc-worker", kind: "deploy", allow: ["^just deploy( .*)?$"] };
 const RELEASE: OpsEntry = { surface: "release:svc", kind: "release", allow: ["^gh release create v[0-9.]+$"] };

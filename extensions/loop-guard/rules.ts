@@ -25,7 +25,7 @@
 // other stage sees the text; their bodies are then treated by the command that
 // receives them (see parseCommand).
 
-import type { OpsEntry } from "./ops.ts";
+import { interpreterNetworkRefusal, type OpsEntry } from "./ops.ts";
 import type { GateDeclarations } from "./gates.ts";
 
 export type Role = "root" | "lane";
@@ -2038,7 +2038,14 @@ export function textRunsPush(text: string, depth = 0): boolean {
 
 const FALLBACK_REDIRECT = />{1,2}\|?[ \t]*([^\s;&|()<>]+)/g;
 
-export function fallbackScan(text: string, role: Role, depth = 0, pushGranted = true, lane: LaneContext = {}): Decision {
+export function fallbackScan(text: string, role: Role, depth = 0, pushGranted = true, lane: LaneContext = {}, networkForm?: string): Decision {
+  if (role === "lane" && lane.ops) {
+    // On unparseable shell text try both literal imports and the fallback's loose spelling.
+    // Neither reading can manufacture an executable command form for an allow match.
+    const refusal = interpreterNetworkRefusal(text, lane.ops, networkForm) ??
+      (networkForm === undefined ? interpreterNetworkRefusal(text.replace(/[\\'"]/g, ""), lane.ops) : null);
+    if (refusal) return block(`loop-guard (ops): ${refusal}`);
+  }
   const clean = text.replace(/[\\'"]/g, "");
   if (FALLBACK_BACKGROUND.test(clean)) {
     return block(
@@ -2152,6 +2159,8 @@ export function evaluateBashCommand(
   gitAliasDepth = 0,
   pushGranted = true,
   lane: LaneContext = {},
+  // Guard-owned context retained when recursively evaluating a git alias or declared gate.
+  enclosingNetworkCommand?: string,
 ): Decision {
   if (command.includes(NUL)) {
     return block("loop-guard: a NUL character cannot appear in a command");
@@ -2187,6 +2196,16 @@ export function evaluateBashCommand(
   }
 
   const stdinRedirected = new Set(parsed.stdinRedirectedSegments);
+  // Segment count alone is not a proof of a direct command: parsing strips group delimiters
+  // and reserved words even when only one executable remains. Normalize only when lexing the
+  // original text preserves exactly that segment, with no enclosing operators or redirections.
+  const originalTokens = lex(command.trim());
+  const directNetworkForm = parsed.segments.length === 1 && originalTokens !== null &&
+    originalTokens.length === parsed.segments[0].length &&
+    originalTokens.every((token, i) => typeof token === "string" && token === parsed.segments[0][i]) &&
+    // Lexing drops quote kind. With expansion syntax present, normalize only the exact
+    // canonical literal spelling; differently quoted forms must match their original text.
+    (!/[$`]/.test(command) || command.trim() === opsSubject(parsed.segments[0]));
   for (const rawSegment of parsed.segments) {
     const stripped = stripWrappers(rawSegment);
     if (stripped.length === 0) continue;
@@ -2207,7 +2226,7 @@ export function evaluateBashCommand(
       if (!declared || declared.segments.some((s) => basename(stripWrappers(s)[0] ?? "") === "loop-gate-lock")) {
         return block("loop-guard: nested gate wrappers are not supported in declarations.");
       }
-      const decision = evaluateBashCommand(gate.command, role, gitAliasDepth, pushGranted, { ...lane, gates: undefined });
+      const decision = evaluateBashCommand(gate.command, role, gitAliasDepth, pushGranted, { ...lane, gates: undefined }, enclosingNetworkCommand ?? command.trim());
       if (decision.block) return decision;
     }
 
@@ -2235,7 +2254,7 @@ export function evaluateBashCommand(
         const aliasDecision =
           gitAliasDepth >= MAX_GIT_ALIAS_DEPTH
             ? fallbackScan(resolved.shellCommand, role, 0, pushGranted, lane)
-            : evaluateBashCommand(resolved.shellCommand, role, gitAliasDepth + 1, pushGranted, lane);
+            : evaluateBashCommand(resolved.shellCommand, role, gitAliasDepth + 1, pushGranted, lane, enclosingNetworkCommand ?? command.trim());
         if (aliasDecision.block) return aliasDecision;
       } else if (resolved.unparseable) {
         // The alias's own body could not be lexed (e.g. an unterminated
@@ -2249,11 +2268,18 @@ export function evaluateBashCommand(
     }
 
     if (isInterpreterHead(head)) {
-      // Inline code (`python -c`, `node -e`, `perl -pi -e`, ...) is allowed;
-      // each argument gets the fallback text scan so a dangerous command
-      // spelled out in the code still blocks.
+      // Inline code remains allowed, but known network clients in an ops lane need the
+      // whole executable segment's frozen allow match, not merely a granted endpoint.
+      // Nested shell/substitution segments and compound commands retain the entire enclosing
+      // command, including assignments. A grant for a direct interpreter must not authorize
+      // `env MODE=other bash -c ...` merely because its parsed child has the same words.
+      const networkForm = enclosingNetworkCommand ?? (directNetworkForm ? opsSubject(rawSegment) : command.trim());
+      if (role === "lane" && lane.ops) {
+        const refusal = interpreterNetworkRefusal(stripped.slice(1).join(" "), lane.ops, networkForm);
+        if (refusal) return block(`loop-guard (ops): ${refusal}`);
+      }
       for (const arg of stripped.slice(1)) {
-        const decision = fallbackScan(arg, role, 0, pushGranted, lane);
+        const decision = fallbackScan(arg, role, 0, pushGranted, lane, networkForm);
         if (decision.block) return decision;
       }
     }
@@ -2295,7 +2321,9 @@ export function evaluateBashCommand(
   if (redirected) return block(redirected);
 
   for (const script of parsed.interpreterScripts) {
-    const decision = fallbackScan(script, role, 0, pushGranted, lane);
+    // A stdin script's body is part of the command form: granting only `python3 -`
+    // must not grant arbitrary network code. Match the full original command here.
+    const decision = fallbackScan(script, role, 0, pushGranted, lane, enclosingNetworkCommand ?? command.trim());
     if (decision.block) return decision;
   }
 

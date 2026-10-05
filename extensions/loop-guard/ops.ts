@@ -181,6 +181,44 @@ export function evaluateOpsLaunch(
   return { block: false, entry: JSON.parse(JSON.stringify(entry)) as OpsEntry };
 }
 
+/** Recognize plainly written network clients in interpreter code, not arbitrary code execution.
+ * Importing a networking client is sufficient: aliases and sessions need not retain the module
+ * name at the eventual call. Local modules such as urllib.parse and JSON parsing are not clients.
+ * This is an honest-mistake classifier, not a sandbox or a complete language parser. */
+export function knownInterpreterNetwork(text: string): boolean {
+  const source = text.replace(/^\s*(?:#|\/\/).*$/gm, "");
+  const strings = /(["'])(?:\\.|(?!\1)[^\\\r\n])*?\1/g;
+  // Strings are masked first so a literal '#' remains data, not a comment boundary.
+  const code = source.replace(strings, " ").replace(/#.*$/gm, "");
+  // Retain only literal module names for JavaScript/Ruby imports. A printed string containing
+  // require('https') is masked as one string, not mistaken for an executable import.
+  const imports = source.replace(strings, (literal) =>
+    /^(?:["'])(?:node:)?(?:https?|net|tls|undici|axios|node-fetch|net\/https?|open-uri|socket)["']$/.test(literal) ? literal : " ").replace(/#.*$/gm, "");
+  const pythonClient = "(?:urllib\\.request|urllib2|requests|httpx|aiohttp|http\\.client|httplib|socket)";
+  if (new RegExp(`(?:^|[;:\\n])\\s*(?:from\\s+${pythonClient}(?:\\.[\\w.]+)?\\s+import\\b|import\\s+[^;\\n]*\\b${pythonClient}(?:\\.[\\w.]+)?(?=\\s|,|$))`).test(code)) return true;
+  // Parent packages can import the client with an alias and a parenthesized/multiline list.
+  // Check the imported name, not its alias: `parse as request` is still local URL parsing.
+  for (const match of code.matchAll(/(?:^|[;:\n])\s*from\s+(urllib|http)\s+import\s+(\([^)]*\)|[^;\n]*)/g)) {
+    const client = match[1] === "urllib" ? "request" : "client";
+    const names = match[2].replace(/^\(|\)$/g, "").replace(/#.*$/gm, "").split(",");
+    if (names.some((name) => name.trim().split(/\s+/)[0] === client)) return true;
+  }
+  if (new RegExp(`(?:^|\\s)-m\\s+${pythonClient}(?=\\s|$)`).test(code)) return true;
+  if (/\b(?:require\s*\(\s*|from\s+|import\s*(?:\(\s*)?)["'](?:node:)?(?:https?|net|tls|undici|axios|node-fetch)["']/.test(imports)) return true;
+  if (/\brequire\s*["'](?:net\/https?|open-uri|socket)["']|\buse\s+(?:LWP::(?:UserAgent|Simple)|HTTP::Tiny|IO::Socket)\b/.test(imports)) return true;
+  return /\b(?:urllib\s*\.\s*request\s*\.\s*(?:Request|urlopen|build_opener)|urllib2\s*\.\s*urlopen|(?:requests|httpx|aiohttp)\s*\.\s*(?:get|post|put|patch|delete|head|options|request|Session|Client|AsyncClient|ClientSession)|(?:http\s*\.\s*client|httplib)\s*\.\s*HTTPS?Connection|socket\s*\.\s*(?:socket|create_connection)|fetch|(?:https?|axios)\s*\.\s*(?:get|request|post)|Net::HTTP\s*\.\s*(?:get|start|new))\s*\(/.test(code);
+}
+
+/** Network forms must match a frozen allow pattern in full. Unparseable input has no form
+ * to grant; matching a snippet, endpoint or prose permission would widen the launch grant. */
+export function interpreterNetworkRefusal(text: string, entry: OpsEntry, form?: string): string | null {
+  if (!knownInterpreterNetwork(text)) return null;
+  if (form !== undefined && entry.allow.some((pattern) => {
+    try { return new RegExp(`^(?:${pattern})$`).test(form); } catch { return false; }
+  })) return null;
+  return `known interpreter network command does not fully match any allow pattern of ops surface '${entry.surface}'${form === undefined ? " (command form cannot be read unambiguously)" : ""}.`;
+}
+
 export interface LaneOpsGrant {
   surface: string;
   entry: OpsEntry;
