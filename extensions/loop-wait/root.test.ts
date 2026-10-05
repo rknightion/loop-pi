@@ -88,22 +88,31 @@ async function loadRootWithFakePi(): Promise<{
   tools: Map<string, FakeToolDef>;
   lifecycle: Map<string, (event: unknown, ctx: unknown) => void>;
   sent: FakeSentMessage[];
+  stateEvents: { ev: string; op: string; what: string; deadline: string }[];
 }> {
   const rootModule = await import("./root.ts");
   const tools = new Map<string, FakeToolDef>();
   const lifecycle = new Map<string, (event: unknown, ctx: unknown) => void>();
   const sent: FakeSentMessage[] = [];
+  const stateEvents: { ev: string; op: string; what: string; deadline: string }[] = [];
   const fakePi = {
     registerTool: (tool: FakeToolDef & { name: string }) => tools.set(tool.name, tool),
     registerCommand: () => {},
     appendEntry: () => {},
     sendMessage: (message: unknown, options: unknown) =>
       sent.push({ message: message as FakeSentMessage["message"], options: options as FakeSentMessage["options"] }),
-    events: { on: () => {} },
+    events: {
+      on: () => {},
+      emit: (name: string, request: { event: typeof stateEvents[number]; reply: (r: Promise<boolean>) => void }) => {
+        if (name !== "loop-wait:state-event") return;
+        stateEvents.push(request.event);
+        request.reply(Promise.resolve(true));
+      },
+    },
     on: (name: string, handler: (event: unknown, ctx: unknown) => void) => lifecycle.set(name, handler),
   };
   rootModule.default(fakePi as never);
-  return { tools, lifecycle, sent };
+  return { tools, lifecycle, sent, stateEvents };
 }
 
 function fakeCtx(agentDir: string, idleBox: { idle: boolean }) {
@@ -166,7 +175,7 @@ test("root.ts: one flush after a busy turn delivers every pending message, with 
 
 test("root.ts: wake_cancel drops a queued wake for a timer that fired while busy but was not yet delivered", async () => {
   await withFakeAgentDir(async (agentDir) => {
-    const { tools, lifecycle, sent } = await loadRootWithFakePi();
+    const { tools, lifecycle, sent, stateEvents } = await loadRootWithFakePi();
     const idleBox = { idle: false };
     const ctx = fakeCtx(agentDir, idleBox);
     lifecycle.get("session_start")!(undefined, ctx);
@@ -183,6 +192,9 @@ test("root.ts: wake_cancel drops a queued wake for a timer that fired while busy
     const result = await wakeCancel.execute("t2", { id }, undefined, undefined, ctx);
     assert.match((result.content[0] as { text: string }).text, /already fired|dropped its queued wake/);
     assert.equal((result.details as { cancelled: boolean }).cancelled, true);
+    assert.deepEqual(stateEvents.map(e => e.op), ["start", "stop"], "fire records stop even while busy; dropping its queued wake does not double-log");
+    assert.equal(stateEvents[0].what, stateEvents[1].what);
+    assert.equal(stateEvents[0].deadline, stateEvents[1].deadline);
 
     idleBox.idle = true;
     lifecycle.get("agent_settled")!(undefined, ctx);

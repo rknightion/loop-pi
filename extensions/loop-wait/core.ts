@@ -376,6 +376,7 @@ interface WatcherState {
 export interface WatchManagerOptions {
   runDir: string;
   onFinal: (id: string, receipt: Receipt) => void;
+  onStart?: (snapshot: WatcherSnapshot) => void;
   onPersist: () => void;
 }
 
@@ -383,11 +384,13 @@ export class WatchManager {
   private watchers = new Map<string, WatcherState>();
   private readonly runDir: string;
   private readonly onFinal: (id: string, receipt: Receipt) => void;
+  private readonly onStart?: (snapshot: WatcherSnapshot) => void;
   private readonly onPersist: () => void;
 
   constructor(opts: WatchManagerOptions) {
     this.runDir = opts.runDir;
     this.onFinal = opts.onFinal;
+    this.onStart = opts.onStart;
     this.onPersist = opts.onPersist;
   }
 
@@ -418,6 +421,7 @@ export class WatchManager {
     };
     this.watchers.set(id, state);
     this.writeReceipt(state, "starting", null);
+    this.onStart?.(this.list().find(w => w.id === id)!);
 
     const heartbeat = () => {
       if (!this.watchers.has(id)) return;
@@ -620,6 +624,8 @@ interface TimerState extends TimerSnapshot {
 
 export interface TimerManagerOptions {
   onFire: (id: string, reason: string) => void;
+  onArm?: (snapshot: TimerSnapshot) => void;
+  onEnd?: (snapshot: TimerSnapshot) => void;
   onPersist: () => void;
 }
 
@@ -639,10 +645,14 @@ const MIN_CANCEL_PREFIX_LEN = 8;
 export class TimerManager {
   private timers = new Map<string, TimerState>();
   private readonly onFire: (id: string, reason: string) => void;
+  private readonly onArm?: (snapshot: TimerSnapshot) => void;
+  private readonly onEnd?: (snapshot: TimerSnapshot) => void;
   private readonly onPersist: () => void;
 
   constructor(opts: TimerManagerOptions) {
     this.onFire = opts.onFire;
+    this.onArm = opts.onArm;
+    this.onEnd = opts.onEnd;
     this.onPersist = opts.onPersist;
   }
 
@@ -652,6 +662,7 @@ export class TimerManager {
     const state: TimerState = { id, at, reason };
     this.schedule(state);
     this.timers.set(id, state);
+    this.onArm?.({ id, at, reason });
     this.onPersist();
     return { id, at, reason };
   }
@@ -694,6 +705,7 @@ export class TimerManager {
       if (this.timers.has(snap.id)) continue;
       if (isOverdue(snap.at, now)) {
         firedOverdue.push(snap.id);
+        this.onEnd?.(snap);
         this.onFire(snap.id, snap.reason);
       } else {
         this.arm(snap.at, snap.reason, snap.id);
@@ -703,12 +715,9 @@ export class TimerManager {
     return { rearmed, firedOverdue };
   }
 
-  /** Clear in-memory timer handles without firing them (state persists for the next reconcile). */
+  /** Cancel without firing. The root persists the emptied map on orderly shutdown. */
   shutdownAll(): void {
-    for (const state of this.timers.values()) {
-      if (state.handle) clearTimeout(state.handle);
-    }
-    this.timers.clear();
+    for (const id of this.timers.keys()) this.cancelInternal(id);
   }
 
   // setTimeout fires at once for any delay above 2^31-1 ms (~24.8 days): wait in capped steps.
@@ -725,6 +734,7 @@ export class TimerManager {
     const state = this.timers.get(id);
     if (!state) return;
     this.timers.delete(id);
+    this.onEnd?.({ id: state.id, at: state.at, reason: state.reason });
     this.onPersist();
     this.onFire(id, state.reason);
   }
@@ -733,6 +743,7 @@ export class TimerManager {
     const state = this.timers.get(id);
     if (state?.handle) clearTimeout(state.handle);
     this.timers.delete(id);
+    if (state) this.onEnd?.({ id: state.id, at: state.at, reason: state.reason });
   }
 }
 

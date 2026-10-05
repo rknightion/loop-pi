@@ -106,6 +106,8 @@ SCHEMA = {
         },
         {"task": STR},
     ),
+    "watch": ({"op": ("start", "stop"), "what": STR, "deadline": STR}, {}),
+    "heartbeat": ({"at": STR}, {}),
     "judgement": ({"text": STR}, {"task": STR, "lane": STR}),
     "close": (
         {"reason": ("nothing-admissible", "owner-stop", "blocked", "budget")},
@@ -199,6 +201,8 @@ def validate_event(obj, framed=False):
             msg = _check_value(field, kind, obj[field])
             if msg:
                 raise Rejected("%s: %s" % (ev, msg))
+    if ev == "heartbeat":
+        activity_at(obj["at"])
     if ev == "judgement" and len(obj["text"].encode("utf-8")) > JUDGEMENT_MAX_BYTES:
         raise Rejected("judgement: text is over %d bytes" % JUDGEMENT_MAX_BYTES)
     if framed:
@@ -257,6 +261,39 @@ def parse_kv(ev, pairs):
         else:
             out[key] = parsed
     return out
+
+
+def activity_at(at):
+    """UTC event time with optional subsecond precision; unlike framing ts, at keeps milliseconds."""
+    if not re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,6})?Z", at):
+        raise Rejected("heartbeat: at must be an ISO UTC timestamp ending in Z")
+    try:
+        return datetime.fromisoformat(at[:-1] + "+00:00")
+    except ValueError:
+        raise Rejected("heartbeat: at must be a valid ISO UTC timestamp")
+
+
+def replayed_activity(data, event):
+    """Under the append lock, suppress exact watch replay and heartbeat intervals below 300s.
+    The log, not the process lifetime or session branch, owns this deduplication."""
+    if event["ev"] not in ("watch", "heartbeat"):
+        return None
+    for raw in reversed(data.split(b"\n")):
+        try:
+            previous = json.loads(raw)
+            validate_event(previous, framed=True)
+        except (ValueError, Rejected):
+            continue
+        if previous["ev"] != event["ev"]:
+            continue
+        if event["ev"] == "watch":
+            if all(previous.get(k) == event[k] for k in ("op", "what", "deadline")):
+                return previous
+        elif (activity_at(event["at"]) - activity_at(previous["at"])).total_seconds() < 300:
+            return previous
+        else:
+            return None
+    return None
 
 
 def utc_now():
@@ -378,6 +415,9 @@ def do_append(log_path, event, by, run_dir=None):
         last, prefix = _tail_state(data)
         if event["ev"] == "open" and _log_has_open(data):
             raise Rejected("open refused: the log already has an open event; a loop opens once")
+        replay = replayed_activity(data, event)
+        if replay is not None:
+            return replay
         seq = last + 1
         framed = {"v": VERSION, "seq": seq, "ts": utc_now(), "ev": event["ev"], "by": by}
         for key, value in event.items():
@@ -465,6 +505,9 @@ def fold(path):
         "lane_task": {},  # lane -> task
         "judgements": [],
         "last_gate": None,
+        "heartbeat": None,
+        "watches": {},
+        "has_activity": False,
         "last_seq": 0,
         "bad": 0,
     }
@@ -574,6 +617,16 @@ def fold(path):
                 )
         elif ev == "gate":
             st["last_gate"] = obj
+        elif ev == "heartbeat" and isinstance(obj.get("at"), str):
+            st["has_activity"] = True
+            st["heartbeat"] = obj["at"]
+        elif ev == "watch" and isinstance(obj.get("what"), str):
+            st["has_activity"] = True
+            key = (obj["what"], obj.get("deadline"))
+            if obj.get("op") == "start":
+                st["watches"][key] = obj
+            elif obj.get("op") == "stop":
+                st["watches"].pop(key, None)
         elif ev == "judgement" and isinstance(obj.get("text"), str):
             st["judgements"].append(obj)
     return st
@@ -664,6 +717,13 @@ def render_digest(st, judgements, task_level):
         g = st["last_gate"]
         exit_text = "null" if g.get("exit") is None else g.get("exit")
         out.append("last gate: %s %s exit %s" % (g.get("scope"), _short(g.get("sha")), exit_text))
+    if st["has_activity"]:
+        if st["heartbeat"]:
+            out.append("last heartbeat: %s" % st["heartbeat"])
+        out.append("")
+        out.append("## Root watches (%d)" % len(st["watches"]))
+        for watch in st["watches"].values():
+            out.append("- %s deadline %s" % (_clip(watch["what"], 160), watch.get("deadline")))
     out.append("")
     out.append("## Live lanes (%d)" % summary["live_lanes"])
     for run, info in st["lanes"].items():

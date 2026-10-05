@@ -159,7 +159,8 @@ test(`a real lane yields one identity-preserving return: ${outcome}`, async () =
     const events = await waitForCondition(() => {
       try {
         const rows = readFileSync(s.log, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
-        return rows.some((r) => r.ev === "return") ? rows : undefined;
+        const laneRows = rows.filter(r => r.ev === "dispatch" || r.ev === "return");
+        return laneRows.some((r) => r.ev === "return") ? laneRows : undefined;
       } catch {
         return undefined;
       }
@@ -191,7 +192,8 @@ test(`a real lane yields one identity-preserving return: ${outcome}`, async () =
       assert.notEqual(finished[1].runId, dispatch.run, "package resume allocates a new run identity");
       if (outcome === "recovered") assert.match(finished[1].results[0].summary, /"v":2/);
     }
-    assert.equal(readFileSync(s.log, "utf8").trim().split("\n").length, 2, "replayed completions never double account");
+    const laneRows = readFileSync(s.log, "utf8").trim().split("\n").map(l => JSON.parse(l)).filter(r => r.ev === "dispatch" || r.ev === "return");
+    assert.equal(laneRows.length, 2, "replayed completions never double account (root activity is logged separately)");
     execFileSync(BIN, ["check", s.log]);
     const digest = execFileSync(BIN, ["digest", s.log], { encoding: "utf8" });
     assert.match(digest, /## Live lanes \(0\)/);

@@ -67,6 +67,7 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
   let lastCtx: ExtensionContext | null = null;
   let logPath: string | null = null;
   let chain: Promise<unknown> = Promise.resolve();
+  let lastHeartbeatAttempt: number | null = null;
   const warned = new Set<string>();
   const briefs = new Map<string, Brief & { agent: string }>();
   const started = new Map<string, { deadlineAt?: string }>();
@@ -92,7 +93,58 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
 
   function enqueue(job: () => Promise<void>) {
     chain = chain.then(job).catch((error: unknown) => warn(String(error)));
+    return chain;
   }
+
+  // No timer: these hooks observe actual root work, not an idle session or receipt polls.
+  // The CLI's locked, persisted throttle is authoritative across root lifetimes.
+  function rootActivity() {
+    const at = Date.now();
+    if (lastHeartbeatAttempt !== null && at - lastHeartbeatAttempt < 300_000) return;
+    const log = resolveLog();
+    if (!log) return;
+    lastHeartbeatAttempt = at;
+    enqueue(async () => {
+      const result = await append({ ev: "heartbeat", at: new Date(at).toISOString() }, log);
+      if (result.code !== 0) {
+        lastHeartbeatAttempt = null;
+        warn(`heartbeat not recorded: ${result.stderr.trim()}`);
+      } else {
+        // A restart's first attempt can be suppressed by the persisted throttle. Cache
+        // the recorded time, not the attempt, or the next exact boundary would be delayed.
+        lastHeartbeatAttempt = null;
+        try {
+          for (const line of readFileSync(log, "utf8").split("\n").reverse()) {
+            try {
+              const row = JSON.parse(line);
+              if (row.ev !== "heartbeat" || typeof row.at !== "string") continue;
+              const recordedAt = Date.parse(row.at);
+              if (Number.isFinite(recordedAt)) { lastHeartbeatAttempt = recordedAt; break; }
+            } catch { /* Torn log lines held no complete heartbeat. */ }
+          }
+        } catch { /* CLI remains the authority even if this cache read fails. */ }
+      }
+    });
+  }
+
+  pi.on("turn_start", rootActivity);
+  pi.on("tool_execution_start", rootActivity);
+  pi.on("tool_execution_end", rootActivity);
+
+  // loop-wait retains a durable outbox until this append succeeds. Reply synchronously
+  // with a promise, so shutdown can drain it without dropping suppressed terminal wakes.
+  pi.events.on("loop-wait:state-event", (raw) => {
+    const request = raw as { event: Record<string, unknown>; reply(recorded: Promise<boolean>): void };
+    let recorded = false;
+    const pending = enqueue(async () => {
+      const log = resolveLog();
+      if (!log) return;
+      const result = await append(request.event, log);
+      recorded = result.code === 0;
+      if (!recorded) warn(`watch event not recorded: ${result.stderr.trim()}`);
+    });
+    request.reply(pending.then(() => recorded));
+  });
 
   function cliBin(): string {
     try {
@@ -301,6 +353,7 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
     cwd = ctx.cwd;
     lastCtx = ctx;
     logPath = null;
+    lastHeartbeatAttempt = null;
     for (const timer of recoveryTimers) clearTimeout(timer);
     recoveryTimers.clear();
     handled.clear();
@@ -332,12 +385,14 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
     setImmediate(() => enqueue(injectDigest));
   });
 
-  pi.on("session_shutdown", () => {
+  pi.on("session_shutdown", async () => {
     for (const timer of recoveryTimers) clearTimeout(timer);
     recoveryTimers.clear();
+    await chain;
   });
 
   pi.on("message_end", (event) => {
+    if (event.message.role === "assistant") rootActivity();
     try {
       const replacement = capNotifyMessage(event.message as { role?: string; customType?: string; content?: unknown }, process.env.LOOP_PI_RUN_DIR, completionFor);
       if (replacement) return { message: replacement as typeof event.message };

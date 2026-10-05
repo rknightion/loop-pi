@@ -164,6 +164,81 @@ class ValidationTests(Base):
         self.assertEqual(r.returncode, 2)
 
 
+class ActivityTests(Base):
+    def test_frozen_events_and_legacy_digest_compatibility(self):
+        self.seed()
+        legacy_json = run("digest", self.log, "--json").stdout
+        legacy_text = run("digest", self.log).stdout
+        self.append("watch", "op=start", "what=watch instance: proof", "deadline=2026-10-04T00:00:00Z", "--by", "ext")
+        self.append("heartbeat", "at=2026-10-03T00:00:00.000Z", "--by", "ext")
+        self.append("watch", "op=stop", "what=watch instance: proof", "deadline=2026-10-04T00:00:00Z", "--by", "ext")
+        self.assertEqual(run("check", self.log).returncode, 0)
+        self.assertEqual(run("digest", self.log, "--json").stdout, legacy_json)
+        self.assertIn("last heartbeat: 2026-10-03T00:00:00.000Z", run("digest", self.log).stdout)
+        self.assertIn("## Root watches (0)", run("digest", self.log).stdout)
+        with open(self.log, "w", encoding="utf-8") as fh:
+            for event in self.events_before_activity:
+                fh.write(json.dumps(event) + "\n")
+        self.assertEqual(run("check", self.log).returncode, 0)
+        self.assertEqual(run("digest", self.log).stdout, legacy_text)
+
+    def seed(self):
+        super().seed()
+        self.events_before_activity = self.events()
+
+    def test_watch_replay_and_heartbeat_boundary_across_cli_restarts(self):
+        watch = ["watch", "op=start", "what=wake instance: proof", "deadline=2026-10-04T00:00:00Z"]
+        first = self.append(*watch, "--by", "ext")
+        self.assertEqual(self.append(*watch, "--by", "ext").stdout, first.stdout)
+        for at in ["00:00:00.000", "00:04:59.999", "00:05:00.000", "00:05:00.001", "00:01:00.000"]:
+            self.append("heartbeat", "at=2026-10-03T" + at + "Z", "--by", "ext")
+        self.append("watch", "op=stop", *watch[2:], "--by", "ext")
+        self.append("watch", "op=stop", *watch[2:], "--by", "ext")
+        events = self.events()
+        self.assertEqual([e["ev"] for e in events], ["watch", "heartbeat", "heartbeat", "watch"])
+        self.assertEqual([e["seq"] for e in events], [1, 2, 3, 4])
+        self.assertEqual(run("check", self.log).returncode, 0)
+
+    def test_whole_instance_replay_after_lost_ack_does_not_reopen_stopped_watch(self):
+        watch = ["watch", "op=start", "what=wake replayed: proof", "deadline=2026-10-04T00:00:00Z"]
+        start = self.append(*watch, "--by", "ext")
+        stop = self.append("watch", "op=stop", *watch[2:], "--by", "ext")
+        before = self.events()
+        digest = run("digest", self.log).stdout
+        # Each call is a new CLI process. Both already-written events can remain in a
+        # durable outbox after lost acknowledgements, including start before the stop.
+        self.assertEqual(self.append(*watch, "--by", "ext").stdout, start.stdout)
+        self.assertEqual(self.append("watch", "op=stop", *watch[2:], "--by", "ext").stdout, stop.stdout)
+        self.assertEqual(self.events(), before)
+        self.assertEqual(run("digest", self.log).stdout, digest)
+        self.assertIn("## Root watches (0)", digest)
+        self.assertEqual(run("check", self.log).returncode, 0)
+
+    def test_concurrent_activity_is_deduplicated_under_the_append_lock(self):
+        env = {k: v for k, v in os.environ.items() if k != "LOOP_PI_RUN_DIR"}
+        for event in [
+            ["heartbeat", "at=2026-10-03T00:00:00.000Z"],
+            ["watch", "op=start", "what=watch concurrent: proof", "deadline=2026-10-04T00:00:00Z"],
+        ]:
+            procs = [subprocess.Popen([sys.executable, SCRIPT, "append", self.log, *event, "--by", "ext"],
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env) for _ in range(6)]
+            for proc in procs:
+                out, err = proc.communicate(timeout=60)
+                self.assertEqual(proc.returncode, 0, (out, err))
+        self.assertEqual([e["ev"] for e in self.events()], ["heartbeat", "watch"])
+        self.assertEqual(run("check", self.log).returncode, 0)
+
+    def test_schema_is_not_widened(self):
+        for body in [
+            {"ev": "watch", "op": "tick", "what": "proof", "deadline": "soon"},
+            {"ev": "watch", "op": "start", "what": "proof"},
+            {"ev": "watch", "op": "start", "what": "proof", "deadline": "soon", "id": "extra"},
+            {"ev": "heartbeat", "at": "not-a-time"},
+        ]:
+            r = self.append(stdin=json.dumps(body), ok=False)
+            self.assertEqual(r.returncode, 2, r.stderr)
+
+
 class ConcurrencyTests(Base):
     def test_two_processes_append_without_gaps_or_interleaving(self):
         n = 25

@@ -25,9 +25,18 @@ import {
 } from "./lane-timers.ts";
 import { registerRuntimeEntry } from "./runtime-entry.ts";
 
+interface WatchEvent {
+  ev: "watch";
+  op: "start" | "stop";
+  what: string;
+  deadline: string;
+}
+
 interface LoopWaitStateSnapshot {
   timers: TimerSnapshot[];
   watchers: WatcherSnapshot[];
+  // Optional for compatibility with session entries written before lifecycle logging.
+  pendingEvents?: WatchEvent[];
 }
 
 interface LoopWaitMessage {
@@ -79,13 +88,55 @@ export default function (pi: ExtensionAPI): void {
   let sessionIdentities = new Set<string>();
   // Deadline from a launching call's brief, by toolCallId, until that call's result names the run.
   const briefDeadlines = new Map<string, number>();
+  let pendingEvents: WatchEvent[] = [];
+  const recording = new Map<string, Promise<void>>();
+  // During synchronous startup reconciliation, callbacks can persist before all managers
+  // have been reconstructed. Keep not-yet-processed instances in those snapshots.
+  const restoringWatchers = new Map<string, WatcherSnapshot>();
+  const restoringTimers = new Map<string, TimerSnapshot>();
 
   const persist = () => {
     pi.appendEntry<LoopWaitStateSnapshot>("loop-wait-state", {
-      timers: timerManager?.list() ?? [],
-      watchers: watchManager?.list() ?? [],
+      timers: [...restoringTimers.values(), ...(timerManager?.list() ?? [])],
+      watchers: [...restoringWatchers.values(), ...(watchManager?.list() ?? [])],
+      pendingEvents: [...pendingEvents],
     });
   };
+
+  const deliverEvent = (event: WatchEvent) => {
+    // One causal queue per instance, not one delivery per event: an available stop
+    // must never overtake a start whose append failed before writing. Replaying that
+    // start after an acknowledged stop would otherwise falsely reopen the digest.
+    const instance = JSON.stringify([event.what, event.deadline]);
+    if (recording.has(instance)) return;
+    const job = (async () => {
+      for (;;) {
+        const next = pendingEvents.find(e => e.what === event.what && e.deadline === event.deadline);
+        if (!next) return;
+        let outcome: Promise<boolean> | undefined;
+        try {
+          pi.events.emit("loop-wait:state-event", { event: next, reply: (r: Promise<boolean>) => { outcome = r; } });
+        } catch { /* A missing recorder must not disrupt process/timer cleanup. */ }
+        // Do not deliver any successor on missing/failed ACK. A new lifecycle event
+        // or startup retries this head; there is no unbounded automatic retry loop.
+        if (!outcome || !await outcome) return;
+        const key = JSON.stringify(next);
+        pendingEvents = pendingEvents.filter(e => JSON.stringify(e) !== key);
+        persist();
+      }
+    })().catch(() => {}).finally(() => recording.delete(instance));
+    recording.set(instance, job);
+  };
+  const recordEvent = (op: WatchEvent["op"], what: string, deadline: string) => {
+    const event: WatchEvent = { ev: "watch", op, what, deadline };
+    if (!pendingEvents.some(e => JSON.stringify(e) === JSON.stringify(event))) pendingEvents.push(event);
+    // Persist before transport. Restart replays the outbox; CLI locking deduplicates an
+    // append that succeeded just before the acknowledgement/session write was interrupted.
+    persist();
+    deliverEvent(event);
+  };
+  const timerEvent = (op: WatchEvent["op"], t: TimerSnapshot) => recordEvent(op, `wake ${t.id}: ${t.reason}`, t.at);
+  const drainEvents = () => Promise.all([...recording.values()]);
 
   const teardown = (note: string) => {
     suppressDelivery = true;
@@ -121,6 +172,7 @@ export default function (pi: ExtensionAPI): void {
         cwd: ctx.cwd,
       });
       persist();
+      await drainEvents();
       return {
         content: [{ type: "text", text: `watch-id=${id}` }],
         details: { id },
@@ -137,6 +189,7 @@ export default function (pi: ExtensionAPI): void {
       liveCtx = ctx;
       const stopped = watchManager?.stop(params.id) ?? false;
       persist();
+      await drainEvents();
       return {
         content: [{ type: "text", text: stopped ? `stopped ${params.id}` : `no active watch ${params.id}` }],
         details: { stopped },
@@ -155,6 +208,7 @@ export default function (pi: ExtensionAPI): void {
       if (!timerManager) throw new Error("loop-wait: wake_at called before session_start reconciliation");
       const armed = timerManager.arm(params.at, params.reason);
       persist();
+      await drainEvents();
       return {
         content: [{ type: "text", text: `timer-id=${armed.id} at=${armed.at}` }],
         details: armed,
@@ -195,6 +249,7 @@ export default function (pi: ExtensionAPI): void {
       const droppedQueued =
         target === undefined ? [] : (deliveryQueue?.removePending((m) => queuedWakeId(m) === target) ?? []);
       persist();
+      await drainEvents();
 
       if (result.status === "cancelled") {
         const note = droppedQueued.length > 0 ? " (its queued wake message was also dropped)" : "";
@@ -233,6 +288,7 @@ export default function (pi: ExtensionAPI): void {
       for (const timer of cancelledTimers) timerManager?.cancel(timer.id);
       suppressDelivery = false;
       persist();
+      await drainEvents();
       const summary = {
         stopped_watchers: stoppedWatchers,
         cancelled_timers: cancelledTimers,
@@ -351,8 +407,9 @@ export default function (pi: ExtensionAPI): void {
     scheduleFlush();
   });
 
-  pi.on("session_shutdown", () => {
+  pi.on("session_shutdown", async () => {
     teardown("session_shutdown");
+    await drainEvents();
   });
 
   pi.on("session_start", (_event, ctx) => {
@@ -375,24 +432,7 @@ export default function (pi: ExtensionAPI): void {
       deliver: (message, opts) => pi.sendMessage(message, { triggerTurn: opts.triggerTurn }),
     });
 
-    watchManager = new WatchManager({
-      runDir,
-      onPersist: persist,
-      onFinal: (id, receipt) => {
-        if (suppressDelivery) return;
-        deliveryQueue?.send(loopWatchMessage(id, receipt));
-      },
-    });
-    timerManager = new TimerManager({
-      onPersist: persist,
-      onFire: (id, reason) => {
-        if (suppressDelivery) return;
-        deliveryQueue?.send(loopWakeMessage(id, reason));
-      },
-    });
-
-    // Reconstruct state from the current branch only: an abandoned branch is an alternative
-    // history, not something to replay here.
+    // Reconstruct before callbacks can persist new state. Legacy entries have no outbox.
     const branch = ctx.sessionManager.getBranch();
     let previous: LoopWaitStateSnapshot = { timers: [], watchers: [] };
     for (const entry of branch) {
@@ -400,9 +440,43 @@ export default function (pi: ExtensionAPI): void {
         previous = entry.data as LoopWaitStateSnapshot;
       }
     }
+    pendingEvents = [...(previous.pendingEvents ?? [])];
+    recording.clear();
+    restoringWatchers.clear();
+    restoringTimers.clear();
+    for (const w of previous.watchers) restoringWatchers.set(w.id, w);
+    for (const t of previous.timers) restoringTimers.set(t.id, t);
 
-    for (const snapshot of previous.watchers) watchManager.reconcileOne(snapshot);
-    timerManager.reconcile(previous.timers);
+    watchManager = new WatchManager({
+      runDir,
+      onPersist: persist,
+      onStart: w => recordEvent("start", `watch ${w.id}: ${w.label}`, w.deadline),
+      onFinal: (id, receipt) => {
+        recordEvent("stop", `watch ${id}: ${receipt.label ?? "unlabeled"}`, receipt.deadline);
+        if (suppressDelivery) return;
+        deliveryQueue?.send(loopWatchMessage(id, receipt));
+      },
+    });
+    timerManager = new TimerManager({
+      onPersist: persist,
+      onArm: t => timerEvent("start", t),
+      onEnd: t => timerEvent("stop", t),
+      onFire: (id, reason) => {
+        if (suppressDelivery) return;
+        deliveryQueue?.send(loopWakeMessage(id, reason));
+      },
+    });
+
+    // Replay pending starts before terminal reconciliation can append their stops.
+    for (const event of pendingEvents) deliverEvent(event);
+    for (const snapshot of previous.watchers) {
+      restoringWatchers.delete(snapshot.id);
+      watchManager.reconcileOne(snapshot);
+    }
+    for (const timer of previous.timers) {
+      restoringTimers.delete(timer.id);
+      timerManager.reconcile([timer]);
+    }
     persist();
   });
 }
