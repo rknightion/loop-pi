@@ -50,6 +50,14 @@ commit in `before..after` must satisfy one of:
   bot logins: letters, digits and hyphens followed by `[bot]`) itself pushed or merged inside the snapshot window,
   according to GitHub's activity API (push records, never author or committer metadata; missing
   evidence grants nothing).
+Automation entries also accept exact `refs/tags/<tag>` selectors and literal tag prefixes
+(e.g. `{"ref_prefix": "refs/tags/v", "actor": "release-please[bot]"}`). Unlike branch
+prefixes, tag prefixes need not end in `/`, so one prefix can cover stable and rc tags.
+Only added remote tags (including peeled refs), local tags and releases are covered: GitHub's
+Releases API must return that exact tag with an `author.login` matching the granted bot.
+Missing/unreadable evidence grants nothing. Existing release authors never authorize retags
+or deletions. This attribution is independent of protocol 2 and never covers branches.
+
 Anything else is UNGRANTED and named in a `note:` line. The fast-forward check still applies. A
 derived `HEAD` move follows the default branch's verdict. Other refs, tags and releases are
 unchanged. Without the marker every rule above is skipped and behaviour is as before.
@@ -471,21 +479,22 @@ def validate_automation(grants_by_repo: dict) -> None:
             if not isinstance(actor, str) or not re.fullmatch(r"[A-Za-z0-9-]+\[bot\]", actor):
                 raise ValueError("automation actor must be an exact GitHub App bot login ending in [bot]")
             ref = item.get("ref", item.get("ref_prefix"))
-            if (not isinstance(ref, str) or not ref.startswith("refs/heads/")
-                    or len(ref) <= len("refs/heads/") or any(c in ref for c in " *?[:\\")
+            namespace = next((ns for ns in ("refs/heads/", "refs/tags/")
+                              if isinstance(ref, str) and ref.startswith(ns)), None)
+            if (namespace is None or len(ref) <= len(namespace) or any(c in ref for c in " *?[:\\")
                     or any(ord(c) < 33 or ord(c) == 127 for c in ref)
                     or ".." in ref or "@{" in ref or "//" in ref
-                    or ("ref_prefix" in item and not ref.endswith("/"))
+                    or ("ref_prefix" in item and namespace == "refs/heads/" and not ref.endswith("/"))
                     or ("ref" in item and (ref.endswith(("/", ".", ".lock"))))):
-                raise ValueError("automation ref must be an exact branch; prefix must end in /")
-            # Git is the authority for branch syntax, including component restrictions.
+                raise ValueError("automation ref must be an exact branch or tag; branch prefix must end in /")
+            # Git is the authority for ref syntax, including component restrictions.
             checked_ref = ref + "automation-probe" if "ref_prefix" in item else ref
             try:
                 valid = run(["git", "check-ref-format", checked_ref]).returncode == 0
             except (OSError, subprocess.TimeoutExpired):
                 valid = False
             if not valid:
-                raise ValueError("automation ref is not a valid branch ref")
+                raise ValueError("automation ref is not a valid branch or tag ref")
 
 
 def snapshot_time(value: str) -> datetime:
@@ -493,6 +502,51 @@ def snapshot_time(value: str) -> datetime:
     if parsed.tzinfo is None:
         raise ValueError("snapshot/activity time needs a timezone")
     return parsed.astimezone(timezone.utc)
+
+
+def github_repository(repo: str, remote: str, remote_url: str | None = None) -> tuple[str, str] | None:
+    """Resolve a supported GitHub API identity; never guess for local/unknown URLs.
+    Tag attribution supplies the snapshot URL, while branch activity keeps live resolution."""
+    if remote_url is None:
+        url = run(["git", "-C", repo, "remote", "get-url", remote])
+        if url.returncode:
+            return None
+        remote_url = url.stdout.strip()
+    raw = remote_url
+    if "://" in raw:
+        parsed = urlparse(raw)
+        host, path = parsed.hostname, parsed.path.lstrip("/")
+    else:
+        match = re.fullmatch(r"(?:[^@/:]+@)?([^/:]+):(.+)", raw)
+        if not match:
+            return None
+        host, path = match.groups()
+    if host not in ({"github.com", os.environ.get("GH_HOST", "github.com")} | gh_configured_hosts()):
+        return None
+    path = path.removesuffix(".git")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", path):
+        return None
+    return host, path
+
+
+def release_author(repo: str, remote: str, tag: str, remote_url: str) -> str | None:
+    """Release author in the snapshotted repository, not tag/commit metadata or live remotes."""
+    try:
+        identity = github_repository(repo, remote, remote_url)
+        if identity is None:
+            return None
+        host, path = identity
+        result = run(["gh", "api", "--hostname", host,
+                      f"repos/{path}/releases/tags/{quote(tag, safe='')}"], timeout=60)
+        if result.returncode:
+            return None
+        release = json.loads(result.stdout)
+        if release["tag_name"] != tag:
+            return None
+        actor = release["author"]["login"]
+        return actor if isinstance(actor, str) else None
+    except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError, AttributeError):
+        return None
 
 
 def activity_entries(repo: str, remote: str, ref: str, times: tuple[str, str]) -> list[dict] | None:
@@ -503,23 +557,10 @@ def activity_entries(repo: str, remote: str, ref: str, times: tuple[str, str]) -
         start, end = map(snapshot_time, times)
         if start >= end:
             return None
-        url = run(["git", "-C", repo, "remote", "get-url", remote])
-        if url.returncode:
+        identity = github_repository(repo, remote)
+        if identity is None:
             return None
-        raw = url.stdout.strip()
-        if "://" in raw:
-            parsed = urlparse(raw)
-            host, path = parsed.hostname, parsed.path.lstrip("/")
-        else:
-            match = re.fullmatch(r"(?:[^@/:]+@)?([^/:]+):(.+)", raw)
-            if not match:
-                return None
-            host, path = match.groups()
-        if host not in ({"github.com", os.environ.get("GH_HOST", "github.com")} | gh_configured_hosts()):
-            return None
-        path = path.removesuffix(".git")
-        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", path):
-            return None
+        host, path = identity
         result = run(["gh", "api", "--hostname", host, "--paginate", "--slurp",
                       f"repos/{path}/activity?ref={quote(ref, safe='')}&per_page=100"], timeout=120)
         if result.returncode:
@@ -719,6 +760,32 @@ def compare_repo(name: str, before: dict, after: dict, grants: list[str] | dict,
 
     before_remotes = before.get("remotes", {})
     after_remotes = after.get("remotes", {})
+    release_authors: dict[tuple[str, str], str | None] = {}
+
+    def tag_actor(ref: str, change: str, remote: str | None = None) -> str | None:
+        # Release authorship proves creation, not who subsequently rewrote/deleted a tag.
+        if change != "added" or not ref.startswith("refs/tags/"):
+            return None
+        target = ref.removesuffix("^{}")
+        candidates = {item["actor"] for item in automation if item.get("ref") == target or
+                      ("ref_prefix" in item and target.startswith(item["ref_prefix"]))}
+        if not candidates:
+            return None
+        remotes = [remote] if remote is not None else sorted(set(before_remotes) & set(after_remotes))
+        for source in remotes:
+            b, a = before_remotes.get(source, {}), after_remotes.get(source, {})
+            if (not b.get("available") or not a.get("available") or not isinstance(b.get("url"), str)
+                    or not b["url"] or b["url"] != a.get("url")):
+                continue
+            tag = target[len("refs/tags/"):]
+            key = (source, tag)
+            if key not in release_authors:
+                release_authors[key] = release_author(name, source, tag, b["url"])
+            actor = release_authors[key]
+            if actor in candidates:
+                return actor
+        return None
+
     for remote in sorted(set(before_remotes) | set(after_remotes)):
         b = before_remotes.get(remote, {"available": False, "reason": "remote absent before"})
         a = after_remotes.get(remote, {"available": False, "reason": "remote absent after"})
@@ -766,8 +833,9 @@ def compare_repo(name: str, before: dict, after: dict, grants: list[str] | dict,
         for change, ref, before_sha, after_sha in changes:
             target = ref
             notes: list[str] = []
-            actor = automation_actor(name, remote, ref, before_sha, after_sha, automation,
-                                     [head_target(b, a), head_target(a, b)], times)
+            actor = tag_actor(ref, change, remote) or automation_actor(
+                name, remote, ref, before_sha, after_sha, automation,
+                [head_target(b, a), head_target(a, b)], times)
             if actor:
                 report.append(f"[{name}] remote '{remote}' ref {change}: {ref} "
                               f"({before_sha or '-'} -> {after_sha or '-'}) [automation actor={actor}]")
@@ -825,6 +893,11 @@ def compare_repo(name: str, before: dict, after: dict, grants: list[str] | dict,
         all_covered = False
     else:
         for change, ref, before_sha, after_sha in diff_ref_map(before_tags.get("tags", {}), after_tags.get("tags", {})):
+            actor = tag_actor(ref, change)
+            if actor:
+                report.append(f"[{name}] tag {change}: {ref} ({before_sha[:12] or '-'} -> {after_sha[:12] or '-'}) "
+                              f"[automation actor={actor}]")
+                continue
             covered = ref in grants
             if not covered and ops_release and change == "added":
                 report.append(f"[{name}] tag {change}: {ref} ({before_sha[:12] or '-'} -> {after_sha[:12] or '-'}) "
@@ -847,6 +920,10 @@ def compare_repo(name: str, before: dict, after: dict, grants: list[str] | dict,
         before_tags_set = {r["tagName"] for r in before_releases.get("releases", []) if "tagName" in r}
         after_tags_set = {r["tagName"] for r in after_releases.get("releases", []) if "tagName" in r}
         for tag in sorted(after_tags_set - before_tags_set):
+            actor = tag_actor(f"refs/tags/{tag}", "added")
+            if actor:
+                report.append(f"[{name}] release added: {tag} [automation actor={actor}]")
+                continue
             covered = tag in grants or f"refs/tags/{tag}" in grants
             if not covered and ops_release:
                 report.append(f"[{name}] release added: {tag} [GRANTED ops release]")

@@ -197,7 +197,7 @@ describe("loop-pi-runtime entry", () => {
   test("readRuntimeEntry reads variant and service tiers, defaulting both", () => {
     const dir = freshDir("runtime-entry-");
     assert.deepEqual(readRuntimeEntry(dir), { v: 1, variant: "unknown", models: {} });
-    writeFileSync(join(dir, ".loop-pi-managed.json"), JSON.stringify({ label: "x", variant: "burn-fast" }));
+    writeFileSync(join(dir, ".loop-pi-managed.json"), JSON.stringify({ label: "x", variant: "fast" }));
     writeFileSync(
       join(dir, "models.json"),
       JSON.stringify({
@@ -213,7 +213,7 @@ describe("loop-pi-runtime entry", () => {
     );
     assert.deepEqual(readRuntimeEntry(dir, "faux-1"), {
       v: 1,
-      variant: "burn-fast",
+      variant: "fast",
       models: {
         "gpt-6.1-sol": { service_tier: "priority" },
         "gpt-6-luna": { service_tier: "default" },

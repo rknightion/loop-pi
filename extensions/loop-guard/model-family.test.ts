@@ -40,6 +40,10 @@ test("a subagent call may not shorten or reset a run deadline: agent files pin i
     assert.match(subagentOverrideBlock(input)?.reason ?? "", /run deadline/, JSON.stringify(input));
   }
   assert.match(subagentOverrideBlock({ agent: "mapper", model: "gpt-6-luna" })?.reason ?? "", /model override/);
+  assert.equal(subagentOverrideBlock({ agent: "mapper-deep", task: "x" }), undefined);
+  for (const model of ["openai/gpt-6.1-sol:medium", "openai/gpt-6-luna:high"]) {
+    assert.match(subagentOverrideBlock({ agent: "mapper-deep", model })?.reason ?? "", /model override/);
+  }
 });
 
 test("the family and the fallback route come from settings loopPi, defaulting to gpt-6 on openai", () => {

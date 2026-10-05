@@ -14,7 +14,8 @@ import { getAgentDir, isToolCallEventType } from "@earendil-works/pi-coding-agen
 import { hookScriptsToRun, runHookScripts } from "./hooks.ts";
 import { installModelFamily, subagentOverrideBlock } from "./model-family.ts";
 import { installRequestCeiling, installRetryBackoff } from "../request-ceiling/index.ts";
-import { evaluateBashCommand } from "./rules.ts";
+import { evaluateBashCommand, wrappedGateCommands, bindGateExecution } from "./rules.ts";
+import { loadGateDeclarations } from "./gates.ts";
 import { hasLanePushGrant } from "./push-grant.ts";
 import { parseLaneBinding } from "./ops.ts";
 import { acquireOpsLock, type OpsLock } from "./ops-lock.ts";
@@ -70,11 +71,14 @@ export default function (pi: ExtensionAPI) {
   const evaluateShellLikeToolCall = async (
     command: string,
     ctx: ExtensionContext,
+    input: Record<string, unknown>,
   ): Promise<ToolCallEventResult | void> => {
     const locked = await opsLockRefusal();
     if (locked) return locked;
     const p2 = proto();
+    const gates = loadGateDeclarations(ctx.cwd);
     const decision = evaluateBashCommand(command, "lane", 0, pushGranted, {
+      gates,
       ops: ops?.entry,
       cwd: ctx.cwd,
       proto: p2,
@@ -86,13 +90,22 @@ export default function (pi: ExtensionAPI) {
 
     const agentDir = getAgentDir();
     const scripts = hookScriptsToRun(agentDir, ["backlog-guard.py", "staging-guard.py"]);
-    const hooks = await runHookScripts(scripts, "bash", { command }, ctx.cwd);
-    if (hooks.denied) {
-      return { block: true, reason: hooks.reason };
+    const declaredCommands = wrappedGateCommands(command, gates);
+    for (const declared of declaredCommands) {
+      // Explicit remote moves are never allowed as gates: their wrapper has no audit plan.
+      const unlogged = unloggedPushRefusal(declared, "watch_process");
+      if (unlogged) return { block: true, reason: "loop-guard: declared gates may not run git push or gh pr merge; run remote moves as separate audited bash commands." };
     }
-    if (hooks.adapterFailures.length > 0) {
-      return { block: true, reason: `loop-guard: hook adapter failure blocks lanes: ${hooks.adapterFailures.join("; ")}` };
+    for (const effective of [command, ...declaredCommands]) {
+      const hooks = await runHookScripts(scripts, "bash", { command: effective }, ctx.cwd);
+      if (hooks.denied) {
+        return { block: true, reason: hooks.reason };
+      }
+      if (hooks.adapterFailures.length > 0) {
+        return { block: true, reason: `loop-guard: hook adapter failure blocks lanes: ${hooks.adapterFailures.join("; ")}` };
+      }
     }
+    input.command = bindGateExecution(command, gates);
     return;
   };
 
@@ -116,7 +129,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("tool_call", async (event: ToolCallEvent, ctx: ExtensionContext): Promise<ToolCallEventResult | void> => {
     if (isToolCallEventType("bash", event)) {
-      const verdict = await evaluateShellLikeToolCall(event.input.command, ctx);
+      const verdict = await evaluateShellLikeToolCall(event.input.command, ctx, event.input as unknown as Record<string, unknown>);
       if (verdict?.block) return verdict;
       if (proto() && runDir !== undefined) {
         // A push the log cannot see would land UNGRANTED at closeout: refuse it instead.
@@ -131,7 +144,7 @@ export default function (pi: ExtensionAPI) {
     if (event.toolName === "watch_process") {
       const raw = (event.input as Record<string, unknown>).command;
       const command = typeof raw === "string" ? raw : "";
-      const verdict = await evaluateShellLikeToolCall(command, ctx);
+      const verdict = await evaluateShellLikeToolCall(command, ctx, event.input as Record<string, unknown>);
       if (verdict?.block) return verdict;
       if (proto() && runDir !== undefined) {
         const unlogged = unloggedPushRefusal(command, "watch_process");

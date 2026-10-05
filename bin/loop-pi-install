@@ -54,7 +54,7 @@ DISPATCH_EXTENSIONS = ("dispatcher/index.ts",)
 # Lane entries, registered by the root guard as required child extensions.
 LANE_EXTENSIONS = ("loop-guard/lane.ts", "loop-wait/lane.ts")
 # Operator and root CLIs from bin/, installed next to the launcher.
-CLI_TOOLS = ("loop-pi-preflight", "loop-pi-audit")
+CLI_TOOLS = ("loop-pi-preflight", "loop-pi-audit", "loop-gate-lock")
 # Installed into <home>/bin/ (not next to the launcher) when the source carries it.
 HOME_TOOLS = ("loop-state",)
 LANE_POLICY = "lane-policy.md"
@@ -334,7 +334,7 @@ def root_route(prefix: Path) -> Tuple[str, str, str]:
 
 
 def dispatch_launcher_name(launcher: str) -> str:
-    """loop-pi -> loop-pi-dispatch, loop-pi-burn -> loop-pi-dispatch-burn; other names get a -dispatch suffix."""
+    """loop-pi -> loop-pi-dispatch, loop-pi-fast -> loop-pi-dispatch-fast; other names get a -dispatch suffix."""
     if launcher == "loop-pi" or launcher.startswith("loop-pi-"):
         return "loop-pi-dispatch" + launcher[len("loop-pi"):]
     return launcher + "-dispatch"
