@@ -19,7 +19,7 @@ import { hasLanePushGrant } from "./push-grant.ts";
 import { parseLaneBinding } from "./ops.ts";
 import { acquireOpsLock, type OpsLock } from "./ops-lock.ts";
 import { bashProtectedPath, isLoopControlToolPath, protoActive, runDirFromEnv, toolWriteRefusal } from "./guard-paths.ts";
-import { laneIdFromBrief, planPushes, recordPushes, type PlannedPush } from "./push-log.ts";
+import { laneIdFromBrief, planPushes, recordPushes, unloggedPushRefusal, type PlannedPush } from "./push-log.ts";
 
 export { isLoopControlToolPath };
 
@@ -119,6 +119,9 @@ export default function (pi: ExtensionAPI) {
       const verdict = await evaluateShellLikeToolCall(event.input.command, ctx);
       if (verdict?.block) return verdict;
       if (proto() && runDir !== undefined) {
+        // A push the log cannot see would land UNGRANTED at closeout: refuse it instead.
+        const unlogged = unloggedPushRefusal(event.input.command, "bash");
+        if (unlogged) return { block: true, reason: unlogged };
         const pushes = await planPushes(event.input.command, ctx.cwd);
         if (pushes.length) pendingPushes.set(event.toolCallId, pushes);
       }
@@ -126,8 +129,15 @@ export default function (pi: ExtensionAPI) {
     }
 
     if (event.toolName === "watch_process") {
-      const command = (event.input as Record<string, unknown>).command;
-      return evaluateShellLikeToolCall(typeof command === "string" ? command : "", ctx);
+      const raw = (event.input as Record<string, unknown>).command;
+      const command = typeof raw === "string" ? raw : "";
+      const verdict = await evaluateShellLikeToolCall(command, ctx);
+      if (verdict?.block) return verdict;
+      if (proto() && runDir !== undefined) {
+        const unlogged = unloggedPushRefusal(command, "watch_process");
+        if (unlogged) return { block: true, reason: unlogged };
+      }
+      return verdict;
     }
 
     if (event.toolName === "subagent") {

@@ -279,7 +279,11 @@ paths are exact, bash write detection is best-effort.
   push after it is never absorbed and a no-op push logs nothing) and every successful `gh pr merge`
   (`old` the remote base branch before, `new` the PR's merge commit, only when it is MERGED and the
   base branch equals it); `repo` is the main checkout (`dirname` of the common git dir, so linked
-  worktrees match), `--show-toplevel` only as a fallback; `audit-grants.json`;
+  worktrees match), `--show-toplevel` only as a fallback. Only a push spelled as its own shell
+  command is logged, so a lane's bash call that runs `git push` or `gh pr merge` inside an
+  interpreter's code or stdin script, a git alias's shell body or unparseable text is refused, as is
+  any push through `watch_process`; an undetected one (a script file, a task runner) is unlogged and
+  the audit reports it UNGRANTED; `audit-grants.json`;
   `returns/<runId>.md`; `worktrees/<lane-id>/`. The lane binding carries optional `runDir`.
 - **Return cap** (loop-state, `message_end`, plus the `context` hook for already-stored messages): a
   `subagent-notify` message over 16,384 bytes becomes its first 6,144 bytes, an omission line naming

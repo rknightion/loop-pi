@@ -17,14 +17,18 @@
 // MERGED and the remote base branch equals that commit afterwards.
 //
 // `repo` is the main checkout (the parent of the common git dir), so a push from a linked worktree
-// matches the audit's repository path. Best effort: commands the parser cannot read and pushes inside
-// other tools or scripts are not logged.
+// matches the audit's repository path. Only a push spelled as its own shell command is logged: one
+// inside an interpreter's code or stdin script (`python3 - <<EOF ... subprocess.run(['git','push'])`),
+// a git alias's shell body or text the parser cannot read is not. `unloggedPushRefusal` lets the lane
+// guard refuse those before they run, so a push the log cannot see never lands from a lane. A push
+// from a script file, a task runner or an obfuscated spelling is not detected and is not logged;
+// the closeout audit then reports the move UNGRANTED (fails closed).
 
 import { execFile } from "node:child_process";
 import { appendFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename as pathBasename, dirname, join, resolve } from "node:path";
-import { basename, parseCommand, resolveGitArguments, stripWrappers } from "./rules.ts";
+import { basename, isInterpreterHead, parseCommand, resolveGitArguments, stripWrappers, textRunsPush } from "./rules.ts";
 
 export const PUSH_LOG = "push-log.jsonl";
 const GIT_TIMEOUT_MS = 30_000;
@@ -207,6 +211,50 @@ function commandTargets(command: string, cwd: string): { pushes: PushTarget[]; m
     if (target) pushes.push(target);
   }
   return { pushes, merges };
+}
+
+/** True when `command` runs a `git push` or `gh pr merge` that `commandTargets` cannot attribute:
+ *  spelled inside an interpreter's inline code or stdin script, inside a git alias's shell body, or
+ *  anywhere in a command the parser cannot read. Read with the same parse as `commandTargets`. */
+export function hiddenPush(command: string): boolean {
+  const parsed = parseCommand(command, "root");
+  if (!parsed) return textRunsPush(command);
+  for (const segment of parsed.segments) {
+    const stripped = stripWrappers(segment);
+    if (stripped.length === 0) continue;
+    const head = basename(stripped[0]);
+    if (head === "git") {
+      const resolved = resolveGitArguments(stripped);
+      if (resolved.shellCommand !== undefined && textRunsPush(resolved.shellCommand)) return true;
+      if (resolved.unparseable && textRunsPush(resolved.aliasText ?? stripped.join(" "))) return true;
+    }
+    if (isInterpreterHead(head) && stripped.slice(1).some((arg) => textRunsPush(arg))) return true;
+  }
+  return parsed.interpreterScripts.some((script) => textRunsPush(script));
+}
+
+/** The lane guard's refusal for a push the push log would not record, or undefined. Under protocol
+ *  2 the closeout audit grants a default-branch move only through the log, so such a push would land
+ *  UNGRANTED. `bash` logs literal pushes, so only hidden ones are refused there; `watch_process`
+ *  logs none, so every push through it is refused. */
+export function unloggedPushRefusal(command: string, tool: "bash" | "watch_process"): string | undefined {
+  if (tool === "watch_process") {
+    const { pushes, merges } = commandTargets(command, process.cwd());
+    if (pushes.length || merges.length || hiddenPush(command)) {
+      return (
+        "loop-guard: a git push or gh pr merge through watch_process is not recorded in the push log, so the " +
+        "closeout audit would mark the move UNGRANTED. Run it as its own bash command instead."
+      );
+    }
+    return undefined;
+  }
+  if (!/\b(?:push|merge)\b/.test(command) || !hiddenPush(command)) return undefined;
+  return (
+    "loop-guard: this command runs git push (or gh pr merge) inside a script, interpreter or alias, where the " +
+    "push log cannot see it, so the closeout audit would mark the move UNGRANTED. Do any other work first, then " +
+    "run the push as its own literal bash command, for example `git push origin main`. If the text only " +
+    "mentions git push as data, make the edit with the edit or write tool instead."
+  );
 }
 
 /** Every `git push` in a command, with the directory it runs in. */

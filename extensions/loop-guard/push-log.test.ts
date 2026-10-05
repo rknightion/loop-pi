@@ -3,12 +3,13 @@
 // appends one line per updated ref to `$LOOP_PI_RUN_DIR/push-log.jsonl`, with `old` read from the
 // remote before the push. A failed push, or a run without the protocol marker, writes nothing.
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
 import laneExtension from "./lane.ts";
-import { planPushes, recordPushes } from "./push-log.ts";
+import { hiddenPush, planPushes, recordPushes, unloggedPushRefusal } from "./push-log.ts";
 import {
   FAUX_EXTENSION,
   PI_SUBAGENTS_PACKAGE_DIR,
@@ -133,8 +134,8 @@ test("root push log: a run without the protocol marker writes no push log", { ti
   }
 });
 
-test("lane push log: a push-granted async lane logs its pushes with its agent and lane id", { timeout: 90_000 }, async () => {
-  const { repo, remote, runDir, log } = fixture();
+/** An agent home whose `lane-worker-push` agent runs on the faux provider with only `bash`. */
+function pushLaneHome(): string {
   const home = freshDir("push-log-lane-home-");
   mkdirSync(join(home, "agents"), { recursive: true });
   mkdirSync(join(home, "extensions", "subagent"), { recursive: true });
@@ -145,6 +146,12 @@ test("lane push log: a push-granted async lane logs its pushes with its agent an
     join(home, "agents", "lane-worker-push.md"),
     ["---", "name: lane-worker-push", "description: Push log test", "tools: bash", "extensions: []", `subagentOnlyExtensions: ${FAUX_EXTENSION}`, "model: faux/faux-1", "---", "Test worker."].join("\n"),
   );
+  return home;
+}
+
+test("lane push log: a push-granted async lane logs its pushes with its agent and lane id", { timeout: 90_000 }, async () => {
+  const { repo, remote, runDir, log } = fixture();
+  const home = pushLaneHome();
   const script = writeFauxScript([
     {
       match: "SPAWN_LANE",
@@ -182,6 +189,112 @@ test("lane push log: a push-granted async lane logs its pushes with its agent an
   } finally {
     await session.close();
   }
+});
+
+// ---------------------------------------------------------------------------------------------
+// A push the push log cannot see must not land (the subprocess-push regression): a granted lane ran
+// `git push` from a Python heredoc, the remote's default branch moved with no push-log line, and the
+// closeout audit marked the move UNGRANTED. The lane guard refuses such a push and names the literal
+// form; the lane's literal retry is logged, so the real audit passes.
+// ---------------------------------------------------------------------------------------------
+
+const AUDIT = fileURLToPath(new URL("../../bin/loop-pi-audit", import.meta.url));
+
+/** Run the closeout audit CLI with a stub `gh` (these scratch remotes have no GitHub releases). */
+function runAudit(runDir: string, ...args: string[]): { status: number; output: string } {
+  const bin = freshDir("push-log-audit-bin-");
+  writeFileSync(join(bin, "gh"), "#!/bin/sh\necho '[]'\n");
+  chmodSync(join(bin, "gh"), 0o755);
+  const result = spawnSync("python3", [AUDIT, ...args, "--run-dir", runDir], {
+    encoding: "utf8",
+    timeout: 30_000,
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, LOOP_PI_RUN_DIR: runDir },
+  });
+  return { status: result.status ?? -1, output: `${result.stdout}${result.stderr}` };
+}
+
+const COMMIT_TWO = ["-c", "user.name=fixture", "-c", "user.email=fixture@example.com", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "two"];
+const SUBPROCESS_PUSH = [
+  "python3 - <<'PY'",
+  "import subprocess",
+  `subprocess.run([${["git", ...COMMIT_TWO].map((a) => `'${a}'`).join(",")}],check=True)`,
+  "subprocess.run(['git','push','origin','main'],check=True)",
+  "PY",
+].join("\n");
+
+test("lane push log: a granted lane's subprocess push is refused, so the closeout audit finds no unlogged move", { timeout: 90_000 }, async () => {
+  const { repo, remote, runDir, log } = fixture();
+  git(repo, "push", "-q", "origin", "main");
+  const realRepo = realpathSync(repo);
+  const begin = runAudit(runDir, "begin", realRepo);
+  assert.equal(begin.status, 0, begin.output);
+  const script = writeFauxScript([
+    {
+      match: "SPAWN_LANE",
+      once: true,
+      toolCalls: [{ name: "subagent", args: { agent: "lane-worker-push", task: "Lane: L16 · Task: T-1 · Tier: routine\nCHILD_SUBPROCESS_PUSH", async: true } }],
+    },
+    { match: "CHILD_SUBPROCESS_PUSH", once: true, toolCalls: [{ name: "bash", args: { command: SUBPROCESS_PUSH } }] },
+    {
+      match: "push log cannot see",
+      once: true,
+      toolCalls: [{ name: "bash", args: { command: `git ${COMMIT_TWO.join(" ")} && git push origin main` } }],
+    },
+    { match: ".*", text: "done" },
+  ]);
+  const session = startPiRpc({
+    extensions: [FAUX_EXTENSION, ROOT_EXTENSION],
+    fauxScriptPath: script,
+    agentDir: pushLaneHome(),
+    subagentTempRoot: freshDir(),
+    cwd: repo,
+    sessionArgs: [],
+    extraArgs: ["--exclude-tools", "subagents_enable"],
+    env: { LOOP_PI_RUN_DIR: runDir },
+  });
+  try {
+    session.send({ id: "p", type: "prompt", message: "SPAWN_LANE" });
+    const launch = await session.waitFor((e) => e.type === "tool_execution_end" && e.toolName === "subagent", 30_000);
+    assert.equal(launch.isError ?? false, false, JSON.stringify(launch));
+    // The lane is done when the remote holds its commit and, for a logged push, the log has its line.
+    await waitForCondition(() => (git(remote, "log", "-1", "--format=%s", "refs/heads/main") === "two" ? true : undefined), 45_000);
+    await waitForCondition(() => (readLog(log).length ? true : undefined), 10_000).catch(() => undefined);
+    const closeout = runAudit(runDir, "closeout", "--push-log", log);
+    assert.doesNotMatch(closeout.output, /UNGRANTED/, closeout.output);
+    assert.equal(closeout.status, 0, closeout.output);
+    const lines = readLog(log);
+    assert.equal(lines.length, 1, JSON.stringify(lines));
+    assert.deepEqual(
+      [lines[0].agent, lines[0].lane, lines[0].ref, lines[0].new],
+      ["lane-worker-push", "L16", "refs/heads/main", git(remote, "rev-parse", "refs/heads/main")],
+    );
+  } finally {
+    await session.close();
+  }
+});
+
+test("push log: a push the log cannot attribute is hidden; a literal push is not", () => {
+  const hidden = [
+    SUBPROCESS_PUSH,
+    `python3 -c "import subprocess; subprocess.run(['git', 'push', 'origin', 'main'], check=True)"`,
+    `node -e "require('child_process').execSync('git -C repo push origin HEAD')"`,
+    `perl -e 'system("gh pr merge 7 --merge")'`,
+    "git -c alias.ship='!git push origin main' ship",
+  ];
+  for (const command of hidden) assert.equal(hiddenPush(command), true, command);
+  const attributed = [
+    "git push origin main",
+    'bash -c "git push origin main"',
+    "env GIT_TRACE=1 git push",
+    "cd sub && git push origin HEAD:refs/heads/main",
+    'git commit -m "explain why git push was refused"',
+    `python3 -c "import subprocess; subprocess.run(['git', 'status'])"`,
+  ];
+  for (const command of attributed) assert.equal(hiddenPush(command), false, command);
+  assert.equal(unloggedPushRefusal("git push origin main", "bash"), undefined);
+  assert.match(unloggedPushRefusal(SUBPROCESS_PUSH, "bash") ?? "", /push log cannot see it/);
+  assert.match(unloggedPushRefusal("git push origin main", "watch_process") ?? "", /watch_process is not recorded/);
+  assert.equal(unloggedPushRefusal("npm test", "watch_process"), undefined);
 });
 
 test("lane push log: the post-exec hook reads the run dir from the binding when the environment has none", { timeout: 30_000 }, async () => {

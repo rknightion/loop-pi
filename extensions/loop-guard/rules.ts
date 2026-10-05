@@ -1352,7 +1352,7 @@ function readsScriptFromStdin(tokens: string[], implicitStdin: boolean): boolean
 /** Interpreters whose inline code (`-c`, `-e`, `--eval`, `-p`, or any other
  *  argument) gets the fallback text scan. Not blocked as such (owner
  *  decision, 2026-09-28). */
-function isInterpreterHead(head: string): boolean {
+export function isInterpreterHead(head: string): boolean {
   return PYTHON_INTERPRETER.test(head) || ["node", "nodejs", "perl", "ruby", "deno", "bun"].includes(head);
 }
 
@@ -2006,6 +2006,31 @@ function fallbackLaneCheck(segment: string[], proto = false): string | undefined
     return undefined;
   }
   return undefined;
+}
+
+/** True when loose text (an interpreter's code, a git alias's shell body, input the parser cannot
+ *  read) spells a `git push` or a `gh pr merge`, with the fallback scan's tokenising: `'git','push'`
+ *  inside a Python list reads as `git push`. Used to refuse pushes the push log cannot attribute. */
+export function textRunsPush(text: string, depth = 0): boolean {
+  const clean = text.replace(/[\\'"]/g, "");
+  for (const segment of looseSegments(clean)) {
+    for (let i = 0; i < segment.length; i++) {
+      const bare = basename(segment[i].replace(/^.*[=!]/, ""));
+      if (bare === "gh") {
+        const words = segment.slice(i + 1).filter((w) => !w.startsWith("-"));
+        if (words.some((w, j) => w === "pr" && words[j + 1] === "merge")) return true;
+        continue;
+      }
+      if (bare !== "git") continue;
+      const tokens = ["git", ...segment.slice(i + 1)];
+      if (gitArguments(tokens)[0] === "push") return true;
+      const resolved = resolveGitArguments(tokens);
+      if (resolved.args[0] === "push") return true;
+      const nested = resolved.shellCommand ?? resolved.aliasText;
+      if (nested !== undefined && depth < MAX_FALLBACK_DEPTH && textRunsPush(nested, depth + 1)) return true;
+    }
+  }
+  return false;
 }
 
 const FALLBACK_REDIRECT = />{1,2}\|?[ \t]*([^\s;&|()<>]+)/g;
