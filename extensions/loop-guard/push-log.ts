@@ -228,6 +228,30 @@ export function hiddenPush(command: string): boolean {
       if (resolved.shellCommand !== undefined && textRunsPush(resolved.shellCommand)) return true;
       if (resolved.unparseable && textRunsPush(resolved.aliasText ?? stripped.join(" "))) return true;
     }
+    // These executors run command/code arguments, not an attributable shell segment. Do not
+    // unwrap them into push targets: find/parallel may execute more than once or in another cwd.
+    if (head === "git") {
+      const args = resolveGitArguments(stripped).args;
+      if (args[0] === "rebase" && args.some((arg, i) =>
+        ((arg === "-x" || arg === "--exec") && textRunsPush(args[i + 1] ?? "")) ||
+        (arg.startsWith("--exec=") && textRunsPush(arg.slice(7))) ||
+        (arg.startsWith("-x") && arg.length > 2 && textRunsPush(arg.slice(2))),
+      )) return true;
+    }
+    const executor =
+      (head === "find" && stripped.some((arg) => ["-exec", "-execdir", "-ok", "-okdir"].includes(arg))) ||
+      (head === "uv" && stripped.includes("run")) ||
+      ["deno", "awk", "gawk", "mawk", "watch", "parallel"].includes(head);
+    if (executor && textRunsPush(stripped.slice(1).join(" "))) return true;
+    // Deno's native process API separates the executable from its argv with an options
+    // object, unlike subprocess.run(['git', 'push']). Recognise literal Command/args pairs.
+    if (head === "deno") {
+      const code = stripped.slice(1).join(" ");
+      const native = /\bDeno\.Command\s*\(\s*(['"])([^'"]+)\1\s*,\s*\{[^}]*?\bargs\s*:\s*\[([^\]]*)\]/g;
+      for (const match of code.matchAll(native)) {
+        if (textRunsPush(`${match[2]} ${match[3]}`)) return true;
+      }
+    }
     if (isInterpreterHead(head) && stripped.slice(1).some((arg) => textRunsPush(arg))) return true;
   }
   return parsed.interpreterScripts.some((script) => textRunsPush(script));
@@ -248,7 +272,7 @@ export function unloggedPushRefusal(command: string, tool: "bash" | "watch_proce
     }
     return undefined;
   }
-  if (!/\b(?:push|merge)\b/.test(command) || !hiddenPush(command)) return undefined;
+  if (!hiddenPush(command)) return undefined;
   return (
     "loop-guard: this command runs git push (or gh pr merge) inside a script, interpreter or alias, where the " +
     "push log cannot see it, so the closeout audit would mark the move UNGRANTED. Do any other work first, then " +
@@ -445,7 +469,6 @@ async function planMerge(target: MergeTarget): Promise<PlannedPrMerge | undefine
 /** Read the remote branches every push and PR merge in `command` will update. Run before the
  *  command executes. */
 export async function planPushes(command: string, cwd: string): Promise<PlannedPush[]> {
-  if (!/\b(?:push|merge)\b/.test(command)) return [];
   const { pushes, merges } = commandTargets(command, cwd);
   const planned: PlannedPush[] = [];
   for (const target of pushes) {

@@ -43,6 +43,37 @@ test("a good arm writes the marker, appends one open by ext from ## Run and the 
   }
 });
 
+test("arming retains protocol in an existing pre-arm snapshot without replacing its evidence", async () => {
+  const f = loopFixture();
+  const before = { taken_at: "2026-10-04T00:00:00Z", repos: { [f.repo]: { fixture: "original remote state" } } };
+  const path = join(f.runDir, "audit-before.json");
+  writeFileSync(path, JSON.stringify(before));
+  const pi = await fakePi({ agentDir: f.agentDir, cwd: f.repo, runDir: f.runDir });
+  try {
+    assert.deepEqual(await pi.input(f.launch), { action: "continue" });
+    assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), { ...before, protocol: 2 });
+    rmSync(join(f.runDir, "loop-pi-proto"));
+    assert.equal(JSON.parse(readFileSync(path, "utf8")).protocol, 2);
+  } finally {
+    pi.restore();
+  }
+});
+
+test("a malformed pre-arm snapshot refuses arming instead of silently losing protocol evidence", async () => {
+  const f = loopFixture();
+  const path = join(f.runDir, "audit-before.json");
+  writeFileSync(path, "broken snapshot");
+  const pi = await fakePi({ agentDir: f.agentDir, cwd: f.repo, runDir: f.runDir });
+  try {
+    assert.deepEqual(await pi.input(f.launch), { action: "handled" });
+    assert.equal(pi.query().reportPath, null);
+    assert.equal(readFileSync(path, "utf8"), "broken snapshot");
+    assert.match(rootIncidents(f.agentDir)[0].body.reason, /could not retain protocol/);
+  } finally {
+    pi.restore();
+  }
+});
+
 test("each failed arm check is refused with handled, an arm-refused incident and a visible reason, and nothing armed", async () => {
   const cases: { name: string; setup: () => { fixture: ReturnType<typeof loopFixture>; runDir: string | null; cwd?: string }; reason: RegExp }[] = [
     { name: "no run dir", setup: () => ({ fixture: loopFixture(), runDir: null }), reason: /LOOP_PI_RUN_DIR is not set/ },

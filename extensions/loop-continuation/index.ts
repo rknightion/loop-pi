@@ -34,6 +34,8 @@ import {
   openEvent,
   PROTO_FILE,
   PROTO_VERSION,
+  retainSnapshotProtocol,
+  snapshotProtocolRetained,
 } from "./arm.ts";
 import { AUDIT_GRANTS_REJECTED_CLASS, freezeAuditGrants } from "./audit-grants.ts";
 import { appendFact, isQuotaError } from "./harness-facts.ts";
@@ -116,9 +118,11 @@ export default function (pi: ExtensionAPI) {
   let sawInput = false;
 
   const runDir = (): string | undefined => process.env.LOOP_PI_RUN_DIR || undefined;
-  const markerPresent = (): boolean => {
+  let protocolSeen = false;
+  const protocolRequired = (): boolean => {
     const dir = runDir();
-    return dir !== undefined && existsSync(join(dir, PROTO_FILE));
+    return state.armed || (protocolSeen ||= dir !== undefined &&
+      (existsSync(join(dir, PROTO_FILE)) || snapshotProtocolRetained(dir)));
   };
 
   function triggerSync(lifecycle: boolean) {
@@ -321,7 +325,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.events.on(LOOP_CLOSEOUT_EVENT, (data) => {
-    if (!markerPresent()) return;
+    if (!protocolRequired()) return;
     const d = data as { lines?: unknown; pending?: unknown } | null;
     const lines = Array.isArray(d?.lines) ? (d.lines as string[]) : [];
     const pending = Array.isArray(d?.pending) ? (d.pending as unknown[]) : [];
@@ -339,11 +343,13 @@ export default function (pi: ExtensionAPI) {
       syncTicker.unref();
     }
     state = INITIAL_STATE;
+    protocolSeen = false;
     for (const entry of ctx.sessionManager.getBranch()) {
       if (entry.type === "custom" && entry.customType === STATE_CUSTOM_TYPE) {
         state = (entry as CustomEntry<ContinuationState>).data ?? INITIAL_STATE;
       }
     }
+    protocolRequired();
   });
 
   pi.on("message_start", (event: MessageStartEvent) => {
@@ -457,8 +463,11 @@ export default function (pi: ExtensionAPI) {
     }
     try {
       writeFileSync(join(check.runDir, PROTO_FILE), `${PROTO_VERSION}\n`);
+      protocolSeen = true;
+      const retentionError = await retainSnapshotProtocol(auditBinary(getAgentDir()), check.runDir, ctx.cwd);
+      if (retentionError) throw new Error(retentionError);
     } catch (error) {
-      refuseArm(ctx, `the protocol marker could not be written to ${check.runDir}: ${String(error)}`);
+      refuseArm(ctx, `the protocol evidence could not be retained in ${check.runDir}: ${String(error)}`);
       return { action: "handled" as const };
     }
     await arm(parsed, check, ctx);

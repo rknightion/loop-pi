@@ -1207,6 +1207,55 @@ class ProtoDefaultBranchTests(unittest.TestCase):
         self.assertNotIn("UNGRANTED", result.stdout)
         self.assertTrue(c1)
 
+    def test_deleting_the_marker_cannot_downgrade_an_armed_snapshot(self):
+        self.ready()
+        self.commit(self.other, "g.txt", "unlogged")
+        git(self.other, "push", "-q", "origin", "main")
+        os.unlink(os.path.join(self.run_dir, "loop-pi-proto"))
+        result = self.closeout(self.grants({self.repo: ["refs/heads/main", "HEAD"]}))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("UNGRANTED", result.stdout)
+        self.assertIn("ignored", result.stderr)
+
+    def test_arm_retains_pre_arm_snapshot_without_resnapshotting(self):
+        self.begin()
+        before_path = os.path.join(self.run_dir, "audit-before.json")
+        with open(before_path, encoding="utf-8") as fh:
+            original = json.load(fh)
+        self.commit(self.other, "g.txt", "unlogged before arm")
+        git(self.other, "push", "-q", "origin", "main")
+        self.proto()
+        retained = run_audit("retain-protocol", env_overrides=self.env)
+        self.assertEqual(retained.returncode, 0, retained.stdout + retained.stderr)
+        with open(before_path, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh), {**original, "protocol": 2})
+        os.unlink(os.path.join(self.run_dir, "loop-pi-proto"))
+        result = self.closeout(self.grants({self.repo: ["refs/heads/main", "HEAD"]}))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("UNGRANTED", result.stdout)
+        self.assertIn("ignored", result.stderr)
+
+    def test_protocol_retention_requires_marker_and_never_invents_a_snapshot(self):
+        result = run_audit("retain-protocol", env_overrides=self.env)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("requires the armed protocol marker", result.stderr)
+        self.proto()
+        result = run_audit("retain-protocol", env_overrides=self.env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.run_dir, "audit-before.json")))
+
+    def test_explicit_push_log_enforces_protocol_after_late_arm_marker_deletion(self):
+        # The launcher takes the initial snapshot before continuation arms the root.
+        self.begin()
+        self.proto()
+        self.commit(self.other, "g.txt", "unlogged")
+        git(self.other, "push", "-q", "origin", "main")
+        os.unlink(os.path.join(self.run_dir, "loop-pi-proto"))
+        result = self.closeout(self.grants({self.repo: ["refs/heads/main", "HEAD"]}),
+                               "--push-log", self.log_path)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("UNGRANTED", result.stdout)
+
     def test_a_foreign_commit_between_two_logged_pushes_is_flagged(self):
         self.ready()
         b = self.commit(self.repo, "f.txt", "ours one")
@@ -1369,6 +1418,27 @@ class ProtoDefaultBranchTests(unittest.TestCase):
         self.assertEqual(self.closeout(grants).returncode, 1)
         result = self.closeout(grants, "--push-log", elsewhere)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_a_push_logged_for_an_independent_clone_grants_nothing(self):
+        self.ready()
+        c = self.commit(self.other, "f.txt", "clone work")
+        self.logged_push(self.other, self.start, c, log_repo=self.other)
+        result = self.closeout(self.grants({self.repo: ["HEAD"]}))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(c[:12], result.stdout)
+
+    def test_compare_keeps_snapshot_protocol_without_run_dir(self):
+        self.ready()
+        self.commit(self.other, "g.txt", "unlogged")
+        git(self.other, "push", "-q", "origin", "main")
+        self.closeout()
+        before = os.path.join(self.run_dir, "audit-before.json")
+        after = os.path.join(self.run_dir, "audit-after.json")
+        path, digest = self.grants({self.repo: ["refs/heads/main", "HEAD"]})
+        result = run_audit("compare", before, after, "--grants", path, "--grants-sha256", digest,
+                           env_overrides=self.env)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("UNGRANTED", result.stdout)
 
     def test_a_push_logged_for_another_repo_or_ref_grants_nothing(self):
         self.ready()

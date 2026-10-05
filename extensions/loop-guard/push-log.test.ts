@@ -4,7 +4,7 @@
 // remote before the push. A failed push, or a run without the protocol marker, writes nothing.
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
@@ -49,6 +49,18 @@ function readLog(path: string): Record<string, unknown>[] {
 }
 
 const ISO_SECONDS = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/;
+
+const EXEC_PUSHES = [
+  "find . -exec git push origin main \\;",
+  "find . -execdir sh -c 'git pu\\sh origin main' \\;",
+  "git rebase -x 'git push origin main' HEAD~1",
+  'git rebase --exec="git pu\\sh origin main" HEAD~1',
+  `uv run python -c "import subprocess; subprocess.run(['git','push','origin','main'])"`,
+  `deno eval "new Deno.Command('git', {args: ['push', 'origin', 'main']}).outputSync()"`,
+  `awk 'BEGIN { system("git push origin main") }'`,
+  "watch -n 1 git push origin main",
+  "parallel git push origin ::: main",
+];
 
 test("root push log: one line per updated ref, old read before the push, nothing for a failed push", { timeout: 60_000 }, async () => {
   const { repo, remote, runDir, log } = fixture();
@@ -141,6 +153,8 @@ function pushLaneHome(): string {
   mkdirSync(join(home, "extensions", "subagent"), { recursive: true });
   writeFileSync(join(home, "settings.json"), JSON.stringify({ packages: [PI_SUBAGENTS_PACKAGE_DIR], subagents: { agentExcludeDirs: ["~/.agents"] } }));
   const config = JSON.parse(readFileSync(new URL("../../home/extensions/subagent/config.json", import.meta.url), "utf8"));
+  // The installer expands the home template; fixtures must use their own disposable root.
+  config.worktreeBaseDir = freshDir("push-log-managed-worktrees-");
   writeFileSync(join(home, "extensions", "subagent", "config.json"), JSON.stringify(config));
   writeFileSync(
     join(home, "agents", "lane-worker-push.md"),
@@ -149,16 +163,21 @@ function pushLaneHome(): string {
   return home;
 }
 
-test("lane push log: a push-granted async lane logs its pushes with its agent and lane id", { timeout: 90_000 }, async () => {
+test("lane push log: a push-granted async managed-worktree lane logs its pushes with its agent and lane id", { timeout: 90_000 }, async () => {
   const { repo, remote, runDir, log } = fixture();
+  git(repo, "push", "-q", "origin", "main");
+  git(remote, "symbolic-ref", "HEAD", "refs/heads/main");
+  const before = git(repo, "rev-parse", "HEAD");
+  const begin = runAudit(runDir, "begin", realpathSync(repo));
+  assert.equal(begin.status, 0, begin.output);
   const home = pushLaneHome();
   const script = writeFauxScript([
     {
       match: "SPAWN_LANE",
       once: true,
-      toolCalls: [{ name: "subagent", args: { agent: "lane-worker-push", task: "Lane: L7 · Task: T-3 · Tier: routine\nCHILD_PUSH", async: true } }],
+      toolCalls: [{ name: "subagent", args: { agent: "lane-worker-push", task: "Lane: L7 · Task: T-3 · Tier: routine\nCHILD_PUSH", async: true, worktree: true } }],
     },
-    { match: "CHILD_PUSH", once: true, toolCalls: [{ name: "bash", args: { command: "git push origin HEAD:refs/heads/loop/L7" } }] },
+    { match: "CHILD_PUSH", once: true, toolCalls: [{ name: "bash", args: { command: `git ${[...IDENTITY, "-c", "commit.gpgsign=false"].join(" ")} commit --allow-empty -m lane-work && git push origin HEAD:refs/heads/main` } }] },
     { match: ".*", text: "done" },
   ]);
   const session = startPiRpc({
@@ -179,13 +198,18 @@ test("lane push log: a push-granted async lane logs its pushes with its agent an
       const found = readLog(log);
       return found.length ? found : undefined;
     }, 45_000);
-    const head = git(repo, "rev-parse", "HEAD");
-    assert.equal(git(remote, "rev-parse", "refs/heads/loop/L7"), head);
+    const head = git(remote, "rev-parse", "refs/heads/main");
+    assert.notEqual(head, before, "the managed worktree pushed its own commit");
+    assert.equal(git(repo, "rev-parse", "HEAD"), before, "the main checkout stayed on its original commit");
     assert.equal(lines.length, 1, JSON.stringify(lines));
     assert.deepEqual(
       { ...lines[0], ts: "" },
-      { v: 1, ts: "", actor: "lane", agent: "lane-worker-push", lane: "L7", repo: realpathSync(repo), remote: "origin", ref: "refs/heads/loop/L7", old: null, new: head },
+      { v: 1, ts: "", actor: "lane", agent: "lane-worker-push", lane: "L7", repo: realpathSync(repo), remote: "origin", ref: "refs/heads/main", old: before, new: head },
     );
+    const closeout = runAudit(runDir, "closeout", "--push-log", log);
+    assert.equal(closeout.status, 0, closeout.output);
+    assert.doesNotMatch(closeout.output, /UNGRANTED/);
+    assert.match(closeout.output, /refs\/heads\/main.*GRANTED/);
   } finally {
     await session.close();
   }
@@ -273,6 +297,47 @@ test("lane push log: a granted lane's subprocess push is refused, so the closeou
   }
 });
 
+// Remaining root-only gap: root.ts is outside this lane's ownership. It calls planPushes but
+// not unloggedPushRefusal for bash, and its watch tools plan no pushes. This replay proves the
+// precise inline-interpreter case still lands without a ledger entry, but the audit refuses it.
+test("remaining root gap: an inline-interpreter push lands unlogged and closeout refuses it", { timeout: 60_000 }, async () => {
+  const { repo, remote, runDir, log } = fixture();
+  git(repo, "push", "-q", "origin", "main");
+  git(remote, "symbolic-ref", "HEAD", "refs/heads/main");
+  const begin = runAudit(runDir, "begin", realpathSync(repo));
+  assert.equal(begin.status, 0, begin.output);
+  const session = startPiRpc({
+    extensions: [FAUX_EXTENSION, ROOT_EXTENSION],
+    fauxScriptPath: writeFauxScript([
+      { match: "ROOT_HIDDEN_PUSH", once: true, toolCalls: [{ name: "bash", args: { command: SUBPROCESS_PUSH } }] },
+      { match: ".*", text: "done" },
+    ]),
+    agentDir: freshDir("push-log-root-gap-home-"), subagentTempRoot: freshDir(), cwd: repo,
+    env: { LOOP_PI_RUN_DIR: runDir },
+  });
+  try {
+    session.send({ id: "p", type: "prompt", message: "ROOT_HIDDEN_PUSH" });
+    const end = await session.waitFor((e) => e.type === "tool_execution_end" && e.toolName === "bash", 30_000);
+    assert.equal(end.isError, false, JSON.stringify(end));
+    await session.waitFor((e) => e.type === "agent_end", 30_000);
+    assert.equal(git(remote, "log", "-1", "--format=%s", "refs/heads/main"), "two");
+    assert.equal(readLog(log).length, 0);
+    const closeout = runAudit(runDir, "closeout", "--push-log", log);
+    assert.equal(closeout.status, 1, closeout.output);
+    assert.match(closeout.output, /UNGRANTED/);
+  } finally {
+    await session.close();
+  }
+});
+
+test("push log: exec-wrapper pushes are hidden and refused on granted lanes", () => {
+  for (const command of EXEC_PUSHES) {
+    assert.equal(hiddenPush(command), true, command);
+    assert.match(unloggedPushRefusal(command, "bash") ?? "", /push log cannot see it/, command);
+    assert.match(unloggedPushRefusal(command, "watch_process") ?? "", /not recorded/, command);
+  }
+});
+
 test("push log: a push the log cannot attribute is hidden; a literal push is not", () => {
   const hidden = [
     SUBPROCESS_PUSH,
@@ -312,6 +377,19 @@ test("lane push log: the post-exec hook reads the run dir from the binding when 
       return last;
     };
     await fire("before_agent_start", { prompt: "Lane: C2 · Task: T-9 · Tier: guarded\nObjective: x", systemPrompt: "" });
+    const watched = await fire("tool_call", { toolCallId: "watch", toolName: "watch_process", input: { command: "git pu\\sh origin HEAD:refs/heads/main" } });
+    assert.equal(watched?.block, true, JSON.stringify(watched));
+    assert.match(watched.reason, /watch_process is not recorded/);
+    assert.equal(readLog(log).length, 0);
+    for (const command of EXEC_PUSHES) {
+      const refusal = await fire("tool_call", { toolCallId: "wrapped", toolName: "bash", input: { command } });
+      assert.equal(refusal?.block, true, command);
+      assert.match(refusal.reason, /push log cannot see it/, command);
+    }
+    unlinkSync(join(runDir, "loop-pi-proto"));
+    const afterDeletion = await fire("tool_call", { toolCallId: "deleted", toolName: "watch_process", input: { command: "git push origin main" } });
+    assert.equal(afterDeletion?.block, true, "observed protocol cannot be downgraded by marker deletion");
+    assert.match(afterDeletion.reason, /watch_process is not recorded/);
     const command = "git push origin HEAD:refs/heads/main";
     const verdict = await fire("tool_call", { toolCallId: "t1", toolName: "bash", input: { command } });
     assert.equal(verdict?.block ?? false, false, verdict?.reason);
@@ -438,6 +516,57 @@ test("push log: a push from a linked worktree records the main checkout as repo"
   assert.equal(lines.length, 1, JSON.stringify(lines));
   assert.equal(lines[0].repo, realpathSync(repo));
   assert.equal(lines[0].new, git(wt, "rev-parse", "HEAD"));
+});
+
+test("push log: an escaped literal push is planned and recorded", { timeout: 30_000 }, async () => {
+  const { repo, runDir, log } = fixture();
+  const command = "git pu\\sh origin HEAD:refs/heads/main";
+  const plans = await planPushes(command, repo);
+  assert.equal(plans.length, 1);
+  execFileSync("/bin/sh", ["-c", command], { cwd: repo, timeout: 10_000 });
+  assert.equal(await recordPushes(plans, { runDir, actor: "lane", agent: "lane-worker-push", lane: "L2" }), 1);
+  assert.equal(readLog(log)[0].new, git(repo, "rev-parse", "HEAD"));
+});
+
+test("lane push log: a linked worktree push grants closeout under both snapshot paths", { timeout: 30_000 }, async () => {
+  const { repo, remote, runDir, log } = fixture();
+  git(repo, "push", "-q", "origin", "main");
+  git(remote, "symbolic-ref", "HEAD", "refs/heads/main");
+  const wt = join(freshDir("push-log-audit-wt-"), "wt");
+  git(repo, "worktree", "add", "-q", "-b", "lane-work", wt);
+  assert.equal(runAudit(runDir, "begin", wt).status, 0);
+  assert.equal(runAudit(runDir, "add", realpathSync(repo)).status, 0);
+  const saved = { ...process.env };
+  delete process.env.LOOP_PI_RUN_DIR;
+  process.env.PI_SUBAGENT_EXTENSION_BINDINGS = JSON.stringify({ "loop-pi.guard/1": { agent: "lane-worker-push", runDir } });
+  process.env.PI_CODING_AGENT_DIR = freshDir("push-log-audit-home-");
+  try {
+    const handlers = new Map<string, ((event: any, ctx: any) => any)[]>();
+    laneExtension({ on: (event: string, h: any) => void handlers.set(event, [...(handlers.get(event) ?? []), h]) } as any);
+    const fire = async (event: string, payload: Record<string, unknown>) => {
+      let last: any;
+      for (const h of handlers.get(event) ?? []) last = await h({ type: event, ...payload }, { cwd: wt });
+      return last;
+    };
+    await fire("before_agent_start", { prompt: "Lane: W1 · Tier: guarded\nfixture" });
+    git(wt, ...IDENTITY, ...NO_SIGN, "commit", "--allow-empty", "-m", "worktree change");
+    const command = "git push origin HEAD:refs/heads/main";
+    const verdict = await fire("tool_call", { toolCallId: "wt-push", toolName: "bash", input: { command } });
+    assert.equal(verdict?.block ?? false, false, verdict?.reason);
+    git(wt, "push", "-q", "origin", "HEAD:refs/heads/main");
+    await fire("tool_execution_end", { toolCallId: "wt-push", toolName: "bash", isError: false, result: { content: [] } });
+    const lines = readLog(log);
+    assert.equal(lines.length, 1, JSON.stringify(lines));
+    assert.deepEqual([lines[0].repo, lines[0].agent, lines[0].lane, lines[0].new],
+      [realpathSync(repo), "lane-worker-push", "W1", git(wt, "rev-parse", "HEAD")]);
+    const closeout = runAudit(runDir, "closeout", "--push-log", log);
+    assert.equal(closeout.status, 0, closeout.output);
+    assert.doesNotMatch(closeout.output, /UNGRANTED/);
+    assert.match(closeout.output, /refs\/heads\/main.*GRANTED/);
+  } finally {
+    for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+    Object.assign(process.env, saved);
+  }
 });
 
 // ---------------------------------------------------------------------------------------------

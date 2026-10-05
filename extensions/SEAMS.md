@@ -259,10 +259,13 @@ before any `await`. A missing reply means the provider extension is not loaded; 
 
 ## Protocol 2
 
-A root armed by this build writes `$LOOP_PI_RUN_DIR/loop-pi-proto` (`2\n`). Every new refusal and
-newly required artifact below applies only when that marker exists, so a root armed by an older
-build keeps its old behaviour after an install. Arm-time refusals cannot be gated (arming writes
-the marker). The threat model is a mistaken root or lane, not an adversarial one: edit and write
+A root armed by this build writes `$LOOP_PI_RUN_DIR/loop-pi-proto` (`2\n`). Pre-execution refusals
+remain marker-gated; a lane that observed protocol 2 retains that decision for its session. Arming
+also retains protocol evidence in the existing audit snapshot without resnapshotting remote refs.
+Deleting the marker cannot downgrade or suppress closeout, including after session restoration;
+this does not enable marker-gated root or newly loaded child refusals retroactively. A root armed
+by an older build keeps its old behaviour after an install. Arm-time refusals cannot be gated
+(arming writes the marker). The threat model is a mistaken root or lane, not an adversarial one: edit and write
 paths are exact, bash write detection is best-effort.
 
 - **Arming** happens in the `input` hook: "You are the root" plus one report path, or a bare
@@ -329,7 +332,7 @@ paths are exact, bash write detection is best-effort.
 - **loop-state**: `land` is `after-green` only (legacy `pre-green` lines still check and digest);
   `revert` by root with `reason=root-decision`; `park needs=budget`; `close reason=budget` needs a
   `compaction-failed` or `quota-exhausted` fact; judgements up to 4 KB; one `open` per log.
-- **loop-pi-audit**: under the marker a default-branch move is granted only when every commit in
+- **loop-pi-audit**: under retained protocol 2 evidence a default-branch move is granted only when every commit in
   `before..after` lies in a push-log `old..new` range for that repo and ref, touches only
   `backlog/`, or lies in a range a declared `bot_actors` login (`<login>[bot]`) itself pushed or
   merged, per GitHub's activity API; commit metadata grants nothing. A default-branch grant entry is

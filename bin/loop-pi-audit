@@ -60,7 +60,9 @@ or deletions. This attribution is independent of protocol 2 and never covers bra
 
 Anything else is UNGRANTED and named in a `note:` line. The fast-forward check still applies. A
 derived `HEAD` move follows the default branch's verdict. Other refs, tags and releases are
-unchanged. Without the marker every rule above is skipped and behaviour is as before.
+unchanged. Legacy snapshots without protocol evidence keep the old behaviour. Protocol 2 is retained in the
+before-snapshot once observed; an explicit --push-log also requires it. Deleting the marker cannot
+downgrade those audits.
 
 `--grants-sha256 HEX` (compare and closeout) is the sha256 the launch froze for the `--grants`
 file; a file whose bytes differ is refused (exit 2) before it covers anything. Under protocol 2 a
@@ -282,13 +284,16 @@ def add_to_before(args: argparse.Namespace, fresh: bool) -> int:
     # Held through the read-modify-write so concurrent adds in one run keep every repo.
     with open(os.path.join(run_dir, ".audit.lock"), "w", encoding="utf-8") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        return add_locked(before_path, repo, fresh)
+        return add_locked(before_path, repo, fresh, is_proto2(run_dir))
 
 
-def add_locked(before_path: str, repo: str, fresh: bool) -> int:
+def add_locked(before_path: str, repo: str, fresh: bool, proto: bool = False) -> int:
     if not fresh:
         with open(before_path, "r", encoding="utf-8") as fh:
             before = json.load(fh)
+        if proto and before.get("protocol") != 2:
+            before["protocol"] = 2
+            write_json(before_path, before)
         if repo in before["repos"]:
             # A later snapshot would hide every change made since the first one.
             print(f"loop-pi-audit: {repo} is already recorded in {before_path}; keeping the first snapshot.")
@@ -302,6 +307,8 @@ def add_locked(before_path: str, repo: str, fresh: bool) -> int:
         return 1
     if fresh:
         before = {"taken_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "repos": {}}
+    if proto:
+        before["protocol"] = 2
     before["repos"][repo] = entry
     write_json(before_path, before)
     print(f"loop-pi-audit: {repo} recorded in {before_path}")
@@ -314,6 +321,32 @@ def cmd_begin(args: argparse.Namespace) -> int:
 
 def cmd_add(args: argparse.Namespace) -> int:
     return add_to_before(args, fresh=False)
+
+
+def cmd_retain_protocol(args: argparse.Namespace) -> int:
+    """Arm-time upgrade of a launcher's pre-arm snapshot, never a new remote snapshot."""
+    run_dir = run_dir_of(args)
+    with open(os.path.join(run_dir, ".audit.lock"), "w", encoding="utf-8") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if not is_proto2(run_dir):
+            print("loop-pi-audit: retain-protocol requires the armed protocol marker", file=sys.stderr)
+            return 2
+        before_path = os.path.join(run_dir, "audit-before.json")
+        if not os.path.exists(before_path):
+            # No baseline is invented. A later begin observes the marker; extension closeout
+            # also retains its armed state and always supplies the explicit push-log path.
+            return 0
+        try:
+            with open(before_path, encoding="utf-8") as fh:
+                before = json.load(fh)
+            if not isinstance(before, dict) or not isinstance(before.get("repos"), dict):
+                raise ValueError("before-snapshot has no repository map")
+            before["protocol"] = 2
+            write_json(before_path, before)
+        except (OSError, ValueError) as exc:
+            print(f"loop-pi-audit: could not retain protocol: {exc}", file=sys.stderr)
+            return 2
+    return 0
 
 
 def cmd_closeout(args: argparse.Namespace) -> int:
@@ -680,13 +713,31 @@ def rev_list(repo: str, spec: str) -> list[str] | None:
     return result.stdout.split() if result.returncode == 0 else None
 
 
+def repository_identity(repo: str) -> str | None:
+    """The shared git directory, not a remote URL: linked worktrees are the same repository,
+    but independent clones sharing a remote must never inherit each other's logged pushes."""
+    try:
+        result = run(["git", "-C", repo, "rev-parse", "--path-format=absolute", "--git-common-dir"])
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return os.path.realpath(result.stdout.strip()) if result.returncode == 0 and result.stdout.strip() else None
+
+
 def logged_commits(repo: str, ref: str, push_log: list[dict]) -> set[str]:
     """Commits inside any logged `old..new` push range for this repository and ref."""
     real = os.path.realpath(repo)
+    identity = repository_identity(repo)
     covered: set[str] = set()
+    identities: dict[str, str | None] = {}
     for entry in push_log:
-        if entry["ref"] != ref or os.path.realpath(entry["repo"]) != real:
+        if entry["ref"] != ref:
             continue
+        logged_repo = os.path.realpath(entry["repo"])
+        if logged_repo != real:
+            if logged_repo not in identities:
+                identities[logged_repo] = repository_identity(logged_repo)
+            if identity is None or identities[logged_repo] != identity:
+                continue
         commits = rev_list(repo, f"{entry['old']}..{entry['new']}" if entry.get("old") else entry["new"])
         if commits:
             covered.update(commits)
@@ -947,7 +998,8 @@ def cmd_compare(args: argparse.Namespace) -> int:
         after = json.load(fh)
 
     run_dir = getattr(args, "run_dir", None)
-    proto_run = is_proto2(run_dir)
+    proto_run = (is_proto2(run_dir) or before.get("protocol") == 2 or after.get("protocol") == 2
+                 or getattr(args, "push_log", None) is not None)
     grants_sha256 = getattr(args, "grants_sha256", None)
     grants_by_repo: dict[str, list[str]] = {}
     if grants_sha256 is not None and not args.grants:
@@ -968,8 +1020,8 @@ def cmd_compare(args: argparse.Namespace) -> int:
         grants_by_repo = json.loads(raw_grants.decode("utf-8"))
     proto = None
     if proto_run:
-        log_path = getattr(args, "push_log", None) or os.path.join(run_dir, "push-log.jsonl")
-        if not os.path.isfile(log_path):
+        log_path = getattr(args, "push_log", None) or (os.path.join(run_dir, "push-log.jsonl") if run_dir else None)
+        if not log_path or not os.path.isfile(log_path):
             print(f"loop-pi-audit: warning: no push log at {log_path}; default-branch moves are granted only by "
                   "backlog-only or declared bot commits.", file=sys.stderr)
         proto = {"push_log": load_push_log(log_path)}
@@ -1056,6 +1108,10 @@ def main() -> int:
         p.add_argument("--run-dir", help="Run directory (default: $LOOP_PI_RUN_DIR).")
         p.add_argument("repo")
         p.set_defaults(func=func)
+
+    retain = sub.add_parser("retain-protocol", help="Retain the armed protocol in an existing before-snapshot without resnapshotting.")
+    retain.add_argument("--run-dir", help="Run directory (default: $LOOP_PI_RUN_DIR).")
+    retain.set_defaults(func=cmd_retain_protocol)
 
     close = sub.add_parser("closeout", help="Snapshot the run's repos again and compare.")
     close.add_argument("--run-dir", help="Run directory (default: $LOOP_PI_RUN_DIR).")

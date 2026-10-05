@@ -11,7 +11,7 @@
 // Pure apart from the injectable `ArmEnv`, so the checks are testable without a machine.
 
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { hostname } from "node:os";
 import { join, normalize } from "node:path";
@@ -19,6 +19,29 @@ import { join, normalize } from "node:path";
 export const PROTO_FILE = "loop-pi-proto";
 export const PROTO_VERSION = "2";
 export const ARM_REFUSED_CLASS = "loop-arm-refused";
+
+/** Durable protocol evidence left in the launcher snapshot, including when begin precedes arm. */
+export function snapshotProtocolRetained(runDir: string): boolean {
+  try {
+    return JSON.parse(readFileSync(join(runDir, "audit-before.json"), "utf8")).protocol === 2;
+  } catch {
+    return false;
+  }
+}
+
+/** Preserve a pre-arm baseline under the audit's own lock; do not resnapshot or invent one. */
+export function retainSnapshotProtocol(bin: string, runDir: string, cwd: string): Promise<string | null> {
+  if (!existsSync(join(runDir, "audit-before.json"))) return Promise.resolve(null);
+  return new Promise((done) => {
+    try {
+      execFile(bin, ["retain-protocol", "--run-dir", runDir], { cwd, timeout: 10_000, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
+        done(error ? String(stderr || stdout || error.message).trim() : null);
+      });
+    } catch (error) {
+      done(String(error));
+    }
+  });
+}
 
 export interface ArmEnv {
   runDir: string | undefined;

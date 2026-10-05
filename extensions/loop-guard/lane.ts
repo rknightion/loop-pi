@@ -30,10 +30,11 @@ export default function (pi: ExtensionAPI) {
   const pushGranted = hasLanePushGrant(rawBindings);
   const binding = parseLaneBinding(rawBindings);
   const ops = binding.ops;
-  // The run dir: the environment's, else the one the root bound (SEAMS S1). Protocol 2 refusals and
-  // the push log apply only while its `loop-pi-proto` marker exists (S0).
+  // The run dir: the environment's, else the one the root bound (SEAMS S1). Once observed,
+  // protocol 2 stays active for this child: deleting its marker cannot disable attribution.
   const runDir = runDirFromEnv() ?? binding.runDir;
-  const proto = () => protoActive(runDir);
+  let protocolSeen = protoActive(runDir);
+  const proto = () => (protocolSeen ||= protoActive(runDir));
   const pendingPushes = new Map<string, PlannedPush[]>();
   let laneId: string | null | undefined;
   const opsLock: Promise<OpsLock> | undefined = ops ? acquireOpsLock(ops.surface) : undefined;
