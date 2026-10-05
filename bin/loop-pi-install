@@ -334,7 +334,7 @@ def root_route(prefix: Path) -> Tuple[str, str, str]:
 
 
 def dispatch_launcher_name(launcher: str) -> str:
-    """loop-pi -> loop-pi-dispatch, loop-pi-burn -> loop-pi-dispatch-burn; other names get a -dispatch suffix."""
+    """loop-pi -> loop-pi-dispatch, loop-pi-fast -> loop-pi-dispatch-fast; other names get a -dispatch suffix."""
     if launcher == "loop-pi" or launcher.startswith("loop-pi-"):
         return "loop-pi-dispatch" + launcher[len("loop-pi"):]
     return launcher + "-dispatch"
