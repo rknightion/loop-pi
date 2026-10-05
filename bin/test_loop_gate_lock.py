@@ -173,7 +173,9 @@ class GateLockTests(unittest.TestCase):
 
 class LockPathSafetyTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="gate-path-safety-")
+        self.tmp = tempfile.TemporaryDirectory(
+            prefix="gate-path-safety-", dir=m.pwd.getpwuid(os.getuid()).pw_dir)
+        # Model an account home under trusted ancestors, not a world-writable TMPDIR.
         self.addCleanup(self.tmp.cleanup)
         self.home = Path(self.tmp.name).resolve()
         self.patch = patch.object(m.pwd, "getpwuid", return_value=SimpleNamespace(pw_dir=str(self.home)))
