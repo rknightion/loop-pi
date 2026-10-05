@@ -44,12 +44,12 @@ function makeRepo(): { repo: string; head: string; log: string; report: string }
   };
 }
 
-function harness(opts: { reportPath?: string | null; cwd: string; sessionId?: string }) {
+function harness(opts: { reportPath?: string | null; cwd: string; sessionId?: string; entries?: any[]; schedule?: (job: () => void) => ReturnType<typeof setTimeout> }) {
   const handlers = new Map<string, Handler>();
   const bus = new Map<string, ((d: unknown) => void)[]>();
   const sent: { message: any; options: any }[] = [];
   const notes: { message: string; type?: string }[] = [];
-  const entries: any[] = [];
+  const entries: any[] = opts.entries ?? [];
   const api = {
     appendEntry: (customType: string, data: unknown) => entries.push({ type: "custom", customType, data }),
     on: (event: string, handler: Handler) => void handlers.set(event, handler),
@@ -67,7 +67,7 @@ function harness(opts: { reportPath?: string | null; cwd: string; sessionId?: st
       (d as { reply: (r: unknown) => void }).reply({ reportPath: opts.reportPath, opsPath: null, ops: null }),
     );
   }
-  loopState(api as any);
+  (loopState as any)(api, opts.schedule);
   const ctx = {
     cwd: opts.cwd,
     ui: { notify: (message: string, type?: string) => notes.push({ message, type }) },
@@ -75,6 +75,7 @@ function harness(opts: { reportPath?: string | null; cwd: string; sessionId?: st
   };
   return {
     sent,
+    entries,
     notes,
     ctx,
     start: () => handlers.get("session_start")!({ type: "session_start", reason: "startup" }, ctx),
@@ -202,7 +203,8 @@ test("a terminal revived run with lost completion falls back from package lifecy
   assert.equal(events(r.log)[1].status, "failed");
 });
 
-test("a lost revived completion falls back after restart without another resume", async () => {
+for (const lifecycle of ["running", "unknown"] as const) {
+test(`restart preserves ${lifecycle} recovery and accepts later completion exactly once`, async () => {
   const r = makeRepo();
   const h = harness({ reportPath: r.report, cwd: r.repo });
   h.start();
@@ -210,20 +212,90 @@ test("a lost revived completion falls back after restart without another resume"
   h.on("subagents:rpc:v1:request", (raw) => {
     const request = raw as any;
     attempts++;
-    h.emit(`subagents:rpc:v1:reply:${request.requestId}`, { version: 1, requestId: request.requestId, success: true, data: { details: { runId: "lost" } } });
+    const asyncDir = join(r.repo, "recovery");
+    mkdirSync(asyncDir);
+    if (lifecycle === "running") writeFileSync(join(asyncDir, "status.json"), JSON.stringify({ runId: "lost", sessionId: SESS, state: "running" }));
+    h.emit(`subagents:rpc:v1:reply:${request.requestId}`, { version: 1, requestId: request.requestId, success: true, data: { details: { runId: "lost", asyncDir } } });
   });
   h.call("tc1", { agent: "lane-worker", task: BRIEF });
   h.result("tc1", "", { runId: "run1" });
   h.emit("subagent:async-complete", { runId: "run1", sessionId: SESS, results: [{ summary: "missing" }] });
   await until(() => attempts === 1);
   h.shutdown();
+  const jobs: (() => void)[] = [];
+  const restarted = harness({ reportPath: r.report, cwd: r.repo, entries: h.entries,
+    schedule: job => { jobs.push(job); return { unref() {} } as any; } });
+  restarted.on("subagents:rpc:v1:request", () => { attempts++; });
+  restarted.start();
+  await new Promise(r => setTimeout(r, 200));
+  assert.equal(events(r.log).length, 1, "restart is not terminal proof");
+  assert.equal(jobs.length, 1, "persisted asyncDir restores lifecycle reconciliation");
+  jobs.shift()!();
+  await until(() => jobs.length === 1, 1000);
+  assert.equal(events(r.log).length, 1, "running or unknown lifecycle remains pending after checking");
+  const completion = { runId: "lost", sessionId: SESS, results: [{ summary: LANE_RETURN("complete") }] };
+  restarted.emit("subagent:async-complete", completion);
+  restarted.emit("subagent:async-complete", completion);
+  await until(() => events(r.log).length === 2);
+  assert.equal(attempts, 1);
+  assert.equal(events(r.log)[1].run, "run1");
+  assert.equal(events(r.log)[1].status, "complete");
+  restarted.shutdown();
+});
+}
+
+test("restart reconciles a terminal failed child once without another resume", async () => {
+  const r = makeRepo();
+  const asyncDir = join(r.repo, "terminal");
+  mkdirSync(asyncDir);
+  writeFileSync(join(asyncDir, "status.json"), JSON.stringify({ runId: "lost", sessionId: SESS, state: "failed" }));
+  const entries = [{ type: "custom", customType: "loop-state-return-recovery", data: {
+    runId: "run1", phase: "pending", revived: "lost", asyncDir, sessionId: SESS,
+    data: { results: [{ summary: "missing" }] }, log: r.log, info: { lane: "L1" }
+  } }];
+  execFileSync(BIN, ["append", r.log, "dispatch", "lane=L1", "task=T1", "agent=lane-worker", "run=run1", "base=b"]);
+  const jobs: (() => void)[] = [];
+  const h = harness({ reportPath: r.report, cwd: r.repo, entries, schedule: job => { jobs.push(job); return { unref() {} } as any; } });
+  let attempts = 0;
+  h.on("subagents:rpc:v1:request", () => { attempts++; });
   h.start();
+  assert.equal(jobs.length, 1);
+  jobs.shift()!();
   await until(() => events(r.log).length === 2);
   h.emit("subagent:async-complete", { runId: "lost", sessionId: SESS, results: [{ summary: LANE_RETURN("complete") }] });
   await new Promise(r => setTimeout(r, 100));
-  assert.equal(attempts, 1);
   assert.equal(events(r.log).length, 2);
   assert.equal(events(r.log)[1].status, "failed");
+  assert.equal(attempts, 0);
+});
+
+test("15 unknown lifecycle checks warn but preserve pending ownership and later completion", async () => {
+  const r = makeRepo();
+  const jobs: (() => void)[] = [];
+  const schedule = (job: () => void) => { jobs.push(job); return { unref() {} } as any; };
+  const h = harness({ reportPath: r.report, cwd: r.repo, schedule });
+  h.start();
+  let attempts = 0;
+  h.on("subagents:rpc:v1:request", (raw) => {
+    attempts++;
+    const request = raw as any;
+    h.emit(`subagents:rpc:v1:reply:${request.requestId}`, { version: 1, requestId: request.requestId, success: true, data: { details: { runId: "lost", asyncDir: join(r.repo, "absent") } } });
+  });
+  h.call("tc1", { agent: "lane-worker", task: BRIEF });
+  h.result("tc1", "", { runId: "run1" });
+  h.emit("subagent:async-complete", { runId: "run1", sessionId: SESS, results: [{ summary: "missing" }] });
+  for (let i = 0; i < 15; i++) {
+    await until(() => jobs.length > 0, 1000);
+    jobs.shift()!();
+  }
+  await until(() => h.notes.some(n => n.message.includes("still lacks terminal proof")), 1000);
+  assert.equal(jobs.length, 0, "exactly fifteen checks, no unbounded poll");
+  assert.equal(events(r.log).length, 1);
+  h.emit("subagent:async-complete", { runId: "lost", sessionId: SESS, results: [{ summary: LANE_RETURN("complete") }] });
+  await until(() => events(r.log).length === 2);
+  assert.equal(attempts, 1);
+  assert.equal(events(r.log)[1].status, "complete");
+  assert.equal(events(r.log)[1].run, "run1");
 });
 
 test("the run id is read from the launch text when details carry none, and Deadline comes from the brief", async () => {
