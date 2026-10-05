@@ -348,7 +348,9 @@ describe("process group termination (compound commands)", () => {
   // same group-wide SIGTERM almost immediately. Proves the SIGKILL escalation checks the whole
   // group's liveness, not just whether our own leader/settled bookkeeping already fired.
   function stubbornGrandchildCommand(pidFile: string, sleepSeconds = 30): string {
-    return `(trap '' TERM; sleep ${sleepSeconds}) & echo $! > '${pidFile}'; wait`;
+    // Publish the child's own pid only after it ignores TERM, not the leader's $! before
+    // the child runs. exec preserves both that pid and the ignored signal in sleep.
+    return `sh -c 'trap "" TERM; echo $$ > "$1"; exec sleep "$2"' sh '${pidFile}' ${sleepSeconds} & wait`;
   }
 
   async function readGrandchildPid(pidFile: string): Promise<number> {
@@ -563,6 +565,9 @@ describe("finalising on stdio close, not leader exit", () => {
     assert.equal(result.deadlineHit, true);
     assert.ok(Date.now() - started < 5000, "must not wait for the grandchild's own 30s");
     const holder = Number(readFileSync(pidFile, "utf8").trim());
+    // Stdio can close before init reaps the SIGTERM'd holder; signal 0 still sees that zombie.
+    // Allow a bounded reap, never the holder's own 30s sleep (as in the SIGKILL test above).
+    for (let i = 0; i < 20 && isProcessAlive(holder); i++) await delay(50);
     assert.equal(isProcessAlive(holder), false, "the stdout holder must be killed with the group");
   });
 
