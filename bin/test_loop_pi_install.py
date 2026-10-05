@@ -116,6 +116,80 @@ print("PASS: PATH-invariant check/reinstall; explicit override; version drift; m
             print(result.stdout, end="")
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_homebrew_node_survives_a_keg_revision_upgrade(self):
+        # A Homebrew revision bump (26.10.0_1 -> _2) plus cleanup deletes the old Cellar path;
+        # launchers must keep working, and only a same-major replacement may be adopted.
+        import sys
+        with tempfile.TemporaryDirectory(prefix="loop-pi-node-test-") as tmp:
+            env = {**os.environ, "HOME": tmp}
+            env.pop("LOOP_PI_NODE", None)
+            driver = r'''
+import importlib.machinery, importlib.util, json, os, shutil, sys
+from pathlib import Path
+loader = importlib.machinery.SourceFileLoader("installer", sys.argv[1])
+spec = importlib.util.spec_from_loader(loader.name, loader)
+m = importlib.util.module_from_spec(spec)
+loader.exec_module(m)
+home = Path.home()
+data, bins, target = home / "data", home / "bin", home / "pi"
+brew = Path(os.path.realpath(home)) / "brew"  # macOS temp dirs sit behind /var -> /private/var
+def keg(revision, version):
+    node = brew / "Cellar/node" / revision / "bin/node"
+    node.parent.mkdir(parents=True)
+    node.write_text("#!/bin/sh\necho " + version + "\n")
+    node.chmod(0o755)
+    link = brew / "opt/node"
+    if link.is_symlink():
+        link.unlink()
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(Path("../Cellar/node") / revision)
+    (brew / "bin").mkdir(exist_ok=True)
+    if not (brew / "bin/node").is_symlink():
+        (brew / "bin/node").symlink_to(Path("../Cellar/node") / revision / "bin/node")
+    else:
+        (brew / "bin/node").unlink()
+        (brew / "bin/node").symlink_to(Path("../Cellar/node") / revision / "bin/node")
+keg("26.10.0_1", "v26.10.0")
+stable = str(brew / "opt/node/bin/node")
+m.NODE_CANDIDATES = (str(brew / "bin/node"),)
+label = m.build_label(m.source_files(), m.pins(), "the loop-pi home templates\0loop-pi-install")
+prefix = data / label
+(prefix / "home").mkdir(parents=True)
+(prefix / "home/settings.json").write_text("{}")
+(prefix / "bin").mkdir()
+for name in m.CLI_TOOLS:
+    (prefix / "bin" / name).write_text("#!/bin/sh\n")
+(prefix / m.BUILD_MANIFEST).write_text(json.dumps({"label": label, "missing_extensions": []}))
+args = ["--home", str(target), "--bin", str(bins), "--data", str(data), "--launcher", "loop-pi"]
+assert m.main(args) == 0
+record = json.loads((target / m.HOME_MANIFEST).read_text())
+assert record["node"]["path"] == stable, record
+assert "Cellar" not in (bins / "loop-pi").read_text()
+# Revision upgrade and cleanup: _1 disappears, the keg link now points at _2.
+keg("26.10.0_2", "v26.10.0")
+shutil.rmtree(brew / "Cellar/node/26.10.0_1")
+assert m.main(args + ["--check"]) == 0, "a revision upgrade must not break the home"
+import subprocess
+assert subprocess.run([str(bins / "loop-pi"), "--version"], capture_output=True).returncode == 0
+# A receipt from before this fix names the vanished Cellar path: migrate to the same-major link.
+record["node"]["path"] = str(brew / "Cellar/node/26.10.0_1/bin/node")
+(target / m.HOME_MANIFEST).write_text(json.dumps(record))
+assert m.main(args) == 0
+assert json.loads((target / m.HOME_MANIFEST).read_text())["node"]["path"] == stable
+# A different major behind the link is never adopted silently.
+record["node"]["path"] = str(brew / "Cellar/node/26.10.0_1/bin/node")
+(target / m.HOME_MANIFEST).write_text(json.dumps(record))
+keg("27.0.0", "v27.0.0")
+assert m.main(args) == 2, "a missing node must not migrate across a major version"
+launch = subprocess.run([str(bins / "loop-pi"), "--version"], capture_output=True, text=True)
+assert launch.returncode == 78 and "no longer node 26" in launch.stderr, launch
+print("PASS: keg link recorded; revision upgrade survives; same-major migration only", flush=True)
+'''
+            result = subprocess.run([sys.executable, "-c", driver, str(HERE / "loop-pi-install")],
+                                    env=env, capture_output=True, text=True, timeout=60)
+            print(result.stdout, end="")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
 
 class InstallerTests(unittest.TestCase):
     def setUp(self) -> None:
