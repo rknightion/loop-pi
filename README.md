@@ -176,8 +176,8 @@ bytes, and an unknown field's error lists the event's allowed fields.
 
 ## Limits, stated plainly
 
-- **Pinned pi.** The runtime is pinned to `@earendil-works/pi-coding-agent` 1.0.2 and
-  pi-subagents 0.75.0. The extensions use pi's extension API, which still changes between minor
+- **Pinned pi.** The runtime is pinned to `@earendil-works/pi-coding-agent` 1.0.4 and
+  pi-subagents 0.76.1. The extensions use pi's extension API, which still changes between minor
   releases; a bump means re-running the tests and a real loop, not just the installer.
 - **Not a sandbox.** loop-guard is a fence against honest mistakes, parsed from the command text.
   A determined model can get round it (an interpreter, an encoded string, a file it writes and then

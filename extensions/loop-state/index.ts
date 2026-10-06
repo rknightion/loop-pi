@@ -186,7 +186,7 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
     return r.code === 0 && sha ? sha : "unknown";
   }
 
-  // pi-subagents 0.75.0 docs/extension-api.md and src/extension/rpc.js:
+  // pi-subagents 0.76.1 docs/extension-api.md and src/extension/rpc.js:
   // resume uses the persisted child and returns data.details with a NEW async run id.
   async function resumeForBlock(runId: string, lane: string): Promise<{ id: string; asyncDir?: string } | null> {
     const requestId = randomUUID();

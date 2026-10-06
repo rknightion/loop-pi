@@ -3,8 +3,10 @@
 // Started in print mode with the S1 launch message (or a launch file path) as the prompt. The
 // `input` handler runs the whole loop and returns `handled`, so the prompt never reaches a model and
 // the process lives exactly as long as the loop. pi-subagents still asks for a turn on each
-// completion (triggerTurn); the session's model is this extension's in-process `loop-dispatch/idle`
-// provider, which answers with an empty stop and never makes a network request.
+// completion: while the loop runs the session is idle, so it appends the notice and sends its
+// `Subagent updates above.` wake prompt, which this handler lets through. The session's model is
+// this extension's in-process `loop-dispatch/idle` provider, which answers with an empty stop and
+// never makes a network request.
 //
 // Lanes go through pi-subagents' RPC `spawn` after loop-guard's subagent rule and identity binding.
 // The lane guards are registered as required child extensions, fail closed. Every S2 event,
@@ -12,8 +14,9 @@
 // not loaded in a dispatcher session.
 // Before `loopPi.onClose` it commits the backlog Done edits with `git commit -- backlog`, unpushed.
 // The completion pi-subagents injects for each lane is capped like a model root's (S6,
-// ../loop-state/return-cap.ts): the scheduler reads the full text from the async-complete payload,
-// and the session keeps only the capped message.
+// ../loop-state/return-cap.ts) when pi hands it to `message_end`: the scheduler reads the full text
+// from the async-complete payload. An idle-wake notice reaches no extension message event; the lane
+// has already capped its own return to fit (S6, loop-guard's lane entry).
 
 import { execFile } from "node:child_process";
 import { randomUUID, createHash } from "node:crypto";
@@ -27,6 +30,7 @@ import { registerRequiredChildExtensions } from "pi-subagents/required-child-ext
 import { composedGate as findComposedGate, dispatcherEligible, effectiveTier, guardedExtra, parseGoal, parseLoopMd, type TaskSpec } from "./goal.ts";
 import { guardSpawn } from "./guard.ts";
 import { parseLaunch } from "./launch.ts";
+import { isParentWake } from "../loop-continuation/state.ts";
 import { Dispatcher, type CloseReason, type Ports } from "./scheduler.ts";
 import { capNotifyMessage } from "../loop-state/return-cap.ts";
 
@@ -317,7 +321,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.on("input", async (event) => {
-    if (started) return { action: "handled" as const };
+    if (started) return isParentWake(event) ? { action: "continue" as const } : { action: "handled" as const };
     started = true;
     const result = await runLoop(event.text);
     process.stderr.write(`${result.message}\n`);

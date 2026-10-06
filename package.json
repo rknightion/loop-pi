@@ -12,8 +12,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "1.0.2",
-    "pi-subagents": "0.75.0"
+    "@earendil-works/pi-coding-agent": "1.0.4",
+    "pi-subagents": "0.76.1"
   },
   "devDependencies": {
     "@types/node": "26.6.4",

@@ -21,6 +21,7 @@ import { parseLaneBinding } from "./ops.ts";
 import { acquireOpsLock, type OpsLock } from "./ops-lock.ts";
 import { bashProtectedPath, isLoopControlToolPath, protoActive, runDirFromEnv, toolWriteRefusal } from "./guard-paths.ts";
 import { laneIdFromBrief, planPushes, recordPushes, unloggedPushRefusal, type PlannedPush } from "./push-log.ts";
+import { capLaneAssistantMessage } from "../loop-state/return-cap.ts";
 
 export { isLoopControlToolPath };
 
@@ -113,6 +114,19 @@ export default function (pi: ExtensionAPI) {
   // The lane id for the push log, from the brief's `Lane:` header (the first prompt).
   pi.on("before_agent_start", (event) => {
     if (laneId === undefined) laneId = laneIdFromBrief(typeof event.prompt === "string" ? event.prompt : "");
+  });
+
+  // Lane return cap (SEAMS S6): the root cannot cap an idle-wake notify, so the lane caps its own
+  // final text, keeping the full copy under the run dir. A failure leaves the message whole.
+  pi.on("message_end", (event, ctx: ExtensionContext) => {
+    try {
+      const key = laneId ?? ctx.sessionManager.getSessionId();
+      const replacement = capLaneAssistantMessage(event.message as { role?: string; content?: unknown; stopReason?: unknown }, runDir, key);
+      if (replacement) return { message: replacement as typeof event.message };
+    } catch {
+      // An uncapped return is better than a lost one.
+    }
+    return undefined;
   });
 
   // Post-exec hook: a successful bash call that pushed appends to the run dir's push log.

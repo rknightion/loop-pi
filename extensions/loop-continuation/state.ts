@@ -10,6 +10,15 @@ export const NUDGE_CUSTOM_TYPE = "loop-continuation";
 /** Custom message types that start a root turn by pushing new work (SEAMS.md "Names and paths"). */
 export const PUSH_CUSTOM_TYPES: ReadonlySet<string> = new Set(["subagent-notify", "loop-watch", "loop-wake", "loop-closeout-audit"]);
 
+/**
+ * pi-subagents' wake for an idle parent (its `src/shared/parent-wake.js`, not exported): the
+ * notice is appended with no extension `message_start`/`message_end`, then this extension-sourced
+ * user message starts the turn. A busy parent still gets the notice as a steer, with message events.
+ */
+export const PARENT_WAKE_TEXT = "Subagent updates above.";
+export const isParentWake = (event: { source?: string; text?: string }): boolean =>
+  event.source === "extension" && event.text === PARENT_WAKE_TEXT;
+
 export const MAX_NUDGES = 3;
 
 /**

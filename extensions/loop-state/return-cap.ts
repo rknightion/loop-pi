@@ -9,7 +9,12 @@
 // from a reference-only marker that is the first line of the lane's output. Never from free text in
 // the return body: a lane can write any line there, and a wrong path loses the full text.
 //
-// Pure apart from `capNotifyContent`'s file write. Nothing here parses the `return` event: callers
+// pi-subagents 0.76.1 appends an idle root's notify with no extension `message_end`, so the root
+// cannot cap it there. Every lane therefore caps its own final text first (`capLaneAssistantMessage`,
+// loop-guard's lane entry) to LANE_RETURN_CAP_BYTES, leaving room under RETURN_CAP_BYTES for the
+// notify's own lines, and writes the full text to `<run dir>/returns/lane-<key>-<hash>.md`.
+//
+// Pure apart from `capNotifyContent`'s and `capLaneAssistantMessage`'s file writes. Nothing here parses the `return` event: callers
 // parse it from the full text (the async-complete payload) before the message is rewritten.
 
 import { createHash } from "node:crypto";
@@ -20,6 +25,8 @@ export const NOTIFY_CUSTOM_TYPE = "subagent-notify";
 export const RETURN_CAP_BYTES = 16_384;
 export const HEAD_BYTES = 6_144;
 export const TAIL_BYTES = 8_192;
+/** A lane's final text over this is capped in the lane; the rest of RETURN_CAP_BYTES is the notify's framing. */
+export const LANE_RETURN_CAP_BYTES = RETURN_CAP_BYTES - 2_048;
 
 const LANE_RETURN_RE = /```lane-return[^\n]*\n[\s\S]*?```/g;
 
@@ -56,10 +63,10 @@ export function markerLine(omitted: number, fullPath: string): string {
   return `[... ${omitted} bytes omitted; full return: ${fullPath} ...]`;
 }
 
-/** The capped form of `text`, or null when it is within the cap. `fullPath` is named in the marker line. */
-export function capText(text: string, fullPath: string): string | null {
+/** The capped form of `text`, or null when it is within `limit`. `fullPath` is named in the marker line. */
+export function capText(text: string, fullPath: string, limit = RETURN_CAP_BYTES): string | null {
   const buf = Buffer.from(text, "utf8");
-  if (buf.length <= RETURN_CAP_BYTES) return null;
+  if (buf.length <= limit) return null;
   const head = headBytes(buf, HEAD_BYTES);
   const tail = tailBytes(buf, TAIL_BYTES);
   const tailStart = buf.length - tail.length;
@@ -198,4 +205,37 @@ export function capNotifyMessage<M extends { role?: string; customType?: string;
   if (message.role !== "custom" || message.customType !== NOTIFY_CUSTOM_TYPE) return undefined;
   const capped = capNotifyContent(contentText(message.content), runDir, completion);
   return capped ? { ...message, content: capped.text } : undefined;
+}
+
+type AssistantPart = { type?: string; text?: unknown };
+
+/**
+ * The capped replacement for a lane's final assistant message, or undefined to leave it alone: a
+ * message that calls a tool or ended in error, text within LANE_RETURN_CAP_BYTES, no run dir, or a
+ * full copy that could not be written. Text parts are joined as pi-subagents' final output joins
+ * them and become one capped text part after the other parts.
+ */
+export function capLaneAssistantMessage<M extends { role?: string; content?: unknown; stopReason?: unknown }>(
+  message: M,
+  runDir: string | undefined,
+  key: string,
+): M | undefined {
+  if (message.role !== "assistant" || message.stopReason === "error" || !Array.isArray(message.content)) return undefined;
+  const parts = message.content as AssistantPart[];
+  if (parts.some((p) => p?.type === "toolCall")) return undefined;
+  const text = parts.filter((p) => p?.type === "text" && typeof p.text === "string").map((p) => p.text as string).join("\n");
+  if (Buffer.byteLength(text, "utf8") <= LANE_RETURN_CAP_BYTES) return undefined;
+  if (!runDir || !existsSync(runDir)) return undefined;
+  const dir = join(runDir, "returns");
+  const safeKey = key.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 80) || "lane";
+  const fullPath = join(dir, `lane-${safeKey}-${createHash("sha256").update(text).digest("hex").slice(0, 16)}.md`);
+  try {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(fullPath, text);
+  } catch {
+    return undefined;
+  }
+  const capped = capText(text, fullPath, LANE_RETURN_CAP_BYTES);
+  if (capped === null) return undefined;
+  return { ...message, content: [...parts.filter((p) => p?.type !== "text"), { type: "text", text: capped }] };
 }

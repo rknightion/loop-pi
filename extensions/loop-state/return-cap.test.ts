@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import loopState from "./index.ts";
-import { capNotifyContent, capText, completionInfo, HEAD_BYTES, RETURN_CAP_BYTES, TAIL_BYTES } from "./return-cap.ts";
+import { capLaneAssistantMessage, capNotifyContent, capText, completionInfo, HEAD_BYTES, LANE_RETURN_CAP_BYTES, RETURN_CAP_BYTES, TAIL_BYTES } from "./return-cap.ts";
 
 const dirs: string[] = [];
 after(() => dirs.forEach((d) => rmSync(d, { recursive: true, force: true })));
@@ -152,4 +152,32 @@ test("the loop-state extension caps with the saved output recorded from the asyn
     if (previous === undefined) delete process.env.LOOP_PI_RUN_DIR;
     else process.env.LOOP_PI_RUN_DIR = previous;
   }
+});
+
+test("a lane caps its own oversized final text with room for the notify's lines, keeping the block and the full copy", () => {
+  const runDir = fresh();
+  const huge = `Done.\n${BLOCK}\n${"log line\n".repeat(5_000)}END`;
+  const message = { role: "assistant", stopReason: "stop", content: [{ type: "thinking", thinking: "t" }, { type: "text", text: huge }] };
+  const capped = capLaneAssistantMessage(message, runDir, "L1 / lane");
+  assert.ok(capped);
+  const parts = capped.content as { type: string; text?: string }[];
+  assert.deepEqual(parts.map((p) => p.type), ["thinking", "text"]);
+  const text = parts[1].text!;
+  assert.ok(Buffer.byteLength(text) <= LANE_RETURN_CAP_BYTES + 512 && Buffer.byteLength(text) < RETURN_CAP_BYTES - 1_024, `${Buffer.byteLength(text)} bytes`);
+  assert.ok(text.includes(BLOCK) && text.endsWith("END"));
+  const full = /full return: (\S+) \.\.\.\]/.exec(text)![1];
+  assert.ok(full.startsWith(join(runDir, "returns", "lane-L1___lane-")), full);
+  assert.equal(readFileSync(full, "utf8"), huge);
+});
+
+test("a lane message that calls a tool, ended in error, fits, or has no run dir is left whole", () => {
+  const runDir = fresh();
+  const huge = "x".repeat(LANE_RETURN_CAP_BYTES + 1);
+  const text = (t: string) => [{ type: "text", text: t }];
+  assert.equal(capLaneAssistantMessage({ role: "assistant", content: [...text(huge), { type: "toolCall", name: "bash" }] }, runDir, "k"), undefined);
+  assert.equal(capLaneAssistantMessage({ role: "assistant", stopReason: "error", content: text(huge) }, runDir, "k"), undefined);
+  assert.equal(capLaneAssistantMessage({ role: "assistant", content: text("x".repeat(LANE_RETURN_CAP_BYTES)) }, runDir, "k"), undefined);
+  assert.equal(capLaneAssistantMessage({ role: "assistant", content: text(huge) }, undefined, "k"), undefined);
+  assert.equal(capLaneAssistantMessage({ role: "user", content: text(huge) }, runDir, "k"), undefined);
+  assert.ok(capLaneAssistantMessage({ role: "assistant", content: text(huge) }, runDir, "k"));
 });

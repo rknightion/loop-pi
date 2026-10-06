@@ -2380,7 +2380,7 @@ export function evaluateSubagentCall(input: SubagentInput): Decision {
   // pi-subagents' own guidance asks for one workflow call holding
   // every child. Appendix C launches each lane as its own async call instead:
   // only single-agent launches get the checkpoint steer before `timeoutMs`,
-  // and each lane's completion wakes the root separately. pi-subagents 0.75.0
+  // and each lane's completion wakes the root separately. pi-subagents 0.76.1
   // carries a workflow in one `workflow` field (`true` for the reply's js
   // block, a path, or a named resource); the removed `workflowScript` /
   // `workflowScriptPath` stay listed as a backstop. `action: "validate"` with

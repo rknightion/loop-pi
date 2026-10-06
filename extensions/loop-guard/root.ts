@@ -29,7 +29,7 @@ export const ROOT_BASH_TIMEOUT_MAX_S = 900;
 /** Custom messages that wake the root: a lane return, a watcher exit and a fired timer. */
 const WAKE_MESSAGES: ReadonlySet<string> = new Set(["subagent-notify", "loop-watch", "loop-wake"]);
 
-/** The run id of an async launch from its tool result (pi-subagents 0.75.0): `details.runId`, else
+/** The run id of an async launch from its tool result (pi-subagents 0.76.1): `details.runId`, else
  *  `details.asyncId`, else the `Async: <agent> [<id>]` text. */
 export function launchedRunId(result: unknown): string | undefined {
   const r = result as { details?: { runId?: unknown; asyncId?: unknown }; content?: { type?: string; text?: unknown }[] } | undefined;
@@ -53,9 +53,10 @@ export default function (pi: ExtensionAPI) {
   const statusSinceWake = new Set<string>();
   const wake = () => statusSinceWake.clear();
 
-  let asyncRunsActive = 0;
   // Tool call ids of qualifying async launches whose tool execution has not ended yet.
   const pendingAsyncLaunches = new Set<string>();
+  // Async runs those launches started, by run id, until `subagent:async-complete`.
+  const activeAsyncRuns = new Set<string>();
   let childRegistration: { dispose(): void } | undefined;
   // Fail closed (course correction, main thread, 2026-09-27): if
   // registerRequiredChildExtensions ever throws, children can no longer be
@@ -89,6 +90,7 @@ export default function (pi: ExtensionAPI) {
     if (!runId) return;
     completedRuns.add(runId);
     runningOps.delete(runId);
+    activeAsyncRuns.delete(runId);
   });
 
   pi.on("session_start", (_event, ctx: ExtensionContext) => {
@@ -129,23 +131,17 @@ export default function (pi: ExtensionAPI) {
   });
 
   // Tracks "is any async subagent run active" for the watch_process root rule
-  // (SEAMS.md cross-extension contract: loop-guard owns this itself). This is
-  // a conservative approximation, not an exact scheduler: it increments on
-  // every qualifying async launch and decrements by one per `subagent-notify`
-  // completion message, even though one notify message can report several
-  // completed runs batched together. That asymmetry only ever makes the flag
-  // stay "active" longer than strictly necessary, which is the safe direction
-  // for a rule whose purpose is "don't block a pushed completion".
-  //
-  // Launches are tracked by tool call id until their tool execution ends. A tracked launch that
-  // ends in error started no run, so no subagent-notify will ever release it: it is released
-  // here instead. Only a tracked id is released, and only once, so an error from any other
-  // call, or a repeated end event, never lowers the count.
+  // (SEAMS.md cross-extension contract: loop-guard owns this itself). A qualifying async launch
+  // is tracked by tool call id until its tool execution ends, then by the run id it reported until
+  // `subagent:async-complete` names that run. The completion event fires whether the root was busy
+  // or idle; an idle root's `subagent-notify` reaches no extension message event (pi-subagents
+  // 0.76.1 parent wake), so it cannot be the release. A launch that ends in error started no run
+  // and is dropped; one that succeeded without a run id can never be seen completing, so it stays
+  // active for the session, which is the safe direction for a rule whose purpose is "don't block a
+  // pushed completion".
   pi.on("tool_execution_start", (event) => {
     if (event.toolName === "subagent" && isAsyncSubagentLaunch(event.args ?? {})) {
-      if (pendingAsyncLaunches.has(event.toolCallId)) return;
       pendingAsyncLaunches.add(event.toolCallId);
-      asyncRunsActive += 1;
     }
   });
 
@@ -163,15 +159,14 @@ export default function (pi: ExtensionAPI) {
         runningOps.set(`call:${event.toolCallId}`, surface);
       }
     }
-    if (!pendingAsyncLaunches.delete(event.toolCallId)) return;
-    if (event.isError) asyncRunsActive = Math.max(0, asyncRunsActive - 1);
+    if (!pendingAsyncLaunches.delete(event.toolCallId) || event.isError) return;
+    const runId = launchedRunId(event.result);
+    if (runId === undefined) activeAsyncRuns.add(`call:${event.toolCallId}`);
+    else if (!completedRuns.has(runId)) activeAsyncRuns.add(runId);
   });
 
   pi.on("message_end", (event) => {
     const message = event.message as { role?: string; customType?: string };
-    if (message.role === "custom" && message.customType === "subagent-notify") {
-      asyncRunsActive = Math.max(0, asyncRunsActive - 1);
-    }
     if (message.role === "custom" && typeof message.customType === "string" && WAKE_MESSAGES.has(message.customType)) wake();
   });
 
@@ -316,7 +311,7 @@ export default function (pi: ExtensionAPI) {
     }
 
     if (event.toolName === "watch_process") {
-      const decision = evaluateWatchProcess(asyncRunsActive > 0);
+      const decision = evaluateWatchProcess(pendingAsyncLaunches.size + activeAsyncRuns.size > 0);
       if (decision.block) {
         return { block: true, reason: decision.reason };
       }

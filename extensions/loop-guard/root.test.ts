@@ -215,24 +215,46 @@ test("root tool_call: watch_process blocked while an async subagent run is activ
   assert.match(result?.reason ?? "", /async subagent run is active/);
 });
 
-test("root tool_call: watch_process allowed again after a subagent-notify completion", async () => {
-  const { api, handlers } = fakeApi();
-  rootExtension(api as any);
-  const toolExecStart = handlers.get("tool_execution_start")![0];
-  const messageEnd = handlers.get("message_end")![0];
-  const handler = toolCallHandler(handlers);
+test("root tool_call: watch_process allowed again once its run's async-complete arrives", async () => {
+  // pi-subagents 0.76.1 appends an idle root's subagent-notify with no extension message events,
+  // so only the completion event can release the run.
+  const fake = fakeApi();
+  rootExtension(fake.api as any);
+  const toolExecStart = fake.handlers.get("tool_execution_start")![0];
+  const toolExecEnd = fake.handlers.get("tool_execution_end")![0];
+  const handler = toolCallHandler(fake.handlers);
+  const { ctx } = fakeCtx(agentDir);
+  const watch = () => handler({ type: "tool_call", toolCallId: "w", toolName: "watch_process", input: { command: "ls" } }, ctx);
+
+  toolExecStart({ type: "tool_execution_start", toolCallId: "1", toolName: "subagent", args: { agent: "mapper", task: "x" } }, ctx);
+  toolExecEnd({ type: "tool_execution_end", toolCallId: "1", toolName: "subagent", result: { details: { asyncId: "run-1" } }, isError: false }, ctx);
+  assert.equal((await watch())?.block, true, "the started run is still active");
+
+  fake.emit("subagent:async-complete", { runId: "other-run" });
+  assert.equal((await watch())?.block, true, "another run's completion releases nothing");
+
+  fake.emit("subagent:async-complete", { runId: "run-1" });
+  assert.equal((await watch())?.block ?? false, false);
+});
+
+test("root tool_call: a completion that arrives before its launch's tool execution ends is not lost", async () => {
+  const fake = fakeApi();
+  rootExtension(fake.api as any);
+  const toolExecStart = fake.handlers.get("tool_execution_start")![0];
+  const toolExecEnd = fake.handlers.get("tool_execution_end")![0];
+  const handler = toolCallHandler(fake.handlers);
   const { ctx } = fakeCtx(agentDir);
 
   toolExecStart({ type: "tool_execution_start", toolCallId: "1", toolName: "subagent", args: { agent: "mapper", task: "x" } }, ctx);
-  messageEnd({ type: "message_end", message: { role: "custom", customType: "subagent-notify", content: "done", display: true, timestamp: 0 } }, ctx);
+  fake.emit("subagent:async-complete", { runId: "run-1" });
+  toolExecEnd({ type: "tool_execution_end", toolCallId: "1", toolName: "subagent", result: { details: { asyncId: "run-1" } }, isError: false }, ctx);
 
-  const result = await handler({ type: "tool_call", toolCallId: "2", toolName: "watch_process", input: { command: "ls" } }, ctx);
+  const result = await handler({ type: "tool_call", toolCallId: "w", toolName: "watch_process", input: { command: "ls" } }, ctx);
   assert.equal(result?.block ?? false, false);
 });
 
 test("root tool_call: an async launch that ends in error no longer counts as an active run", async () => {
-  // A launch that fails never produces a subagent-notify, so without tracking it by tool call id
-  // the counter stays above zero and watch_process is blocked for the rest of the session.
+  // A launch that fails starts no run, so no completion will ever release it.
   const { api, handlers } = fakeApi();
   rootExtension(api as any);
   const toolExecStart = handlers.get("tool_execution_start")![0];
@@ -259,7 +281,7 @@ test("root tool_call: only a tracked failed launch releases the count, never an 
   const handler = toolCallHandler(handlers);
   const { ctx } = fakeCtx(agentDir);
 
-  // Launch A succeeds and is still running (its notify has not arrived).
+  // Launch A succeeds and is still running (its completion has not arrived).
   toolExecStart({ type: "tool_execution_start", toolCallId: "a", toolName: "subagent", args: { agent: "mapper", task: "x" } }, ctx);
   toolExecEnd({ type: "tool_execution_end", toolCallId: "a", toolName: "subagent", result: {}, isError: false }, ctx);
   // Failures of calls that were never counted: another tool, and an unknown subagent call id.
@@ -417,7 +439,7 @@ function opsRoot(ops?: unknown) {
   const end = fake.handlers.get("tool_execution_end")![0];
   const launch = (toolCallId: string, input: Record<string, unknown>) =>
     handler({ type: "tool_call", toolCallId, toolName: "subagent", input }, ctx);
-  // The tool result shape pi-subagents 0.75.0 returns for a single async launch (async-execution.js).
+  // The tool result shape pi-subagents 0.76.1 returns for a single async launch (async-execution.js).
   const started = (toolCallId: string, runId: string) =>
     end(
       {

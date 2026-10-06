@@ -137,7 +137,8 @@ class InstalledLoopSmoke(unittest.TestCase):
                 # The armed launch now opens a state log, so the one nudge is the close-out one.
                 {'match': '^## TURN ENDINGS|^close out:', 'once': True, 'toolCalls': [tool('write', path=report, content=report_body)]},
                 {'match': 'Successfully wrote', 'text': 'Smoke report is written.'},
-                {'match': 'completed|Completed|finished', 'text': 'The child returned; work is still owed.'},
+                # The faux model reads only the latest message: an idle root's turn starts on pi-subagents' wake line.
+                {'match': r'completed|Completed|finished|^Subagent updates above\.$', 'text': 'The child returned; work is still owed.'},
                 {'match': '.*', 'text': 'PAUSED: waiting for the smoke child'},
             ]}).replace('"async_":', '"async":'))
             env['LOOP_PI_FAUX_SCRIPT'] = str(script)
@@ -203,11 +204,13 @@ class InstalledLoopSmoke(unittest.TestCase):
                 print('step 4: async granted lane committed and pushed its HEAD', flush=True)
                 notify = rpc.wait(lambda e: e.get('type') == 'message_end' and e.get('message', {}).get('customType') == 'subagent-notify', 'step 5 completion wake disabled', index)
                 notify_index = rpc.events.index(notify)
-                # RPC emits agent_start before replaying the pushed custom message.
-                starts = [i for i in range(index, notify_index) if rpc.events[i].get('type') == 'agent_start']
-                self.assertTrue(starts, 'step 5 completion did not start a root turn')
-                settled = max(i for i in range(index, starts[-1]) if rpc.events[i].get('type') == 'agent_end')
+                # pi-subagents 0.76.1: the idle root's notice is appended, then its wake prompt starts the turn.
+                settled = max(i for i in range(index, notify_index) if rpc.events[i].get('type') == 'agent_end')
                 self.assertFalse(any(e.get('type') == 'message_start' and e.get('message', {}).get('role') == 'assistant' for e in rpc.events[settled + 1:notify_index]))
+                wake = rpc.wait(lambda e: e.get('type') == 'message_start' and e.get('message', {}).get('role') == 'user' and 'Subagent updates above.' in json.dumps(e.get('message', {}).get('content')), 'step 5 wake prompt', notify_index)
+                wake_index = rpc.events.index(wake)
+                self.assertFalse(any(e.get('type') == 'message_start' and e.get('message', {}).get('role') == 'assistant' for e in rpc.events[notify_index:wake_index]))
+                rpc.wait(lambda e: e.get('type') == 'agent_start', 'step 5 completion did not start a root turn', notify_index)
                 print('step 5: subagent-notify automatically starts next root turn', flush=True)
                 rpc.wait(lambda e: e.get('type') == 'entry_appended' and e.get('entry', {}).get('customType') == 'loop-continuation', 'step 6 continuation nudge disabled', notify_index)
                 written = rpc.wait(lambda e: e.get('type') == 'tool_execution_end' and e.get('toolName') == 'write', 'step 7 report write', notify_index)

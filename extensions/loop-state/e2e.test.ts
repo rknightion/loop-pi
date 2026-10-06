@@ -19,6 +19,7 @@ import {
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const STATE_EXTENSION = join(HERE, "index.ts");
+const GUARD_ROOT_EXTENSION = join(HERE, "..", "loop-guard", "root.ts");
 const BIN = join(HERE, "..", "..", "bin", "loop-state");
 
 after(() => cleanupAll());
@@ -229,7 +230,9 @@ test("S6: a 3.37 MB lane return reaches the root at 16 KB or less with its lane-
   const previous = process.env.LOOP_PI_RUN_DIR;
   process.env.LOOP_PI_RUN_DIR = runDir;
   const session = startPiRpc({
-    extensions: [FAUX_EXTENSION, STATE_EXTENSION, s.stub],
+    // loop-guard's root registers its lane entry in every child; the lane caps its own return,
+    // since an idle root's notify reaches no extension message_end (pi-subagents 0.76.1).
+    extensions: [FAUX_EXTENSION, STATE_EXTENSION, GUARD_ROOT_EXTENSION, s.stub],
     fauxScriptPath: fauxScript,
     agentDir: s.agentDir,
     subagentTempRoot: freshDir("loop-state-e2e-sub-"),

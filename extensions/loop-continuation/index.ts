@@ -45,6 +45,7 @@ import {
   type ArmedTimer,
   type ContinuationState,
   INITIAL_STATE,
+  isParentWake,
   NUDGE_CUSTOM_TYPE,
   PUSH_CUSTOM_TYPES,
   STATE_CUSTOM_TYPE,
@@ -449,6 +450,11 @@ export default function (pi: ExtensionAPI) {
   // Arming happens here, not in before_agent_start: only `input` can stop the model turn (S3).
   pi.on("input", async (event, ctx) => {
     triggerSync(false);
+    // The notice before an idle-parent wake reached no message_start, so the wake is the push.
+    if (isParentWake(event)) {
+      pushDetected = true;
+      return { action: "continue" as const };
+    }
     const first = !sawInput;
     sawInput = true;
     const parsed = parseLaunch(event.text, ctx.cwd, new Date().toISOString());

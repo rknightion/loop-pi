@@ -1,5 +1,5 @@
 // Test-only companion extension. Emits the `subagent:async-started` payload the way pi-subagents
-// 0.75.0 does: `sessionId` is the parent's session FILE PATH (`getSessionFile() ?? getSessionId()`),
+// 0.76.1 does: `sessionId` is the parent's session FILE PATH (`getSessionFile() ?? getSessionId()`),
 // `deadlineAt` is epoch milliseconds, `task` is redacted, and the event fires before any tool result.
 // Then emits `subagent:async-complete` for run "run-a" only, so run "run-b" is left to fire.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
