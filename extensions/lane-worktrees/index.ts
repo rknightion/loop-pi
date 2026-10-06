@@ -4,8 +4,9 @@
 // Only root land/park or explicit closeout releases clean terminal trees; quit/reload and child
 // completion do not. Opaque allocation metadata is mapped back to original lane/task in state.
 //
-// Only `cwd`, `isolation` and `worktree` are touched; loop-guard's rewrite is `extensionBindings`.
-// Both handlers mutate the same input object, so their order does not matter.
+// Retention touches `cwd`, `isolation` and `worktree`. Governed native/default allocations instead
+// bind an opaque `lane.key` through the pinned package's public naming seam, keeping the original
+// lane/task/run mapping in extension state. Brief text and guard-owned `extensionBindings` stay intact.
 //
 // A worktree with uncommitted changes (`git status --porcelain` not empty) is never removed: it is
 // kept and named "kept dirty" in the warning and the sweep line. After a session start (reload or
@@ -19,8 +20,8 @@ import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import type { CustomEntry, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { deriveLogPath } from "../loop-state/core.ts";
-import { landParkEvents, laneBranch, lanePath, launchedRunId, parseLaneBrief, safeLaneId, STATE_CUSTOM_TYPE } from "./core.ts";
+import { deriveLogPath, parseBrief } from "../loop-state/core.ts";
+import { landParkEvents, laneBranch, lanePath, launchedRunId, nativeLaneKey, parseLaneBrief, safeLaneId, STATE_CUSTOM_TYPE } from "./core.ts";
 import { relativeGitdir } from "./metadata.ts";
 import { allocationIdentity, confinedPath, prepareParent, registerAllocation, verifyAllocation, verifyRunCwd, type AllocationIdentity } from "./identity.ts";
 
@@ -53,7 +54,15 @@ interface Tree {
   keptUnknown?: boolean;
 }
 
+interface NativeName {
+  key: string;
+  lane: string;
+  task: string;
+  runs: string[];
+}
+
 interface Persisted {
+  nativeNames?: NativeName[];
   trees: Tree[];
   lastSeq: number | null;
   retiredRuns?: string[];
@@ -117,6 +126,8 @@ function real(path: string): string {
 export default function (pi: ExtensionAPI) {
   const trees = new Map<string, Tree>();
   const retiredRuns = new Set<string>();
+  const nativeNames = new Map<string, NativeName>();
+  const pendingNames = new Map<string, string>();
   let lastSeq: number | null = null;
   let sessionKey = "";
   let lastCtx: ExtensionContext | null = null;
@@ -136,7 +147,7 @@ export default function (pi: ExtensionAPI) {
   };
 
   function persist() {
-    const data: Persisted = { trees: [...trees.values()], lastSeq, retiredRuns: [...retiredRuns] };
+    const data: Persisted = { trees: [...trees.values()], lastSeq, retiredRuns: [...retiredRuns], nativeNames: [...nativeNames.values()] };
     try {
       pi.appendEntry(STATE_CUSTOM_TYPE, data);
     } catch {
@@ -337,6 +348,8 @@ export default function (pi: ExtensionAPI) {
     sessionKey = ctx.sessionManager.getSessionFile?.() ?? ctx.sessionManager.getSessionId();
     trees.clear();
     retiredRuns.clear();
+    nativeNames.clear();
+    pendingNames.clear();
     live.clear();
     unknown.clear();
     lastSeq = null;
@@ -347,6 +360,8 @@ export default function (pi: ExtensionAPI) {
         for (const tree of data?.trees ?? []) trees.set(tree.lane, tree);
         retiredRuns.clear();
         for (const id of data?.retiredRuns ?? []) retiredRuns.add(id);
+        nativeNames.clear();
+        for (const name of data?.nativeNames ?? []) nativeNames.set(name.key, name);
         lastSeq = typeof data?.lastSeq === "number" ? data.lastSeq : null;
       }
     }
@@ -376,17 +391,41 @@ export default function (pi: ExtensionAPI) {
         const cwd = tree.runCwds?.[id];
         if (!verifyRunCwd(tree.path, cwd)) return { block: true, reason: "lane-worktrees: resume refused because recorded cwd is missing, linked, invalid or outside the retained worktree." };
         pending.set(event.toolCallId, { lane: tree.lane, created: false, branchCreated: false, cwd: cwd! });
+      } else if (target) {
+        // Native allocations keep package-owned revival/cleanup. Record a successful revival's
+        // new run id against its original safe naming identity; never relabel an existing ref.
+        const names = [...nativeNames.values()].filter((name) => name.runs.some((id) => id === target || id.startsWith(target)));
+        if (names.length > 1) return { block: true, reason: "lane-worktrees: ambiguous native resume target; use an exact run id." };
+        if (names.length === 1) pendingNames.set(event.toolCallId, names[0].key);
       }
       return;
     }
-    if (input.action !== undefined || typeof input.agent !== "string" || (input.isolation !== "worktree" && input.worktree !== true)) return;
+    if (input.action !== undefined || typeof input.agent !== "string") return;
     // Only the named single-agent surface is ours. Leave workflows and malformed/conflicting
     // public inputs to their existing validator; never turn a refused shape into a valid launch.
     if (input.workflow !== undefined || input.workflowScript !== undefined || input.tasks !== undefined || input.chain !== undefined) return;
     if ((input.isolation === "worktree" && input.worktree === false) || (input.isolation !== undefined && input.isolation !== "worktree")) return;
-    const brief = parseLaneBrief(input.task);
-    if (!brief) return;
+    const governed = parseBrief(input.task);
+    if (!governed) return;
     const dir = runDir()!;
+    const brief = parseLaneBrief(input.task);
+    if (!brief || (input.isolation !== "worktree" && input.worktree !== true)) {
+      // Defaults are resolved inside pi-subagents after this hook; bind naming even when worktree
+      // is omitted. Explicit shared-cwd requests do not allocate and need no naming override.
+      if (input.worktree === false) return;
+      const declared = input.lane as Record<string, unknown> | undefined;
+      // Never turn a malformed caller lane into a valid launch. Other fields remain untouched for
+      // the package's full validator (including unknown fields, mode, claims and outputPaths).
+      if (declared !== undefined && (!declared || typeof declared !== "object" || Array.isArray(declared) || declared.version !== 1 || typeof declared.key !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(declared.key.trim()))) {
+        return { block: true, reason: "lane-worktrees: invalid governed native lane metadata; omit lane or supply a version-1 lane with a valid key." };
+      }
+      const key = nativeLaneKey(real(dir), governed.lane, governed.task);
+      input.lane = { ...declared, version: 1, key };
+      if (!nativeNames.has(key)) nativeNames.set(key, { key, lane: governed.lane, task: governed.task, runs: [] });
+      pendingNames.set(event.toolCallId, key);
+      persist();
+      return;
+    }
     if (!safeLaneId(brief.lane)) {
       return { block: true, reason: `lane-worktrees: lane id '${brief.lane}' cannot name a worktree directory or branch; use letters, digits, '.', '_' and '-'.` };
     }
@@ -470,6 +509,14 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("tool_execution_end", async (event) => {
+    const key = pendingNames.get(event.toolCallId);
+    if (key) {
+      pendingNames.delete(event.toolCallId);
+      const name = nativeNames.get(key);
+      const run = launchedRunId(event.result);
+      if (name && run && !name.runs.includes(run)) name.runs.push(run);
+      persist();
+    }
     if (bashCalls.delete(event.toolCallId)) {
       await scanLog();
       return;
