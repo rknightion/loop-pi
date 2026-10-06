@@ -1,6 +1,7 @@
 // Pure helpers for lane-worktrees (frozen seam S9). No pi imports.
 
-import { basename } from "node:path";
+import { createHash } from "node:crypto";
+import { join, resolve } from "node:path";
 import { parseBrief } from "../loop-state/core.ts";
 
 export const STATE_CUSTOM_TYPE = "lane-worktrees-state";
@@ -11,7 +12,7 @@ export interface LaneBrief {
   landing: string;
 }
 
-const LANDING_RE = /^Landing:\s*(returns candidate|pushes branch \S+)\s*$/m;
+const LANDING_RE = /^Landing:\s*(returns candidate|pushes branch \S+|lands-after-green)\s*$/m;
 const LANE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 /** A brief whose header names the lane and task and whose `Landing:` is a candidate or a branch. */
@@ -28,9 +29,17 @@ export function safeLaneId(id: string): boolean {
   return LANE_ID_RE.test(id) && !id.includes("..") && !id.endsWith(".lock") && !id.endsWith(".");
 }
 
-/** `loop/<run-dir basename>/<lane-id>`. */
-export function laneBranch(runDir: string, lane: string): string {
-  return `loop/${basename(runDir.replace(/\/+$/, ""))}/${lane}`;
+/** Opaque stable allocation labels; neither private brief text nor labels appear in Git refs. */
+function opaque(value: string): string {
+  return createHash("sha256").update(value).digest("hex").slice(0, 32);
+}
+
+export function laneBranch(runDir: string, lane: string, allocation = ""): string {
+  return `loop/r${opaque(resolve(runDir))}/l${opaque(allocation ? JSON.stringify([lane, allocation]) : lane)}`;
+}
+
+export function lanePath(runDir: string, lane: string, allocation = ""): string {
+  return join(runDir, "worktrees", `l${opaque(allocation ? JSON.stringify([lane, allocation]) : lane)}`);
 }
 
 /** Root `land` and `park` events after `afterSeq` in a state log's text, with the highest seq seen. */

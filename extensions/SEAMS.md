@@ -280,7 +280,7 @@ paths are exact, bash write detection is best-effort.
   `<run dir>/audit-grants.json`; a bad hash gives none and an `incidents/ops/` record of class
   `loop-audit-grants-rejected`), and appends `open` `--by ext` when the log has none.
   `loop-continuation:query-launch` adds optional `auditGrantsPath` and `auditGrantsSha256`.
-- **Run-dir files** (root and lanes may not write them, except inside `worktrees/<lane>/`):
+- **Run-dir files** (root and lanes may not write them, except inside `worktrees/l<32 hex>/`):
   `loop-pi-proto`; `harness-facts.jsonl`
   `{v:1, ts, kind: compaction-failed|quota-exhausted|context-overflow, session, detail}`;
   `push-log.jsonl` `{v:1, ts, actor: root|lane, agent, lane, repo, remote, ref, old, new}` written
@@ -294,7 +294,7 @@ paths are exact, bash write detection is best-effort.
   interpreter's code or stdin script, a git alias's shell body or unparseable text is refused, as is
   any push through `watch_process`; an undetected one (a script file, a task runner) is unlogged and
   the audit reports it UNGRANTED; `audit-grants.json`;
-  `returns/<runId>.md`; `worktrees/<lane-id>/`. The lane binding carries optional `runDir`.
+  `returns/<runId>.md`; `worktrees/l<32 hex>/`. The lane binding carries optional `runDir`.
 - **Ops command forms**: known interpreter network clients require a match against the frozen
   surface's full enclosing command. Compound commands, nested shells and stdin scripts cannot
   inherit a grant for only an inner invocation; wrapped forms require their complete form to be
@@ -340,15 +340,24 @@ paths are exact, bash write detection is best-effort.
   `{v, session, class: loop-root-context-overflow, at, home, cwd, live_runs, detail}`, once per
   overflow episode while a lane is live. `loopPi.onIncident` (argv list, `{file}` replaced) runs
   detached for root incidents; failures are ignored.
-- **Lane worktrees** (`lane-worktrees/`, root only): a `subagent` call with `isolation: "worktree"`
-  and a brief `Landing: returns candidate` or `pushes branch` runs in `<rd>/worktrees/<lane-id>` on
-  branch `loop/<run-dir basename>/<lane-id>`, created at `tool_call` and undone if the launch fails.
-  A root `land` or `park` for that task (read from the state log) removes it once the lane's run has
-  ended; a merged branch is deleted, an unmerged one kept. The closeout sweep and pi quit remove the
-  rest. A worktree whose `git status --porcelain` is not empty is never removed: it and its branch
-  are kept and listed as `kept dirty`. After a session start, runs recorded earlier count as live
-  until pi-subagents' `<async dir>/status.json` `state` is terminal (anything but `queued` or
-  `running`); no status file keeps the worktree. State entry type `lane-worktrees-state`.
+- **Lane worktrees** (`lane-worktrees/`, root only): named single-agent `subagent` launches requesting
+  `isolation: "worktree"` or `worktree: true` with `Landing: returns candidate`, `pushes branch` or
+  `lands-after-green` use root-owned retention. Allocation binds the retained cwd and explicitly
+  sets `worktree: false` to suppress native package allocation. Complete, partial and blocked
+  checkpoint returns do not release the tree; same-protocol resume uses the existing run/context
+  in that cwd. State records each run's relative cwd; resume (including after reload) requires a
+  unique run match, the original allocation and a directory-only, symlink-free walk of that cwd
+  inside the worktree. Missing cwd evidence or an ambiguous prefix refuses resume.
+  A root `land` or `park`, or explicit root closeout, may release a clean terminal
+  tree; session quit/reload alone never releases candidates. Live, unknown and dirty trees remain
+  kept. Branch/path components use neutral stable opaque run/lane identifiers, not brief text,
+  tracker IDs or private labels; extension state keeps the original lane-to-allocation mapping.
+  Gitdir pointers become equivalent relative targets after canonical target and HEAD verification.
+  The allocation marker is `<common-git-dir>/worktrees/<id>/loop-pi-allocation`.
+  Failed launches undo only their own allocation and delete its branch only if it still points to
+  the recorded allocation base. After session start, earlier runs remain live
+  until their async `status.json` is terminal; absent status keeps them. Merged branches may be
+  removed on authorised release, unmerged branches retained. State entry: `lane-worktrees-state`.
 - **loop-guard, root**: refuses `loop-state` with `--by ext|daemon|dispatcher`, a `by=` field other
   than `root`, `--run-dir`, a stdin `by` field or an `append` event on stdin from a file (`< file`),
   edit/write into the run dir, `~/repos/agent-docs/authority/` or the planner's
