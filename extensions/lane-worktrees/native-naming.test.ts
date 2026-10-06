@@ -40,8 +40,18 @@ function fixture() {
   return { repo, runDir, agentDir, subRoot, out };
 }
 
+const syntheticPrivateTerm = ["synthetic", "naming", "restricted"].join("-");
+
 function scan(repo: string, mode: "--history" | "--path") {
-  const r = spawnSync("python3", [join(ROOT, "bin", "leak-scan"), mode, ...(mode === "--path" ? [repo] : [])], { cwd: repo, encoding: "utf8", timeout: 60_000 });
+  // Only disposable synthetic repositories are scanned here. Supply their own nonempty private
+  // policy, independent of the developer's estate or CI secrets; public patterns still load from
+  // the unchanged scanner root. Do not export this term source to the real repository leak gate.
+  const env: NodeJS.ProcessEnv = { ...process.env, LEAK_TERMS: [
+    `naming-fixture-private\tlit:${syntheticPrivateTerm}`,
+    `naming-fixture-task-id\tre:${["H", "R", "N"].join("")}-[0-9]{4,}`,
+  ].join("\n") };
+  delete env.LEAK_TERMS_FILE;
+  const r = spawnSync("python3", [join(ROOT, "bin", "leak-scan"), mode, ...(mode === "--path" ? [repo] : [])], { cwd: repo, env, encoding: "utf8", timeout: 60_000 });
   return { exit: r.status, output: r.stdout + r.stderr };
 }
 function evidence(name: string, data: unknown) {
@@ -50,6 +60,31 @@ function evidence(name: string, data: unknown) {
   mkdirSync(root, { recursive: true });
   writeFileSync(join(root, name + ".json"), JSON.stringify(data, null, 2));
 }
+
+test("synthetic scanner policy still rejects private task-ID refs and public patterns", { timeout: 30_000 }, () => {
+  const publicFixture = fixture();
+  const taskFixture = fixture();
+  const privateFixture = fixture();
+  for (const f of [publicFixture, taskFixture, privateFixture]) {
+    const clean = scan(f.repo, "--history");
+    assert.equal(clean.exit, 0, clean.output);
+  }
+  // Separate disposable refs prove each policy source is active, not merely that scanning exits 0.
+  // Tracker shapes belong to private terms, whereas network-address shapes are public policy.
+  git(publicFixture.repo, "update-ref", `refs/heads/ip-${[192, 168, 4, 7].join(".")}`, "HEAD");
+  git(taskFixture.repo, "update-ref", `refs/heads/${privateTask(999)}`, "HEAD");
+  git(privateFixture.repo, "update-ref", `refs/heads/${syntheticPrivateTerm}`, "HEAD");
+  const publicRed = scan(publicFixture.repo, "--history");
+  const taskRed = scan(taskFixture.repo, "--history");
+  const privateRed = scan(privateFixture.repo, "--history");
+  evidence("synthetic-scanner-policy", { publicRed, taskRed, privateRed });
+  assert.equal(publicRed.exit, 1, publicRed.output);
+  assert.match(publicRed.output, /rfc1918-192/);
+  assert.equal(taskRed.exit, 1, taskRed.output);
+  assert.match(taskRed.output, /naming-fixture-task-id/);
+  assert.equal(privateRed.exit, 1, privateRed.output);
+  assert.match(privateRed.output, /naming-fixture-private/);
+});
 
 test("native governed default allocation keeps the full private brief out of refs", { timeout: 90_000 }, async () => {
   const f = fixture();
