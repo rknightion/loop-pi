@@ -26,7 +26,12 @@ its `lane-return` block and the attempts used against the ceiling. Decide what h
     with the failure evidence in its Objective and a narrower Owned files or Stop rule where that
     helps. A retry the ceiling does not allow is not an answer: choose `park` or `split`.
   - `park`: the task needs something the loop cannot supply. Name what it needs: `owner`,
-    `authority`, `evidence-later`, `dependency` or `defect`.
+    `authority`, `evidence-later`, `dependency` or `defect`. `authority` is only for a write,
+    credential use, destructive, spend or outward action that neither the standing line, the
+    standing file, the goal nor its frozen grants cover. Never for an owned-files gap (amend or add
+    a follow-up task; `dependency` if neither fits), a reached ceiling (`defect`), a tool,
+    provider, preflight, review-service or harness failure (`defect`, naming the tool), or a read
+    (reads are standing).
   - `split`: the task is too large or mixed. Give the smaller briefs, each with disjoint Owned files.
 - Never weaken an Acceptance check to make a retry pass. If the check looks wrong, park with `defect`.
 

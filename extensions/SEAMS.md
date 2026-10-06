@@ -275,15 +275,20 @@ paths are exact, bash write detection is best-effort.
 - **Arming** happens in the `input` hook: "You are the root" plus one report path, or a bare
   `launch-*` path. It refuses (returns `handled`, no model turn) with no run dir, a cwd whose git
   toplevel is not the goal's repository, a goal `## Run` `host:` other than this machine, a
-  missing goal, or a launch `Ops grants:` / `Audit grants:` line whose path or sha256 differs from
-  the goal's `## Authority` `ops:` / `audit grants:` line (a goal `none` or no line means the launch
-  carries none; a relative goal path resolves against the goal's repository); incident
+  missing goal, or a launch `Ops grants:` / `Audit grants:` / `Standing:` line whose path or sha256
+  differs from the goal's `## Authority` `ops:` / `audit grants:` / `standing:` line (a goal `none`
+  or no line means the launch carries none; a relative goal path resolves against the goal's
+  repository; more than one launch line or a malformed one is a mismatch); incident
   `incidents/root/<sid>-<UTC>-arm-refused.json`. A first input naming a
   `codex/goal-*.md` path that does not arm gets a visible relaunch warning. On success it writes the
   marker, freezes `Ops grants:` and the optional `Audit grants: <abs> sha256=<hex>` (copy at
   `<run dir>/audit-grants.json`; a bad hash gives none and an `incidents/ops/` record of class
-  `loop-audit-grants-rejected`), and appends `open` `--by ext` when the log has none.
-  `loop-continuation:query-launch` adds optional `auditGrantsPath` and `auditGrantsSha256`.
+  `loop-audit-grants-rejected`), freezes the optional `Standing: <abs> sha256=<hex>` (the
+  standing-authority registry entry; copy at `<run dir>/standing.md`; a missing file or bad hash
+  gives none and an `incidents/ops/` record of class `loop-standing-rejected`, and the arm still
+  succeeds), and appends `open` `--by ext` when the log has none.
+  `loop-continuation:query-launch` adds optional `auditGrantsPath`, `auditGrantsSha256`,
+  `standingPath` (the frozen copy) and `standingSha256`.
 - **Run-dir files** (root and lanes may not write them, except inside `worktrees/l<32 hex>/`):
   `loop-pi-proto`; `harness-facts.jsonl`
   `{v:1, ts, kind: compaction-failed|quota-exhausted|context-overflow, session, detail}`;
@@ -297,7 +302,7 @@ paths are exact, bash write detection is best-effort.
   command is logged, so a lane's bash call that runs `git push` or `gh pr merge` inside an
   interpreter's code or stdin script, a git alias's shell body or unparseable text is refused, as is
   any push through `watch_process`; an undetected one (a script file, a task runner) is unlogged and
-  the audit reports it UNGRANTED; `audit-grants.json`;
+  the audit reports it UNGRANTED; `audit-grants.json`; `standing.md`;
   `returns/<runId>.md`; `worktrees/l<32 hex>/`. The lane binding carries optional `runDir`.
 - **Ops command forms**: known interpreter network clients require a match against the frozen
   surface's full enclosing command. Compound commands, nested shells and stdin scripts cannot

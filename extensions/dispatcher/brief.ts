@@ -101,6 +101,12 @@ export function triageBrief(
   return [
     head,
     "",
+    "Park needs `authority` only for a write, credential use, destructive, spend or outward action that " +
+      "neither the standing line, the standing file, the goal nor its frozen grants cover. Never for an " +
+      "owned-files gap (amend or add a follow-up task; `dependency` if neither fits), a reached ceiling " +
+      "(`defect`), a tool, provider, preflight, review-service or harness failure (`defect`, naming the " +
+      "tool), or a read (reads are standing).",
+    "",
     "End with exactly one block:",
     "```triage",
     `{"v":1,"lane":"${lane}","decision":"retry|park|split","reason":"<why>","brief":"<revised 7-field brief, for retry>",` +

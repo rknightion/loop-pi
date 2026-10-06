@@ -102,6 +102,8 @@ test("proto root: edit and write into the run dir are refused, through any spell
     ["write", join(runDir, "push-log.jsonl")],
     ["edit", join(runDir, "loop-pi-proto")],
     ["write", join(real, "audit-grants.json")],
+    ["write", join(runDir, "standing.md")],
+    ["edit", join(real, "standing.md")],
     ["write", join(scratch, "run-link", "harness-facts.jsonl")],
     ["write", join(runDir, "returns", "run-1.md")],
     ["write", `@${join(runDir, "worktrees", "notes.md")}`],
@@ -211,6 +213,7 @@ test("proto root: bash loop-state with --by ext and a redirect into the run dir 
   assert.equal(blocked(redirect), true);
   const viaEnv = await r.call("bash", { command: "echo 2 > $LOOP_PI_RUN_DIR/loop-pi-proto" });
   assert.equal(blocked(viaEnv), true);
+  assert.equal(blocked(await r.call("bash", { command: "cp /tmp/registry.md $LOOP_PI_RUN_DIR/standing.md" })), true, "the frozen standing copy");
   assert.equal(blocked(await r.call("bash", { command: `cat ${runDir}/push-log.jsonl` })), false);
   process.env.LOOP_PI_RUN_DIR = legacyRunDir;
   assert.equal(blocked(await root().call("bash", { command: "loop-state append codex/state-repo-loop1.jsonl land task=T-1 --by ext" })), false);
@@ -278,6 +281,7 @@ test("proto lane (run dir from the binding): run dir, authority and codex/grants
   for (const [tool, path, reason] of [
     ["write", join(runDir, "push-log.jsonl"), /run dir/],
     ["edit", join(runDir, "returns", "x.md"), /run dir/],
+    ["write", join(runDir, "standing.md"), /run dir/],
     ["write", "~/repos/agent-docs/authority/owner__repo.md", /authority/],
     ["write", "codex/grants-2026-10-04-loop3.json", /grants/],
     ["edit", join(cwd, "codex", "GRANTS-2026-10-04-loop3.json"), /grants/],
@@ -286,7 +290,7 @@ test("proto lane (run dir from the binding): run dir, authority and codex/grants
     assert.equal(blocked(result), true, `${tool} ${path}`);
     assert.match(result.reason, reason, path);
   }
-  for (const command of [`echo x > ${runDir}/push-log.jsonl`, "echo x > $LOOP_PI_RUN_DIR/push-log.jsonl", "cp /tmp/g.json codex/grants-2026-10-04-loop3.json", "gh pr merge 12 --squash"]) {
+  for (const command of [`echo x > ${runDir}/push-log.jsonl`, "echo x > $LOOP_PI_RUN_DIR/push-log.jsonl", `cp /tmp/r.md ${runDir}/standing.md`, "cp /tmp/g.json codex/grants-2026-10-04-loop3.json", "gh pr merge 12 --squash"]) {
     const result = await call("bash", { command });
     assert.equal(blocked(result), true, command);
   }

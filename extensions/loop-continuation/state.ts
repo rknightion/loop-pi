@@ -57,6 +57,10 @@ export interface ContinuationState {
   auditGrantsPath?: string | null;
   /** The sha256 the launch's `Audit grants:` line stated and the frozen copy matched, or null. */
   auditGrantsSha256?: string | null;
+  /** The standing registry copy frozen into the run dir at arm (S-STANDING), or null. */
+  standingPath?: string | null;
+  /** The sha256 the launch's `Standing:` line stated and the frozen copy matched, or null. */
+  standingSha256?: string | null;
 }
 
 export const INITIAL_STATE: ContinuationState = {

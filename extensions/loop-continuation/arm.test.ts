@@ -2,7 +2,7 @@
 // incident; a good arm writes the protocol marker, freezes ops and audit grants and appends `open`.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -249,6 +249,58 @@ test("Audit grants are frozen into the run dir with their digest and exposed on 
   }
 });
 
+test("Standing is frozen into the run dir with its digest and exposed on query-launch; a bad hash or a missing file gives none and an ops incident", async () => {
+  const f = loopFixture();
+  const standingPath = join(f.repo, "authority", "owner__repo.md");
+  const body = "# Standing authority\n\n## Grants\n- read anything\n\n## Fences\n- no deletes\n";
+  mkdirSync(join(f.repo, "authority"), { recursive: true });
+  writeFileSync(standingPath, body);
+  addAuthority(f, `standing: ${standingPath} sha256=${sha(body)}`);
+  const pi = await fakePi({ agentDir: f.agentDir, cwd: f.repo, runDir: f.runDir });
+  try {
+    assert.deepEqual(await pi.input(`${f.launch}\nStanding: ${standingPath} sha256=${sha(body).toUpperCase()}`), { action: "continue" });
+    const copy = join(f.runDir, "standing.md");
+    assert.equal(readFileSync(copy, "utf8"), body);
+    writeFileSync(standingPath, "# edited\n");
+    assert.equal(readFileSync(copy, "utf8"), body, "a later edit of the source does not reach the frozen copy");
+    const answer = pi.query();
+    assert.equal(answer.standingPath, copy);
+    assert.equal(answer.standingSha256, sha(body));
+    assert.equal(existsSync(join(f.agentDir, "incidents", "ops")), false);
+  } finally {
+    pi.restore();
+  }
+
+  for (const c of [
+    { name: "digest mismatch", write: true, reason: /sha256 does not match/ },
+    { name: "missing file", write: false, reason: /cannot be read/ },
+  ]) {
+    const g = loopFixture();
+    const path = join(g.repo, "authority", "owner__repo.md");
+    mkdirSync(join(g.repo, "authority"), { recursive: true });
+    if (c.write) writeFileSync(path, "# not what the goal pinned\n");
+    // The goal and the launch agree on the digest; the file does not match it (or is absent), so the freeze refuses it.
+    addAuthority(g, `standing: ${path} sha256=${"0".repeat(64)}`);
+    const pi2 = await fakePi({ agentDir: g.agentDir, cwd: g.repo, runDir: g.runDir });
+    try {
+      assert.deepEqual(await pi2.input(`${g.launch}\nStanding: ${path} sha256=${"0".repeat(64)}`), { action: "continue" }, c.name);
+      const answer = pi2.query();
+      assert.equal(answer.reportPath, g.report, `${c.name}: the arm still succeeds`);
+      assert.equal(answer.standingPath, null, c.name);
+      assert.equal(answer.standingSha256, null, c.name);
+      assert.equal(existsSync(join(g.runDir, "standing.md")), false, c.name);
+      const files = readdirSync(join(g.agentDir, "incidents", "ops"));
+      assert.equal(files.length, 1, c.name);
+      const incident = JSON.parse(readFileSync(join(g.agentDir, "incidents", "ops", files[0]), "utf8"));
+      assert.equal(incident.class, "loop-standing-rejected", c.name);
+      assert.match(incident.reason, c.reason, c.name);
+      assert.equal(incident.standing_path, path, c.name);
+    } finally {
+      pi2.restore();
+    }
+  }
+});
+
 test("a launch file of the existing shape (cmd line, goal named in the text, Ops grants) still arms from its bare path", async () => {
   const f = loopFixture();
   const ops = JSON.stringify({ v: 1, ops: [{ surface: "deploy:svc", kind: "deploy", allow: ["just deploy"], secret_paths: [] }] });
@@ -297,10 +349,11 @@ test("a goal whose ## Run lacks root-model still arms, with a warning that open 
   }
 });
 
-test("the launch's Ops and Audit grants lines must be the goal's ## Authority ops and audit grants lines, or the arm is refused", async () => {
+test("the launch's Ops grants, Audit grants and Standing lines must be the goal's ## Authority ops, audit grants and standing lines, or the arm is refused", async () => {
   const opsBody = JSON.stringify({ v: 1, ops: [{ surface: "deploy:svc", kind: "deploy", allow: ["just deploy"], secret_paths: [] }] });
   const auditBody = JSON.stringify({ "/r": { refs: [] } });
   const other = JSON.stringify({ v: 1, ops: [] });
+  const standingBody = "# Standing authority\n## Grants\n## Fences\n";
   type Case = { name: string; authority: (p: Record<string, string>) => string[]; launch: (p: Record<string, string>) => string[]; refused: RegExp | null };
   const cases: Case[] = [
     { name: "both match", authority: (p) => [`ops: ${p.ops} sha256=${sha(opsBody)}`, `audit grants: \`${p.audit}\` sha256=${sha(auditBody)}`], launch: (p) => [`Ops grants: ${p.ops} sha256=${sha(opsBody)}`, `Audit grants: ${p.audit} sha256=${sha(auditBody)}`], refused: null },
@@ -314,13 +367,23 @@ test("the launch's Ops and Audit grants lines must be the goal's ## Authority op
     { name: "the same ops file, another digest", authority: (p) => [`ops: ${p.ops} sha256=${sha(opsBody)}`], launch: (p) => [`Ops grants: ${p.ops} sha256=${sha(other)}`], refused: /Ops grants sha256 .* is not the goal's ops sha256/ },
     { name: "a goal ops file the launch omits", authority: (p) => [`ops: ${p.ops} sha256=${sha(opsBody)}`], launch: () => [], refused: /names .*ops-x-loop3\.json but the launch has no Ops grants line/ },
     { name: "a different audit grants digest", authority: (p) => ["ops: none", `audit grants: ${p.audit} sha256=${sha(auditBody)}`], launch: (p) => [`Audit grants: ${p.audit} sha256=${"0".repeat(64)}`], refused: /Audit grants sha256 0+ is not the goal's audit grants sha256/ },
+    { name: "standing matches", authority: (p) => ["ops: none", `standing: \`${p.standing}\` sha256=${sha(standingBody)}`], launch: (p) => [`Standing: ${p.standing} sha256=${sha(standingBody)}`], refused: null },
+    { name: "goal standing none, no launch line", authority: () => ["ops: none", "standing: none"], launch: () => [], refused: null },
+    { name: "goal standing none, launch carries Standing", authority: () => ["ops: none", "standing: none"], launch: (p) => [`Standing: ${p.standing} sha256=${sha(standingBody)}`], refused: /launch carries a Standing line but the goal's ## Authority standing is none/ },
+    { name: "no goal standing line, launch carries Standing", authority: () => ["ops: none"], launch: (p) => [`Standing: ${p.standing} sha256=${sha(standingBody)}`], refused: /Standing line but the goal's ## Authority standing is absent/ },
+    { name: "a goal standing file the launch omits", authority: (p) => ["ops: none", `standing: ${p.standing} sha256=${sha(standingBody)}`], launch: () => [], refused: /names .*owner__repo\.md but the launch has no Standing line/ },
+    { name: "a different standing digest", authority: (p) => ["ops: none", `standing: ${p.standing} sha256=${sha(standingBody)}`], launch: (p) => [`Standing: ${p.standing} sha256=${"0".repeat(64)}`], refused: /Standing sha256 0+ is not the goal's standing sha256/ },
+    { name: "a different standing file", authority: (p) => ["ops: none", `standing: ${p.standing} sha256=${sha(standingBody)}`], launch: (p) => [`Standing: ${p.audit} sha256=${sha(standingBody)}`], refused: /Standing file .*grants-x-loop3\.json is not the goal's standing file/ },
+    { name: "two Standing lines", authority: (p) => ["ops: none", `standing: ${p.standing} sha256=${sha(standingBody)}`], launch: (p) => [`Standing: ${p.standing} sha256=${sha(standingBody)}`, `Standing: ${p.standing} sha256=${sha(standingBody)}`], refused: /Standing line is malformed \(the launch carries more than one Standing line\)/ },
+    { name: "a relative Standing path", authority: (p) => ["ops: none", `standing: ${p.standing} sha256=${sha(standingBody)}`], launch: () => [`Standing: authority/owner__repo.md sha256=${sha(standingBody)}`], refused: /Standing line is malformed \(the Standing path is not absolute\)/ },
   ];
   for (const c of cases) {
     const f = loopFixture();
-    const p = { ops: join(f.repo, "codex", "ops-x-loop3.json"), audit: join(f.repo, "codex", "grants-x-loop3.json"), other: join(f.repo, "codex", "ops-wide.json") };
+    const p = { ops: join(f.repo, "codex", "ops-x-loop3.json"), audit: join(f.repo, "codex", "grants-x-loop3.json"), other: join(f.repo, "codex", "ops-wide.json"), standing: join(f.repo, "codex", "owner__repo.md") };
     writeFileSync(p.ops, opsBody);
     writeFileSync(p.audit, auditBody);
     writeFileSync(p.other, other);
+    writeFileSync(p.standing, standingBody);
     addAuthority(f, ...c.authority(p));
     const pi = await fakePi({ agentDir: f.agentDir, cwd: f.repo, runDir: f.runDir });
     try {
@@ -341,6 +404,7 @@ test("the launch's Ops and Audit grants lines must be the goal's ## Authority op
       assert.equal(pi.query().ops, null, `${c.name}: no ops frozen`);
       assert.equal(existsSync(join(f.runDir, "loop-pi-proto")), false, `${c.name}: no marker`);
       assert.equal(existsSync(join(f.runDir, "audit-grants.json")), false, `${c.name}: no audit grants copy`);
+      assert.equal(existsSync(join(f.runDir, "standing.md")), false, `${c.name}: no standing copy`);
     } finally {
       pi.restore();
     }

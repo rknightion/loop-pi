@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { type AuditLine, parseAuditLine } from "./audit-grants.ts";
 import { type OpsLine, parseOpsLine } from "./ops-grants.ts";
+import { parseStandingLine, type StandingLine } from "./standing.ts";
 
 // Ported from the author's loop_launch.py (frozen spec: seam v2.1 section 1),
 // restricted to the "v2" (strict) report grammar. loop-pi has no pre-existing ACTIVATED_AT
@@ -22,11 +23,12 @@ export interface LaunchInfo {
   launchTs: string;
 }
 
-/** A recognised launch plus what its text says about ops and audit grants and its goal (never
+/** A recognised launch plus what its text says about ops grants, audit grants, standing and its goal (never
  *  persisted as part of LaunchInfo). */
 export interface ParsedLaunch extends LaunchInfo {
   opsLine: OpsLine;
   auditLine: AuditLine;
+  standingLine: StandingLine;
   /** The goal file: the one `codex/goal-*-loop<N>.md` the launch names, else the report's sibling. */
   goal: string;
 }
@@ -180,6 +182,7 @@ export function parseLaunch(
       launchTs,
       opsLine: parseOpsLine(text),
       auditLine: parseAuditLine(text),
+      standingLine: parseStandingLine(text),
       goal: goalFor(text, cwd || null, direct.report),
     };
   }
@@ -210,6 +213,7 @@ export function parseLaunch(
     launchTs,
     opsLine: parseOpsLine(content),
     auditLine: parseAuditLine(content),
+    standingLine: parseStandingLine(content),
     goal: goalFor(content, base, inner.report),
   };
 }

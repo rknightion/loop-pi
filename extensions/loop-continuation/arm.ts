@@ -3,8 +3,9 @@
 //   2. the cwd's git toplevel is the goal's repository (the parent of the goal's codex/);
 //   3. the goal's `## Run` `host:` (optional) names this machine;
 //   4. the goal file exists, and an `open` already in the state log carries its sha256;
-//   5. the launch's `Ops grants:` and `Audit grants:` lines name the files and digests the goal's
-//      `## Authority` `ops:` and `audit grants:` lines name (`none` or no line: the launch has none).
+//   5. the launch's `Ops grants:`, `Audit grants:` and `Standing:` lines name the files and digests
+//      the goal's `## Authority` `ops:`, `audit grants:` and `standing:` lines name (`none` or no
+//      line: the launch has none).
 // A failure refuses the arm; on success the caller appends `open` (by ext) when the log has none,
 // from the goal's `## Run` and its envelope table's task cells.
 //
@@ -164,7 +165,10 @@ export type ArmCheck =
   | { ok: false; reason: string };
 
 /** S3 checks for a launch naming `report` and `goal` (both absolute). */
-export function checkArm(launch: { report: string; goal: string; opsLine?: GrantLine; auditLine?: GrantLine }, env: ArmEnv): ArmCheck {
+export function checkArm(
+  launch: { report: string; goal: string; opsLine?: GrantLine; auditLine?: GrantLine; standingLine?: GrantLine },
+  env: ArmEnv,
+): ArmCheck {
   const refuse = (reason: string): ArmCheck => ({ ok: false, reason });
   const runDir = env.runDir;
   if (!runDir) return refuse("LOOP_PI_RUN_DIR is not set: start the root with the loop-pi launcher from inside the loop repository");
@@ -204,7 +208,11 @@ export function checkArm(launch: { report: string; goal: string; opsLine?: Grant
       return refuse(`the goal runs on host ${host}; this machine is ${names.join(" / ") || "unknown"}`);
     }
   }
-  const grants = grantLinesMismatch(goalText, goalRepo, { opsLine: launch.opsLine ?? { kind: "none" }, auditLine: launch.auditLine ?? { kind: "none" } });
+  const grants = grantLinesMismatch(goalText, goalRepo, {
+    opsLine: launch.opsLine ?? { kind: "none" },
+    auditLine: launch.auditLine ?? { kind: "none" },
+    standingLine: launch.standingLine ?? { kind: "none" },
+  });
   if (grants) return refuse(grants);
   const goalSha256 = createHash("sha256").update(bytes).digest("hex");
   const log = stateLogFor(launch.report);
@@ -225,21 +233,22 @@ export function openEvent(goalText: string, goalSha256: string): { event: Record
   return { event: { ev: "open", goal_sha256: goalSha256, tier, root: "llm", root_model: rootModel, envelope: envelopeTaskIds(goalText) } };
 }
 
-/** What a launch says about one grants file: its `<label>:` line(s), as `parseOpsLine` / `parseAuditLine` read them. */
+/** What a launch says about one grants file: its `<label>:` line(s), as `parseOpsLine` / `parseAuditLine` /
+ *  `parseStandingLine` read them. */
 export type GrantLine = { kind: "none" } | { kind: "line"; path: string; sha256: string } | { kind: "invalid"; reason: string };
 
 const GOAL_GRANT_RE = /^`?(\S+?)`?\s+sha256=([0-9a-fA-F]{64})\s*$/;
 
 /**
- * The launch's grants lines must be the goal's `## Authority` `ops:` and `audit grants:` lines: the
- * same file (a relative goal path resolves against the goal's repository) and the same sha256. A goal
+ * The launch's grants lines must be the goal's `## Authority` `ops:`, `audit grants:` and `standing:`
+ * lines: the same file (a relative goal path resolves against the goal's repository) and the same sha256. A goal
  * line `none`, or no goal line at all, means the launch carries no such line. Returns why they differ,
  * or null. The file itself is read and checked later, by the freeze.
  */
 export function grantLinesMismatch(
   goalText: string,
   goalRepo: string,
-  launch: { opsLine: GrantLine; auditLine: GrantLine },
+  launch: { opsLine: GrantLine; auditLine: GrantLine; standingLine?: GrantLine },
 ): string | null {
   const authority = sectionKeys(goalText, "Authority");
   const check = (key: string, label: string, line: GrantLine): string | null => {
@@ -248,7 +257,7 @@ export function grantLinesMismatch(
     const goalNone = goalValue === null || /^`?none\b/i.test(goalValue);
     if (goalNone) {
       if (line.kind === "none") return null;
-      return `the launch carries an ${label} line but the goal's ## Authority ${key} is ${goalValue === null ? "absent" : "none"}`;
+      return `the launch carries ${/^[AEIOU]/.test(label) ? "an" : "a"} ${label} line but the goal's ## Authority ${key} is ${goalValue === null ? "absent" : "none"}`;
     }
     const m = GOAL_GRANT_RE.exec(goalValue);
     if (!m) return `the goal's ## Authority ${key} line is neither none nor <path> sha256=<64 hex>`;
@@ -260,7 +269,11 @@ export function grantLinesMismatch(
     if (line.sha256 !== goalSha) return `the launch's ${label} sha256 ${line.sha256} is not the goal's ${key} sha256 ${goalSha}`;
     return null;
   };
-  return check("ops", "Ops grants", launch.opsLine) ?? check("audit grants", "Audit grants", launch.auditLine);
+  return (
+    check("ops", "Ops grants", launch.opsLine) ??
+    check("audit grants", "Audit grants", launch.auditLine) ??
+    check("standing", "Standing", launch.standingLine ?? { kind: "none" })
+  );
 }
 
 /** A first input that names a goal file but did not arm. */

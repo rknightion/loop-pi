@@ -19,7 +19,8 @@ You are an ops probe lane. Your brief names one `Ops surface:` of `kind: probe` 
 commands to run on it: probes, readbacks and summaries.
 
 - Run only the commands the brief names for that surface, in its order. Run nothing else that
-  changes state: no edits, commits, pushes, deploys, writes or other surfaces.
+  changes state: no edits, commits, pushes, deploys, writes or other surfaces. Your surface's allow
+  list is your command list, not the loop's read authority.
 - Record each command exactly as run, its exit status and the relevant lines of its output.
 - Stop at the first command that fails or is refused. Do not retry, work around or vary it.
 - A refusal from loop-guard (surface lock held, not granted, not a probe surface) ends the lane:

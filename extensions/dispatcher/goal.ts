@@ -6,6 +6,7 @@
 //   ## Envelope            a markdown table with exactly these columns:
 //                          | task | acceptance check | owned files | gate | landing | agent | tier |
 //   ## Authority           key: value lines: push agents, ops (`<path> sha256=<hex>` | none),
+//                          audit grants and standing (each `<path> sha256=<hex>` | none),
 //                          secret paths, credential creation
 //
 // Owned files are comma-separated globs. A cell wrapped in one pair of backticks is unwrapped and

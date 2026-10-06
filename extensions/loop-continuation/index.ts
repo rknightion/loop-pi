@@ -57,6 +57,7 @@ import { createTranscriptSync } from "./transcript-sync.ts";
 import { CONTEXT_OVERFLOW_CLASS, OPS_GRANTS_REJECTED_CLASS, runOnIncident, writeIncident, writeRootIncident } from "./incident.ts";
 import { loopStateBinary, readDigest } from "./close-out.ts";
 import { freezeOpsGrants } from "./ops-grants.ts";
+import { freezeStanding, STANDING_REJECTED_CLASS } from "./standing.ts";
 
 /** How often an open session re-checks the checkpoint throttle (lanes run without extensions). */
 const SYNC_TICK_MS = 60 * 1000;
@@ -176,7 +177,8 @@ export default function (pi: ExtensionAPI) {
 
   function recordIncident(cwd: string, cls?: string, extra?: Record<string, unknown>) {
     try {
-      const subdir = cls === OPS_GRANTS_REJECTED_CLASS || cls === AUDIT_GRANTS_REJECTED_CLASS ? "ops" : undefined;
+      const subdir =
+        cls === OPS_GRANTS_REJECTED_CLASS || cls === AUDIT_GRANTS_REJECTED_CLASS || cls === STANDING_REJECTED_CLASS ? "ops" : undefined;
       writeIncident(getAgentDir(), sessionId, cwd, cls, extra, subdir);
     } catch {
       // Resolving the home must not trap the session either.
@@ -206,11 +208,12 @@ export default function (pi: ExtensionAPI) {
     if (agentDir && file) runOnIncident(agentDir, file);
   }
 
-  /** S3 success: ops and audit grants freeze, then `open` when the log has none (S4). */
+  /** S3 success: ops grants, audit grants and standing freeze, then `open` when the log has none (S4). */
   async function arm(parsed: ParsedLaunch, check: { runDir: string; goalText: string; goalSha256: string; log: string }, ctx: ExtensionContext) {
-    const { opsLine, auditLine, goal: _goal, ...launch } = parsed;
+    const { opsLine, auditLine, standingLine, goal: _goal, ...launch } = parsed;
     const frozen = freezeOpsGrants(opsLine);
     const audit = freezeAuditGrants(auditLine, check.runDir);
+    const standing = freezeStanding(standingLine, check.runDir);
     state = {
       armed: true,
       launch,
@@ -220,6 +223,8 @@ export default function (pi: ExtensionAPI) {
       ops: frozen.ops,
       auditGrantsPath: audit.path,
       auditGrantsSha256: audit.sha256,
+      standingPath: standing.path,
+      standingSha256: standing.sha256,
     };
     persist();
     if (frozen.rejected !== null) {
@@ -227,6 +232,9 @@ export default function (pi: ExtensionAPI) {
     }
     if (audit.rejected !== null) {
       recordIncident(ctx.cwd, AUDIT_GRANTS_REJECTED_CLASS, { reason: audit.rejected, audit_grants_path: audit.sourcePath });
+    }
+    if (standing.rejected !== null) {
+      recordIncident(ctx.cwd, STANDING_REJECTED_CLASS, { reason: standing.rejected, standing_path: standing.sourcePath });
     }
     if (existingOpen(check.log)) return;
     const built = openEvent(check.goalText, check.goalSha256);
@@ -301,6 +309,8 @@ export default function (pi: ExtensionAPI) {
         ops: unknown;
         auditGrantsPath: string | null;
         auditGrantsSha256: string | null;
+        standingPath: string | null;
+        standingSha256: string | null;
       }) => void;
     };
     const reportPath =
@@ -311,6 +321,8 @@ export default function (pi: ExtensionAPI) {
       ops: state.ops ?? null,
       auditGrantsPath: state.auditGrantsPath ?? null,
       auditGrantsSha256: state.auditGrantsSha256 ?? null,
+      standingPath: state.standingPath ?? null,
+      standingSha256: state.standingSha256 ?? null,
     });
   });
 
