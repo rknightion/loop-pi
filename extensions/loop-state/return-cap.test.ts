@@ -1,11 +1,12 @@
 // S6 return cap: the pure cut, where the lane-return block goes, and the file the full text lands in.
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import loopState from "./index.ts";
-import { parseLaneReturn } from "./core.ts";
+import { parseLaneReturn, returnEvent } from "./core.ts";
+import { parseLaneReturn as parseDispatcherLaneReturn } from "../dispatcher/brief.ts";
 import { capLaneAssistantMessage, capNotifyContent, capText, completionInfo, HEAD_BYTES, LANE_RETURN_CAP_BYTES, RETURN_CAP_BYTES, TAIL_BYTES } from "./return-cap.ts";
 
 const dirs: string[] = [];
@@ -18,17 +19,38 @@ const fresh = () => {
 
 const BLOCK = '```lane-return\n{"v":2,"lane":"L1","status":"complete","sha":null,"landed":false}\n```';
 
+for (const boundary of ["root", "lane"]) {
+  test(`${boundary} cap preserves the dispatcher outcome when an annotated trailing fence is core-only`, () => {
+    const block = (status: string, exit: number) => `\`\`\`lane-return\n${JSON.stringify({ v: 2, lane: "L1", status, exit, sha: null, landed: false })}\n\`\`\``;
+    const annotated = '```lane-return note\n{"v":2,"lane":"L1","status":"unknown","exit":null,"landed":false}\n```';
+    const text = `${block("complete", 0)}\n${"a".repeat(12_000)}\n${block("failed", 1)}\n${"a".repeat(12_000)}\n${annotated}\n${"a".repeat(10_000)}`;
+    const dir = fresh();
+    const before = parseDispatcherLaneReturn(text);
+    assert.equal(before.status, "failed");
+    assert.equal(before.exit, 1);
+    const output = boundary === "root"
+      ? capNotifyContent(text, dir)?.text ?? text
+      : capLaneAssistantMessage({ role: "assistant", content: [{ type: "text", text }] }, dir, "L1")?.content[0].text ?? text;
+    assert.deepEqual(parseLaneReturn(output), parseLaneReturn(text));
+    assert.deepEqual(parseDispatcherLaneReturn(output), before, "a cap must not promote an older dispatcher success");
+    const files = readdirSync(join(dir, "returns"));
+    assert.equal(files.length, 1);
+    assert.equal(readFileSync(join(dir, "returns", files[0]), "utf8"), text);
+  });
+}
+
 test("a text within the cap is left alone", () => {
   assert.equal(capText("x".repeat(RETURN_CAP_BYTES), "/f"), null);
 });
 
-test("an oversized text keeps head, marker, tail; a block outside the tail is appended once after the marker", () => {
+test("an oversized text keeps head, marker, tail without duplicating a block wholly in the head", () => {
   const text = `${BLOCK}\n${"a".repeat(50_000)}\nTAIL`;
   const capped = capText(text, "/runs/r/returns/x.md")!;
   const lines = capped.split("\n");
   const marker = lines.findIndex((l) => l.startsWith("[... "));
   assert.equal(lines[marker], `[... ${Buffer.byteLength(text) - HEAD_BYTES - TAIL_BYTES} bytes omitted; full return: /runs/r/returns/x.md ...]`);
-  assert.equal(lines.slice(marker + 1, marker + 4).join("\n"), BLOCK);
+  assert.ok(capped.startsWith(BLOCK));
+  assert.equal(capped.split("```lane-return").length - 1, 1, "a block wholly in the head is not duplicated");
   assert.ok(capped.endsWith("\nTAIL"));
   assert.ok(Buffer.byteLength(capped) <= RETURN_CAP_BYTES);
 });
@@ -164,7 +186,7 @@ test("a lane caps its own oversized final text with room for the notify's lines,
   const parts = capped.content as { type: string; text?: string }[];
   assert.deepEqual(parts.map((p) => p.type), ["thinking", "text"]);
   const text = parts[1].text!;
-  assert.ok(Buffer.byteLength(text) <= LANE_RETURN_CAP_BYTES + 512 && Buffer.byteLength(text) < RETURN_CAP_BYTES - 1_024, `${Buffer.byteLength(text)} bytes`);
+  assert.ok(Buffer.byteLength(text) <= LANE_RETURN_CAP_BYTES, `${Buffer.byteLength(text)} bytes`);
   assert.ok(text.includes(BLOCK) && text.endsWith("END"));
   const full = /full return: (\S+) \.\.\.\]/.exec(text)![1];
   assert.ok(full.startsWith(join(runDir, "returns", "lane-L1___lane-")), full);
@@ -192,6 +214,97 @@ test("a block that straddles the head cut is not split: the head stops before it
     assert.deepEqual(parseLaneReturn(out), parseLaneReturn(text));
     assert.equal(out.split("```lane-return").length - 1, 1, "exactly one opener");
   }
+});
+
+for (const [label, earlier] of [
+  ["body", `\`\`\`lane-return\n${"p".repeat(800)}\n\`\`\``],
+  ["header", `\`\`\`lane-return ${"h".repeat(800)}\n{}\n\`\`\``],
+]) {
+  test(`an earlier opener crossing the head cut in its ${label} is removed before the protected last block`, () => {
+    const text = `${"a".repeat(HEAD_BYTES - 100)}${earlier}\n${"z".repeat(20_000)}\n${BLOCK}\n${"t".repeat(10_000)}`;
+    const out = capText(text, "/full.md")!;
+    assert.deepEqual(parseLaneReturn(out), parseLaneReturn(text));
+    assert.equal(out.split("```lane-return").length - 1, 1);
+  });
+}
+
+for (const bytes of [4_096, 12_288]) {
+  test(`lane-sized caps budget a ${bytes}-byte multibyte protected block, marker and separators`, () => {
+    const prefix = '```lane-return\n{"v":2,"lane":"L1","status":"complete","pad":"';
+    const suffix = '"}\n```';
+    const block = prefix + "é".repeat(Math.floor((bytes - Buffer.byteLength(prefix + suffix)) / 2)) + suffix;
+    const text = `${"é".repeat(10_000)}\n${block}\n${"é".repeat(10_000)}`;
+    const out = capLaneAssistantMessage({ role: "assistant", content: [{ type: "text", text }] }, fresh(), "budget")!.content[0].text;
+    assert.ok(Buffer.byteLength(out) <= LANE_RETURN_CAP_BYTES, `${Buffer.byteLength(out)} bytes`);
+    assert.ok(!out.includes("�"));
+    assert.deepEqual(parseLaneReturn(out), parseLaneReturn(text));
+    assert.equal(out.split("```lane-return").length - 1, 1);
+  });
+}
+
+test("a protected block too large for the budget deterministically leaves text whole", () => {
+  const block = `\`\`\`lane-return\n{"v":2,"lane":"L1","status":"complete","pad":"${"p".repeat(LANE_RETURN_CAP_BYTES)}"}\n\`\`\``;
+  const text = `${"a".repeat(20_000)}\n${block}\n${"t".repeat(20_000)}`;
+  assert.equal(capText(text, "/full.md", LANE_RETURN_CAP_BYTES), null);
+  assert.equal(capLaneAssistantMessage({ role: "assistant", content: [{ type: "text", text }] }, fresh(), "oversize"), undefined);
+});
+
+test("a marker too large for the budget deterministically leaves text whole", () => {
+  assert.equal(capText("x".repeat(20_000), "/" + "p".repeat(LANE_RETURN_CAP_BYTES), LANE_RETURN_CAP_BYTES), null);
+});
+
+test("a small custom budget without a block still accounts for a multibyte marker", () => {
+  const out = capText("é".repeat(20_000), "/é", 128, { head: 100, tail: 100 })!;
+  assert.ok(Buffer.byteLength(out) <= 128);
+  assert.ok(!out.includes("�"));
+  assert.ok(out.includes("full return: /é"));
+});
+
+// Exercise both public message boundaries, not a substitute parser. A trailing unusable fence
+// must never turn the latest failed/exit 1 return into the old complete/exit 0 in the kept head.
+for (const [label, trailing] of [
+  ["malformed JSON", "```lane-return\n{broken\n```"],
+  ["array", "```lane-return\n[]\n```"],
+  ["null", "```lane-return\nnull\n```"],
+  ["primitive", "```lane-return\n42\n```"],
+  ["unsupported version", '```lane-return\n{"v":3,"status":"complete","exit":0}\n```'],
+  ["unclosed fence", "```lane-return\n{broken"],
+]) {
+  for (const boundary of ["root", "lane"]) {
+    test(`${boundary} preserves the latest failed return before a trailing ${label} and keeps the full copy`, () => {
+      const complete = '```lane-return\n{"v":2,"lane":"L1","status":"complete","exit":0,"landed":false}\n```';
+      const failed = '```lane-return\n{"v":2,"lane":"L1","status":"failed","exit":1,"landed":false}\n```';
+      const text = `${complete}\n${"a".repeat(12_000)}\n${failed}\n${"b".repeat(12_000)}\n${trailing}\n${"c".repeat(10_000)}`;
+      const expected = parseLaneReturn(text);
+      assert.equal(expected!.status, "failed");
+      assert.equal(expected!.exit, 1);
+
+      const dir = fresh();
+      const message = { role: "assistant", content: [{ type: "text", text }] };
+      const capped = boundary === "root" ? capNotifyContent(text, dir)?.text : capLaneAssistantMessage(message, dir, "L1")?.content[0].text;
+      const out = capped ?? text;
+      assert.deepEqual(parseLaneReturn(out), expected, `${boundary} must not promote stale success`);
+      assert.deepEqual(returnEvent("L1", "r", parseLaneReturn(out)), returnEvent("L1", "r", expected));
+      const files = readdirSync(join(dir, "returns"));
+      assert.equal(files.length, 1);
+      assert.equal(readFileSync(join(dir, "returns", files[0]), "utf8"), text);
+      if (label === "unclosed fence") {
+        assert.ok(capped, "a safe cut with an unclosed trailing fence still caps");
+        assert.ok(Buffer.byteLength(out) <= (boundary === "root" ? RETURN_CAP_BYTES : LANE_RETURN_CAP_BYTES));
+      } else {
+        assert.equal(capped, undefined, "an unsafe cut deterministically leaves the original whole");
+      }
+    });
+  }
+}
+
+test("malformed fences do not prevent a supported cut whose consumer outcome stays null", () => {
+  const text = `${"a".repeat(20_000)}\n\`\`\`lane-return\n{broken\n\`\`\`\n${"b".repeat(20_000)}`;
+  const out = capText(text, "/full.md")!;
+  assert.ok(out);
+  assert.equal(parseLaneReturn(text), null);
+  assert.equal(parseLaneReturn(out), null);
+  assert.ok(Buffer.byteLength(out) <= RETURN_CAP_BYTES);
 });
 
 test("a lane caps only the last non-empty text part, which is the output pi-subagents returns", () => {

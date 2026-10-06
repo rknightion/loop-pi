@@ -321,22 +321,40 @@ paths are exact, bash write detection is best-effort.
 - **Return cap** (lane: loop-guard's lane entry at the child's assistant `message_end`; root:
   loop-state at `message_end`, plus the `context` hook for already-stored messages).
   - Lane: the last non-empty text part of an assistant message with no tool call and no error (the
-    part pi-subagents' `getFinalOutput` returns) over 14,336 bytes becomes its first 4,096 bytes, an
+    part pi-subagents' `getFinalOutput` returns) over 14,336 bytes becomes up to its first 4,096 bytes, an
     omission line naming `<run dir>/returns/lane-<lane id or session id>-<sha16>.md` (the full
-    text), the `lane-return` block if it is not in the tail, and its last 6,144 bytes. It is
+    text), the last `lane-return` block if not wholly kept in the head or tail, and up to its last
+    6,144 bytes. It is
     replaced in place without its text signature; other parts are untouched. With no run dir it is
     left whole. Every child that loads the lane entry is capped, foreground children included, and
     the lane's own session keeps only the capped text. A lane's output, its async-complete payload
     and pi-subagents' saved output file are therefore the capped text: the `return` event is parsed
     from it, and the full text is behind the lane's omission line.
-  - Root: a `subagent-notify` message over 16,384 bytes becomes its first 6,144 bytes, an omission
-    line naming the full copy, its last 8,192 bytes and the `lane-return` block if it is not in the
-    tail. With no run dir it is left uncapped. The dispatcher's RPC completion path applies the same
+  - Root: a `subagent-notify` message over 16,384 bytes becomes up to its first 6,144 bytes, an
+    omission line naming the full copy, up to its last 8,192 bytes and the last `lane-return` block
+    if not wholly kept in the head or tail. With no run dir it is left uncapped. The dispatcher's RPC completion path applies the same
     cap. The full copy is pi-subagents' saved output only when its structured completion (the
     async-complete payload's single result `savedOutputPath`, for the notify's own last
     `Retention-managed async directory:` line) or a reference-only marker on the first line of the
     lane's output names it; a path in the return body is never used. Otherwise `returns/<runId>.md`.
-  - Either cap: a head cut that would fall inside the last block ends before it instead.
+  - Either cap: the head ends before the earliest `lane-return` opener with no closing fence
+    inside the kept head, including earlier blocks and incomplete opener header lines. A protected
+    block wholly inside the head is not appended again. Head and tail are UTF-8-safe maxima, not
+    guaranteed lengths: reserve the last complete block's byte length, the marker's byte length
+    computed with the full input byte count, and three newline bytes before allocating the head,
+    then the tail from the remaining budget. Every non-null capped result stays within its cap,
+    including the protected block and marker. A cut is supported when that reserve fits the cap
+    and both real consumers, `loop-state/core.ts` and `dispatcher/brief.ts` `parseLaneReturn`,
+    preserve their exact outcomes before and after the cut. Their fence grammar and malformed-block
+    handling differ; neither outcome may change. For example a usable 12 KiB last block fits the lane cap with a full-copy
+    path of up to 1,024 UTF-8 bytes (and an input byte count of up to 16 decimal digits). If the
+    block or marker cannot fit, or the cut changes either parser outcome, leave the text whole
+    rather than truncate the structured return, promote a stale success or lose the full-copy
+    reference. In particular, the last fenced block can be malformed or otherwise unusable;
+    protecting it alone must not hide an earlier latest usable failed return. Both cap boundaries
+    preserve that failure exactly by declining an unsafe cut, and still retain the full copy.
+    These deterministic oversized/unsafe-cut fallbacks, like a missing run dir, do not promise
+    the byte cap. Malformed or annotated trailing fences that change neither outcome may still cap.
   - Limit: an idle-wake notify (no root extension can rewrite it) holds one capped lane return in
     16 KB with its framing, but pi-subagents batches completions that finish together into one
     notify, which is stored at their sum. The `context` hook still caps what the model sees.
