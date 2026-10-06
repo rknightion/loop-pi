@@ -122,6 +122,259 @@ test("root push log: one line per updated ref, old read before the push, nothing
   }
 });
 
+test("root push log: publication before a board-only tip is fully receipted even if a later command fails", { timeout: 60_000 }, async () => {
+  const { repo, remote, runDir, log } = fixture();
+  git(repo, "push", "-q", "origin", "main");
+  git(remote, "symbolic-ref", "HEAD", "refs/heads/main");
+  const base = git(repo, "rev-parse", "HEAD");
+  assert.equal(runAudit(runDir, "begin", realpathSync(repo)).status, 0);
+  mkdirSync(join(repo, "contracts"));
+  writeFileSync(join(repo, "contracts", "coverage.yaml"), "coverage: supported\n");
+  git(repo, "add", "--", "contracts/coverage.yaml");
+  git(repo, ...IDENTITY, ...NO_SIGN, "commit", "-m", "publish coverage", "--", "contracts/coverage.yaml");
+  const publication = git(repo, "rev-parse", "HEAD");
+  mkdirSync(join(repo, "backlog"));
+  writeFileSync(join(repo, "backlog", "status.yaml"), "status: parked\n");
+  git(repo, "add", "--", "backlog/status.yaml");
+  const session = startPiRpc({
+    extensions: [FAUX_EXTENSION, ROOT_EXTENSION],
+    fauxScriptPath: writeFauxScript([
+      {
+        match: "PUBLISH_CLOSEOUT", once: true,
+        toolCalls: [{ name: "bash", args: {
+          command: `git ${[...IDENTITY, ...NO_SIGN].join(" ")} commit -m 'board status' -- backlog/status.yaml; git push origin main; printf 'no match\\n' | grep '^missing-recipe:'`,
+        } }],
+      },
+      { match: ".*", text: "done" },
+    ]),
+    agentDir: freshDir("push-log-home-"), subagentTempRoot: freshDir(), cwd: repo,
+    env: { LOOP_PI_RUN_DIR: runDir },
+  });
+  try {
+    session.send({ id: "p", type: "prompt", message: "PUBLISH_CLOSEOUT" });
+    const end = await session.waitFor((e) => e.type === "tool_execution_end" && e.toolName === "bash", 30_000);
+    assert.equal(end.isError, true, "the trailing search fails, not the preceding push");
+    await session.waitFor((e) => e.type === "agent_end", 30_000);
+    const tip = git(repo, "rev-parse", "HEAD");
+    assert.notEqual(tip, publication, "a board-only commit follows the publication");
+    assert.equal(git(remote, "rev-parse", "refs/heads/main"), tip, "both commits reached the remote");
+    const lines = readLog(log);
+    assert.equal(lines.length, 1, "a successful push needs a receipt despite a later shell failure");
+    assert.deepEqual({ ...lines[0], ts: "" }, {
+      v: 1, ts: "", actor: "root", agent: null, lane: null, repo: realpathSync(repo),
+      remote: "origin", ref: "refs/heads/main", old: base, new: tip,
+    });
+    assert.deepEqual(git(repo, "rev-list", `${lines[0].old}..${lines[0].new}`).split("\n"), [tip, publication]);
+    // Negative control: a receipt covering just the board-only tip misses the publication.
+    const tipOnly = join(runDir, "tip-only.jsonl");
+    writeFileSync(tipOnly, `${JSON.stringify({ ...lines[0], old: publication })}\n`);
+    const incomplete = runAudit(runDir, "closeout", "--push-log", tipOnly);
+    assert.equal(incomplete.status, 1, incomplete.output);
+    assert.match(incomplete.output, /UNGRANTED/);
+    assert.ok(incomplete.output.includes(publication.slice(0, 12)), incomplete.output);
+    const closeout = runAudit(runDir, "closeout", "--push-log", log);
+    assert.equal(closeout.status, 0, closeout.output);
+    assert.doesNotMatch(closeout.output, /UNGRANTED/);
+    assert.match(closeout.output, /refs\/heads\/main.*GRANTED/);
+  } finally {
+    await session.close();
+  }
+});
+
+for (const mode of ["skipped", "rejected", "noop", "skipped-success", "skipped-printed", "redirected", "redirected-configured"] as const) {
+  test(`root push log: same-source foreign publication grants nothing when the planned push is ${mode}`, { timeout: 60_000 }, async () => {
+    const { repo, remote, runDir, log } = fixture();
+    git(repo, "push", "-q", "origin", "main");
+    git(remote, "symbolic-ref", "HEAD", "refs/heads/main");
+    const base = git(repo, "rev-parse", "HEAD");
+    const begin = runAudit(runDir, "begin", realpathSync(repo));
+    assert.equal(begin.status, 0, begin.output);
+    const redirected = mode.startsWith("redirected");
+    const twin = redirected ? freshDir("push-log-other-endpoint-") : undefined;
+    if (twin) {
+      git(twin, "init", "--bare");
+      git(repo, "push", "-q", twin, "main");
+      if (mode === "redirected-configured") git(repo, "config", "remote.origin.pushurl", twin);
+    }
+    writeFileSync(join(repo, "publication.yaml"), "coverage: supported\n");
+    git(repo, "add", "--", "publication.yaml");
+    git(repo, ...IDENTITY, ...NO_SIGN, "commit", "-m", "publish coverage", "--", "publication.yaml");
+    const tip = git(repo, "rev-parse", "HEAD");
+    const signalDir = freshDir("push-log-race-signal-");
+    const ready = join(signalDir, "ready");
+    const released = join(signalDir, "released");
+    const attempted = join(signalDir, "attempted");
+    if (mode === "rejected") {
+      const hook = join(remote, "hooks", "pre-receive");
+      writeFileSync(hook, `#!/bin/sh\nprintf rejected > '${attempted}'\nexit 1\n`);
+      chmodSync(hook, 0o755);
+    }
+    // The test process is the other writer. The root can only wait, skip, reject or no-op.
+    const wait = `printf ready > '${ready}'; for i in {1..500}; do [ -f '${released}' ] && break; sleep 0.02; done; test -f '${released}'`;
+    const printed = mode === "skipped-printed" ? `printf ' \\trefs/heads/main:refs/heads/main\\t${base}..${tip}\\n'; ` : "";
+    const command = redirected
+      ? `git ${mode === "redirected" ? `-c remote.origin.pushurl='${twin}' ` : ""}push origin main; ${wait}; false`
+      : mode === "rejected"
+        ? `git push origin main; ${wait}; false`
+        : `${wait}; ${printed}${mode.startsWith("skipped") ? "false && " : ""}git push origin main${mode === "noop" ? "; false" : mode === "skipped-success" ? "; true" : ""}`;
+    const session = startPiRpc({
+      extensions: [FAUX_EXTENSION, ROOT_EXTENSION],
+      fauxScriptPath: writeFauxScript([
+        { match: "FOREIGN_SAME_SOURCE", once: true, toolCalls: [{ name: "bash", args: { command } }] },
+        { match: ".*", text: "done" },
+      ]),
+      agentDir: freshDir("push-log-home-"), subagentTempRoot: freshDir(), cwd: repo,
+      env: { LOOP_PI_RUN_DIR: runDir },
+    });
+    try {
+      session.send({ id: "p", type: "prompt", message: "FOREIGN_SAME_SOURCE" });
+      await waitForCondition(() => existsSync(ready) || undefined, 30_000);
+      assert.equal(git(remote, "rev-parse", "refs/heads/main"), base, "planning and any rejected push preceded the foreign move");
+      if (mode === "rejected") {
+        assert.equal(readFileSync(attempted, "utf8"), "rejected", "the planned push really executed and was rejected");
+        unlinkSync(join(remote, "hooks", "pre-receive"));
+      }
+      if (twin) assert.equal(git(twin, "rev-parse", "refs/heads/main"), tip, "the root updated only the other endpoint");
+      // A separate process publishes the same source to the audited endpoint, not its pushurl.
+      git(repo, "push", "-q", remote, "main");
+      writeFileSync(released, "go\n");
+      const end = await session.waitFor((e) => e.type === "tool_execution_end" && e.toolName === "bash", 30_000);
+      assert.equal(end.isError, mode !== "skipped-success", JSON.stringify(end));
+      if (mode === "noop") assert.match(JSON.stringify(end.result), /up.to.date/i, "the planned push actually executed as a no-op");
+      await session.waitFor((e) => e.type === "agent_end", 30_000);
+      assert.equal(git(remote, "rev-parse", "refs/heads/main"), tip);
+      assert.equal(git(repo, "rev-parse", "HEAD"), tip, "remote and planned local source are equal");
+      const lines = readLog(log);
+      // Check audit independently too: a fabricated root receipt would grant this range.
+      if (!existsSync(log)) writeFileSync(log, "");
+      const closeout = runAudit(runDir, "closeout", "--push-log", log);
+      assert.deepEqual({ receipts: lines.length, auditExit: closeout.status }, { receipts: 0, auditExit: 1 }, closeout.output);
+      assert.match(closeout.output, /UNGRANTED/);
+      assert.ok(closeout.output.includes(tip.slice(0, 12)), closeout.output);
+    } finally {
+      await session.close();
+    }
+  });
+}
+
+// SSH transport stays wholly local: the fixture executes only Git's pack command, never ssh.
+function sshFixture(repo: string, foreign?: string): string {
+  const script = join(freshDir("push-log-ssh-bin-"), "ssh-fixture");
+  writeFileSync(script, [
+    "#!/bin/sh", "for last; do :; done",
+    ...(foreign ? [`case " $* " in *"other@fixture-host"*|*" -l other "*) last="git-receive-pack '${foreign}'";; esac`] : []),
+    'case "$last" in *git-upload-pack*|*git-receive-pack*) exec sh -c "$last";; *) exit 1;; esac',
+  ].join("\n"));
+  chmodSync(script, 0o755);
+  git(repo, "config", "core.sshCommand", script);
+  return script;
+}
+
+for (const form of ["scp", "url"] as const) {
+  test(`root endpoint: canonical SSH ${form} username publication survives trailing failure`, { timeout: 60_000 }, async () => {
+    const { repo, remote, runDir, log } = fixture();
+    sshFixture(repo);
+    const endpoint = form === "scp" ? `fixture@fixture-host:${remote}` : `ssh://fixture@fixture-host${remote}`;
+    git(repo, "remote", "set-url", "origin", endpoint);
+    git(repo, "push", "-q", "origin", "main");
+    git(remote, "symbolic-ref", "HEAD", "refs/heads/main");
+    const base = git(repo, "rev-parse", "HEAD");
+    const begin = runAudit(runDir, "begin", realpathSync(repo));
+    assert.equal(begin.status, 0, begin.output);
+    git(repo, ...IDENTITY, ...NO_SIGN, "commit", "--allow-empty", "-m", "publication");
+    const tip = git(repo, "rev-parse", "HEAD");
+    const session = startPiRpc({
+      extensions: [FAUX_EXTENSION, ROOT_EXTENSION],
+      fauxScriptPath: writeFauxScript([
+        { match: "SSH_PUBLICATION", once: true, toolCalls: [{ name: "bash", args: { command: "git push --set-upstream origin main; false" } }] },
+        { match: ".*", text: "done" },
+      ]),
+      agentDir: freshDir("push-log-home-"), subagentTempRoot: freshDir(), cwd: repo,
+      env: { LOOP_PI_RUN_DIR: runDir },
+    });
+    try {
+      session.send({ id: "p", type: "prompt", message: "SSH_PUBLICATION" });
+      const end = await session.waitFor((e) => e.type === "tool_execution_end" && e.toolName === "bash", 30_000);
+      assert.equal(end.isError, true);
+      await session.waitFor((e) => e.type === "agent_end", 30_000);
+      assert.equal(git(remote, "rev-parse", "refs/heads/main"), tip, "real local SSH pack transport succeeded");
+      assert.match(JSON.stringify(end.result), /To (?:ssh:\/\/)?fixture-host/);
+      if (!existsSync(log)) writeFileSync(log, "");
+      const closeout = runAudit(runDir, "closeout", "--push-log", log);
+      const lines = readLog(log);
+      assert.deepEqual({ receipts: lines.length, auditExit: closeout.status }, { receipts: 1, auditExit: 0 }, closeout.output);
+      assert.deepEqual({ ...lines[0], ts: "" }, {
+        v: 1, ts: "", actor: "root", agent: null, lane: null, repo: realpathSync(repo),
+        remote: "origin", ref: "refs/heads/main", old: base, new: tip,
+      });
+    } finally { await session.close(); }
+  });
+}
+
+for (const mode of ["mirror", "restored-url", "ssh-user", "ssh-environment", "ssh-config", "ambiguous-push"] as const) {
+  test(`root endpoint: ${mode} publication cannot grant foreign same-SHA origin`, { timeout: 60_000 }, async () => {
+    const { repo, remote, runDir, log } = fixture();
+    const twin = freshDir("push-log-mirror-");
+    git(twin, "init", "--bare");
+    const ssh = mode.startsWith("ssh-") ? sshFixture(repo, twin) : undefined;
+    if (ssh) git(repo, "remote", "set-url", "origin", `fixture@fixture-host:${remote}`);
+    git(repo, "push", "-q", "origin", "main");
+    git(repo, "remote", "add", "mirror", twin);
+    git(repo, "push", "-q", "mirror", "main");
+    for (const r of [remote, twin]) git(r, "symbolic-ref", "HEAD", "refs/heads/main");
+    const base = git(repo, "rev-parse", "HEAD");
+    const begin = runAudit(runDir, "begin", realpathSync(repo));
+    assert.equal(begin.status, 0, begin.output);
+    if (mode === "restored-url") git(repo, "remote", "set-url", "origin", twin);
+    if (mode === "ambiguous-push") {
+      git(repo, "config", "--add", "remote.origin.pushurl", remote);
+      git(repo, "config", "--add", "remote.origin.pushurl", twin);
+    }
+    git(repo, ...IDENTITY, ...NO_SIGN, "commit", "--allow-empty", "-m", "publication");
+    const tip = git(repo, "rev-parse", "HEAD");
+    const signal = freshDir("push-log-endpoint-signal-");
+    const ready = join(signal, "ready"), released = join(signal, "released");
+    const wait = `printf ready > '${ready}'; for i in {1..500}; do [ -f '${released}' ] && break; sleep 0.02; done; test -f '${released}'`;
+    const command = mode === "mirror" ? `git push mirror main; ${wait}; false`
+      : mode === "restored-url" ? `git push origin main; git remote set-url origin '${remote}'; ${wait}; false`
+      : mode === "ssh-user" ? `git remote set-url origin 'other@fixture-host:${remote}'; git push origin main; git remote set-url origin 'fixture@fixture-host:${remote}'; ${wait}; false`
+      : mode === "ssh-environment" ? `GIT_SSH_COMMAND='${ssh} other@fixture-host' git push origin main; ${wait}; false`
+      : mode === "ssh-config" ? `git config core.sshCommand '${ssh} other@fixture-host'; git push origin main; git config core.sshCommand '${ssh}'; ${wait}; false`
+      : `git push origin main; ${wait}; false`;
+    const session = startPiRpc({
+      extensions: [FAUX_EXTENSION, ROOT_EXTENSION],
+      fauxScriptPath: writeFauxScript([
+        { match: "ENDPOINT_SCOPE", once: true, toolCalls: [{ name: "bash", args: { command } }] },
+        { match: ".*", text: "done" },
+      ]),
+      agentDir: freshDir("push-log-home-"), subagentTempRoot: freshDir(), cwd: repo,
+      env: { LOOP_PI_RUN_DIR: runDir },
+    });
+    try {
+      session.send({ id: "p", type: "prompt", message: "ENDPOINT_SCOPE" });
+      await waitForCondition(() => existsSync(ready) || undefined, 30_000);
+      assert.equal(git(twin, "rev-parse", "refs/heads/main"), tip, "actual root publication reached mirror");
+      if (mode !== "ambiguous-push") assert.equal(git(remote, "rev-parse", "refs/heads/main"), base, "root did not publish origin");
+      git(repo, "push", "-q", remote, "main");
+      writeFileSync(released, "go\n");
+      const end = await session.waitFor((e) => e.type === "tool_execution_end" && e.toolName === "bash", 30_000);
+      assert.equal(end.isError, true);
+      await session.waitFor((e) => e.type === "agent_end", 30_000);
+      assert.equal(git(remote, "rev-parse", "refs/heads/main"), tip);
+      if (!existsSync(log)) writeFileSync(log, "");
+      const lines = readLog(log);
+      const closeout = runAudit(runDir, "closeout", "--push-log", log);
+      assert.deepEqual({ receipts: lines.length, auditExit: closeout.status }, { receipts: mode === "mirror" ? 1 : 0, auditExit: 1 }, closeout.output);
+      if (mode === "mirror") {
+        assert.equal(lines[0].remote, "mirror", "legitimate mirror receipt is preserved, not discarded");
+        assert.match(closeout.output, /remote 'mirror' ref moved: refs\/heads\/main.*\[GRANTED\]/);
+      }
+      assert.match(closeout.output, /remote 'origin' ref moved: refs\/heads\/main.*\[UNGRANTED\]/);
+      assert.ok(closeout.output.includes(tip.slice(0, 12)), closeout.output);
+    } finally { await session.close(); }
+  });
+}
+
 test("root push log: a run without the protocol marker writes no push log", { timeout: 60_000 }, async () => {
   const { repo, runDir, log } = fixture(true);
   const session = startPiRpc({

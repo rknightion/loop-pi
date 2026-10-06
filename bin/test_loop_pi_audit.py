@@ -1267,6 +1267,41 @@ class ProtoDefaultBranchTests(unittest.TestCase):
         self.assertNotIn("UNGRANTED", result.stdout)
         self.assertTrue(c1)
 
+    def test_receipt_cannot_follow_a_changed_snapshot_endpoint(self):
+        self.ready()
+        c = self.commit(self.repo, "f.txt", "ours")
+        self.logged_push(self.repo, self.start, c)
+        twin = os.path.join(self.tmp, "twin.git")
+        subprocess.run([GIT, "init", "--bare", "-q", twin], check=True, timeout=60)
+        git(self.repo, "push", "-q", twin, "main")
+        git(twin, "symbolic-ref", "HEAD", "refs/heads/main")
+        git(self.repo, "remote", "set-url", "origin", twin)
+        result = self.closeout()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(c[:12], result.stdout)
+        self.assertIn("UNGRANTED", result.stdout)
+
+    def test_receipt_remote_is_required_valid_and_exactly_scoped(self):
+        self.ready()
+        c = self.commit(self.repo, "f.txt", "ours")
+        self.logged_push(self.repo, self.start, c)
+        with open(self.log_path, encoding="utf-8") as fh:
+            original = json.loads(fh.read())
+        for remote in (None, "", " origin", "origin\n", ["origin"], {"name": "origin"}, "mirror", "--all", "a:b"):
+            with self.subTest(remote=remote):
+                entry = {**original, "remote": remote}
+                if remote is None:
+                    entry.pop("remote")
+                with open(self.log_path, "w", encoding="utf-8") as fh:
+                    fh.write(json.dumps(entry) + "\n")
+                result = self.closeout()
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn(c[:12], result.stdout)
+                self.assertIn("UNGRANTED", result.stdout)
+        with open(self.log_path, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(original) + "\n")
+        self.assertEqual(self.closeout().returncode, 0)
+
     def test_deleting_the_marker_cannot_downgrade_an_armed_snapshot(self):
         self.ready()
         self.commit(self.other, "g.txt", "unlogged")

@@ -44,7 +44,7 @@ grant a move of a remote's default branch only through the commits themselves, n
 `refs/heads/<default>` entry in the grants file (such an entry is ignored, with a warning). Every
 commit in `before..after` must satisfy one of:
 - it lies in some `old..new` range of the push log (`--push-log FILE`, default
-  `<run-dir>/push-log.jsonl`, lines `{"repo", "ref", "old", "new", ...}`) for that repository and ref;
+  `<run-dir>/push-log.jsonl`, lines `{"repo", "remote", "ref", "old", "new", ...}`) for that repository, remote and ref;
 - it touches only paths under `backlog/`;
 - it lies in a range that a member of the repository's `bot_actors` list in the grants file (exact
   bot logins: letters, digits and hyphens followed by `[bot]`) itself pushed or merged inside the snapshot window,
@@ -695,6 +695,16 @@ def is_proto2(run_dir: str | None) -> bool:
     return bool(run_dir) and os.path.isfile(os.path.join(run_dir, PROTO_MARKER))
 
 
+def valid_receipt_remote(value: object) -> bool:
+    """A single named remote, not absent, a list, a URL or an option. Never infer origin."""
+    if (not isinstance(value, str) or not value or value.startswith("-")
+            or re.search(r"[\x00-\x20\x7f~^:?*\[\\]", value)
+            or any(part in value for part in ("..", "@{", "//"))):
+        return False
+    return all(part and not part.startswith(".") and not part.endswith((".", ".lock"))
+               for part in value.split("/"))
+
+
 def load_push_log(path: str | None) -> list[dict]:
     """Well-formed push-log records; unreadable lines are skipped (they grant nothing)."""
     entries: list[dict] = []
@@ -708,6 +718,7 @@ def load_push_log(path: str | None) -> list[dict]:
                 except ValueError:
                     continue
                 if (isinstance(obj, dict) and isinstance(obj.get("repo"), str) and isinstance(obj.get("ref"), str)
+                        and valid_receipt_remote(obj.get("remote"))
                         and isinstance(obj.get("new"), str) and re.fullmatch(r"[0-9a-f]{40}", obj["new"])
                         and (obj.get("old") is None or (isinstance(obj["old"], str)
                                                          and re.fullmatch(r"[0-9a-f]{40}", obj["old"])))):
@@ -735,14 +746,15 @@ def repository_identity(repo: str) -> str | None:
     return os.path.realpath(result.stdout.strip()) if result.returncode == 0 and result.stdout.strip() else None
 
 
-def logged_commits(repo: str, ref: str, push_log: list[dict]) -> set[str]:
-    """Commits inside any logged `old..new` push range for this repository and ref."""
+def logged_commits(repo: str, remote: str, ref: str, push_log: list[dict]) -> set[str]:
+    """Commits inside logged ranges for exactly this repository, named remote and ref."""
     real = os.path.realpath(repo)
     identity = repository_identity(repo)
     covered: set[str] = set()
     identities: dict[str, str | None] = {}
     for entry in push_log:
-        if entry["ref"] != ref:
+        if (entry["ref"] != ref or not valid_receipt_remote(entry.get("remote"))
+                or entry["remote"] != remote):
             continue
         logged_repo = os.path.realpath(entry["repo"])
         if logged_repo != real:
@@ -777,7 +789,7 @@ def default_move_verdict(repo: str, remote: str, ref: str, before_sha: str, afte
     commits = rev_list(repo, f"{before_sha}..{after_sha}")
     if commits is None:
         return False, [f"cannot list commits {before_sha[:12]}..{after_sha[:12]}"]
-    logged = logged_commits(repo, ref, push_log)
+    logged = logged_commits(repo, remote, ref, push_log)
     bot_pushed: set[str] | None = None
     notes = []
     for sha in commits:
@@ -880,8 +892,13 @@ def compare_repo(name: str, before: dict, after: dict, grants: list[str] | dict,
             if ref not in verdicts:
                 before_sha, after_sha = b.get("refs", {}).get(ref), a.get("refs", {}).get(ref)
                 if before_sha and after_sha and before_sha != after_sha:
+                    # A receipt names a remote, not a transferable URL alias. Missing/changed
+                    # snapshot identity cannot spend it on the new endpoint. Independent backlog
+                    # and bot evidence keeps its existing semantics.
+                    stable_endpoint = (isinstance(url, str) and bool(url)
+                                       and not re.search(r"[\r\n\x00]", url))
                     verdicts[ref] = default_move_verdict(name, remote, ref, before_sha, after_sha,
-                                                         proto["push_log"], bot_logins, times)
+                                                         proto["push_log"] if stable_endpoint else [], bot_logins, times)
                 else:
                     verdicts[ref] = (False, [])
             return verdicts[ref]

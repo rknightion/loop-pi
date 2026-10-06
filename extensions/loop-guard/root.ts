@@ -18,7 +18,7 @@ import { evaluateOpsLaunch, QUERY_LAUNCH_EVENT } from "./ops.ts";
 import { evaluateBashCommand, evaluateBgWait, evaluateSubagentCall, evaluateWatchProcess, isAsyncSubagentLaunch, wrappedGateCommands, bindGateExecution } from "./rules.ts";
 import { loadGateDeclarations } from "./gates.ts";
 import { bashProtectedPath, protoActive, runDirFromEnv, toolWriteRefusal } from "./guard-paths.ts";
-import { planPushes, recordPushes, unloggedPushRefusal, type PlannedPush } from "./push-log.ts";
+import { capturePushExecutions, planPushes, recordPushes, unloggedPushRefusal, type PlannedPush, type PushExecutionEvidence } from "./push-log.ts";
 
 const ASYNC_COMPLETE_EVENT = "subagent:async-complete";
 
@@ -48,7 +48,7 @@ export default function (pi: ExtensionAPI) {
   const runDir = runDirFromEnv();
   const proto = () => protoActive(runDir);
   // Pushes planned at tool_call (remote branches read before the command runs), by tool call id.
-  const pendingPushes = new Map<string, PlannedPush[]>();
+  const pendingPushes = new Map<string, { plans: PlannedPush[]; evidence: PushExecutionEvidence }>();
   // `subagent` status targets (run id, or "*" for the fleet) checked since the last wake.
   const statusSinceWake = new Set<string>();
   const wake = () => statusSinceWake.clear();
@@ -119,6 +119,8 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_shutdown", () => {
     childRegistration?.dispose();
     childRegistration = undefined;
+    for (const pending of pendingPushes.values()) pending.evidence.dispose();
+    pendingPushes.clear();
   });
 
   pi.on("session_compact", () => {
@@ -170,16 +172,22 @@ export default function (pi: ExtensionAPI) {
     if (message.role === "custom" && typeof message.customType === "string" && WAKE_MESSAGES.has(message.customType)) wake();
   });
 
-  // Push log (SEAMS S1): a successful root bash call that pushed appends one line per moved branch.
+  // Push log (SEAMS S1): require the exact git invocation's successful porcelain update AND
+  // the verified remote move, even if a later closeout step fails. Remote/source equality alone
+  // cannot distinguish a skipped/rejected push from another writer publishing the same source.
+  // Unconfirmed git forms and errored PR merges fail closed.
   pi.on("tool_execution_end", async (event) => {
     const pushes = pendingPushes.get(event.toolCallId);
     if (pushes === undefined) return;
     pendingPushes.delete(event.toolCallId);
-    if (event.isError || runDir === undefined) return;
     try {
-      await recordPushes(pushes, { runDir, actor: "root", agent: null, lane: null });
+      if (runDir === undefined) return;
+      const plans = event.isError ? pushes.plans.filter((plan) => plan.kind === "push") : pushes.plans;
+      await recordPushes(plans, { runDir, actor: "root", agent: null, lane: null }, pushes.evidence);
     } catch {
       // The push log is evidence for the audit; a write failure never fails the tool call.
+    } finally {
+      pushes.evidence.dispose();
     }
   });
 
@@ -243,8 +251,12 @@ export default function (pi: ExtensionAPI) {
       const verdict = await evaluateShellLikeToolCall(event.input.command, ctx, event.input as unknown as Record<string, unknown>);
       if (verdict?.block) return verdict;
       if (proto() && runDir !== undefined) {
-        const pushes = await planPushes(event.input.command, ctx.cwd);
-        if (pushes.length) pendingPushes.set(event.toolCallId, pushes);
+        const pushes = await planPushes(event.input.command, ctx.cwd, runDir);
+        if (pushes.length) {
+          const evidence = capturePushExecutions(event.input.command, pushes);
+          pendingPushes.set(event.toolCallId, { plans: pushes, evidence });
+          event.input.command = evidence.command;
+        }
       }
       return verdict;
     }

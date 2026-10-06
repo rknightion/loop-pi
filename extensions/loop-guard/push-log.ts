@@ -9,8 +9,11 @@
 // commit this push sent (`new`): the source as resolved before the command, or (when no later step
 // of the same command can pull foreign commits into it) as resolved after it, so a commit made
 // earlier in the same command counts. A branch that another writer moved after the push, a no-op
-// push, a failed command or a remote that cannot be read writes nothing; a foreign push is never
-// absorbed into the logged range.
+// push or a remote that cannot be read writes nothing. Root git pushes additionally require the
+// specific invocation's successful porcelain update, with exact old/new SHAs; a later shell
+// failure does not discard it. A skipped/rejected/up-to-date root push cannot absorb a foreign
+// same-source publication. Unconfirmed root git forms fail closed; lanes retain their successful
+// enclosing-call check.
 //
 // `gh pr merge` (root, and lanes under an ops release surface) logs the same schema: `old` is the
 // remote base branch before the merge, `new` the PR's merge commit, written only when the PR is
@@ -25,8 +28,8 @@
 // the closeout audit then reports the move UNGRANTED (fails closed).
 
 import { execFile } from "node:child_process";
-import { appendFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { basename as pathBasename, dirname, join, resolve } from "node:path";
 import { basename, isInterpreterHead, parseCommand, resolveGitArguments, stripWrappers, textRunsPush } from "./rules.ts";
 
@@ -37,7 +40,23 @@ const SHA = /^[0-9a-f]{40}$/;
 /** The branches one push updates: named refs, or every branch (`--all`, `--branches`). */
 type PushRefs = string[] | "all";
 
+interface PushInvocation {
+  cwd: string;
+  args: string[];
+  porcelainArgs: string[];
+  /** Only supported -C options, reused for execution-time context reads. */
+  contextArgs: string[];
+}
+
+interface PushContext {
+  endpoint: string;
+  commonDir: string;
+  config: string;
+  environment: string;
+}
+
 interface PushTarget {
+  invocation?: PushInvocation;
   cwd: string;
   remote?: string;
   refspecs: string[];
@@ -57,6 +76,8 @@ export interface PlannedGitPush {
   repo: string;
   cwd: string;
   remote: string;
+  /** Exact single fetch/push endpoint, repository and effective config, held privately. */
+  context?: PushContext;
   refs: PushRefs;
   before: Map<string, string>;
   /** The source each destination ref is pushed from (a ref name or revision; for "all", the ref). */
@@ -64,6 +85,8 @@ export interface PlannedGitPush {
   /** Each destination ref's source commit, resolved before the command ran. */
   localBefore: Map<string, string>;
   afterSafe: boolean;
+  /** A literal git invocation we can observe without reconstructing shell control flow. */
+  invocation?: PushInvocation;
 }
 
 export interface PlannedPrMerge {
@@ -208,7 +231,30 @@ function commandTargets(command: string, cwd: string): { pushes: PushTarget[]; m
     if (INTEGRATING_GIT.has(resolved.args[0])) integrates();
     if (resolved.args[0] !== "push") continue;
     const target = parsePush(resolved.args.slice(1), gitCwd(stripped, dir));
-    if (target) pushes.push(target);
+    if (target) {
+      // Only intercept the literal executable and subcommand. Aliases, absolute executables and
+      // wrappers that bypass shell functions remain unconfirmed on errored calls (fail closed).
+      let subcommand = 1;
+      let safeContext = true;
+      while (stripped[subcommand]?.startsWith("-")) {
+        const option = stripped[subcommand++];
+        // -C is resolved by the planner. Other invocation overrides can change the repository,
+        // endpoint or configuration independently of that plan, so root attribution fails closed.
+        if (option !== "-C") safeContext = false;
+        if (["-C", "-c", "--git-dir", "--work-tree", "--namespace"].includes(option)) subcommand++;
+      }
+      if (safeContext && stripped[0] === "git" && stripped[subcommand] === "push") {
+        try {
+          target.invocation = {
+            cwd: realpathSync(dir), args: stripped.slice(1), contextArgs: stripped.slice(1, subcommand),
+            porcelainArgs: ["-c", "core.abbrev=40", ...stripped.slice(1, subcommand + 1), "--porcelain", ...stripped.slice(subcommand + 1)],
+          };
+        } catch {
+          // A directory unavailable at planning time cannot supply execution evidence.
+        }
+      }
+      pushes.push(target);
+    }
   }
   return { pushes, merges };
 }
@@ -286,12 +332,12 @@ export function pushTargets(command: string, cwd: string): PushTarget[] {
   return commandTargets(command, cwd).pushes;
 }
 
-function run(file: string, cwd: string, args: string[], extraEnv: Record<string, string> = {}): Promise<string | undefined> {
+function run(file: string, cwd: string, args: string[], extraEnv: Record<string, string> = {}, raw = false): Promise<string | undefined> {
   return new Promise((done) => {
     try {
       const env = { ...process.env, GIT_TERMINAL_PROMPT: "0", ...extraEnv };
       execFile(file, args, { cwd, env, timeout: GIT_TIMEOUT_MS, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 }, (err, stdout) =>
-        done(err ? undefined : String(stdout).trim()),
+        done(err ? undefined : raw ? String(stdout) : String(stdout).trim()),
       );
     } catch {
       done(undefined);
@@ -367,7 +413,54 @@ async function defaultRemote(cwd: string, current: string | undefined): Promise<
   return "origin";
 }
 
-async function planPush(target: PushTarget): Promise<PlannedGitPush | undefined> {
+// These inherited variables can change Git's repository/config/SSH transport independently of
+// its argv. Capture them exactly and privately, never in a receipt or forwarded tool output.
+const ENVIRONMENT_CAPTURE = 'JSON.stringify(Object.entries(process.env).filter(([key]) => /^(GIT_|SSH_)/.test(key) || ["HOME", "XDG_CONFIG_HOME"].includes(key)).sort(([a], [b]) => a.localeCompare(b)))';
+const gitEnvironment = () => JSON.stringify(Object.entries(process.env).filter(([key]) =>
+  /^(GIT_|SSH_)/.test(key) || ["HOME", "XDG_CONFIG_HOME"].includes(key),
+).sort(([a], [b]) => a.localeCompare(b)));
+
+/** Multiple endpoints (even identical ones) or an unnamed transport cannot supply authority. */
+function singleEndpoint(value: string | undefined): string | undefined {
+  return value && !/[\r\n\0]/.test(value) ? value : undefined;
+}
+
+async function pushContext(cwd: string, remote: string): Promise<PushContext | undefined> {
+  const [fetch, push, commonDir, config] = await Promise.all([
+    run("git", cwd, ["remote", "get-url", "--all", remote], {}, true),
+    run("git", cwd, ["remote", "get-url", "--push", "--all", remote], {}, true),
+    git(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"]),
+    git(cwd, ["config", "--null", "--list"]),
+  ]);
+  const endpoint = singleEndpoint(fetch?.replace(/\n$/, ""));
+  if (!endpoint || singleEndpoint(push?.replace(/\n$/, "")) !== endpoint || !commonDir || config === undefined) return undefined;
+  return { endpoint, commonDir, config, environment: gitEnvironment() };
+}
+
+/** When an audit baseline exists, use its endpoint, not a temporarily reconfigured remote.
+ * Linked-worktree snapshot keys resolve to the same main checkout. Missing/conflicting identity
+ * in that baseline fails closed; no snapshot or receipt is rewritten. */
+async function matchesAuditEndpoint(runDir: string | undefined, repo: string, remote: string, endpoint: string): Promise<boolean> {
+  if (!runDir) return true;
+  const path = join(runDir, "audit-before.json");
+  if (!existsSync(path)) return true;
+  try {
+    const snapshot = JSON.parse(readFileSync(path, "utf8"));
+    if (!snapshot?.repos || typeof snapshot.repos !== "object" || Array.isArray(snapshot.repos)) return false;
+    let found = false;
+    for (const [key, value] of Object.entries(snapshot.repos)) {
+      if (await mainCheckout(key) !== repo) continue;
+      const entry = (value as { remotes?: Record<string, { available?: unknown; url?: unknown }> })?.remotes?.[remote];
+      if (entry?.available !== true || typeof entry.url !== "string" || singleEndpoint(entry.url) !== endpoint) return false;
+      found = true;
+    }
+    return found;
+  } catch {
+    return false;
+  }
+}
+
+async function planPush(target: PushTarget, runDir?: string): Promise<PlannedGitPush | undefined> {
   const repo = await mainCheckout(target.cwd);
   if (!repo) return undefined;
   const current = await git(target.cwd, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
@@ -403,7 +496,9 @@ async function planPush(target: PushTarget): Promise<PlannedGitPush | undefined>
   }
   const before = await lsRemote(target.cwd, remote, refs);
   if (!before) return undefined;
-  return { kind: "push", repo, cwd: target.cwd, remote, refs, before, sources, localBefore, afterSafe: target.afterSafe };
+  let context = target.invocation ? await pushContext(target.cwd, remote) : undefined;
+  if (context && !await matchesAuditEndpoint(runDir, repo, remote, context.endpoint)) context = undefined;
+  return { kind: "push", repo, cwd: target.cwd, remote, context, refs, before, sources, localBefore, afterSafe: target.afterSafe, invocation: target.invocation };
 }
 
 /** `owner/repo` from a pull request URL or a `--repo` value (`[host/]owner/repo`). */
@@ -468,11 +563,11 @@ async function planMerge(target: MergeTarget): Promise<PlannedPrMerge | undefine
 
 /** Read the remote branches every push and PR merge in `command` will update. Run before the
  *  command executes. */
-export async function planPushes(command: string, cwd: string): Promise<PlannedPush[]> {
+export async function planPushes(command: string, cwd: string, runDir?: string): Promise<PlannedPush[]> {
   const { pushes, merges } = commandTargets(command, cwd);
   const planned: PlannedPush[] = [];
   for (const target of pushes) {
-    const one = await planPush(target);
+    const one = await planPush(target, runDir);
     if (one) planned.push(one);
   }
   for (const target of merges) {
@@ -480,6 +575,112 @@ export async function planPushes(command: string, cwd: string): Promise<PlannedP
     if (one) planned.push(one);
   }
   return planned;
+}
+
+/** Root-private execution evidence, not shell output supplied by the model or a remote read.
+ *  The wrapper saves git's porcelain stdout only after that exact invocation exits successfully.
+ *  Its per-call directory is removed at completion or session shutdown. This is the existing
+ *  honest-mistake fence, not an OS boundary against adversarial same-account file writes. */
+export interface PushExecutionEvidence {
+  command: string;
+  outputs: Map<PlannedGitPush, string>;
+  dispose(): void;
+}
+
+const shellQuote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
+
+export function capturePushExecutions(command: string, plans: PlannedPush[]): PushExecutionEvidence {
+  const dir = mkdtempSync(join(tmpdir(), "loop-push-execution-"));
+  const outputs = new Map<PlannedGitPush, string>();
+  const invocations = new Map<string, string>();
+  const branches: string[] = [];
+  for (const plan of plans) {
+    if (plan.kind !== "push" || !plan.invocation || !plan.context) continue;
+    const { cwd, args, porcelainArgs, contextArgs } = plan.invocation;
+    const key = JSON.stringify([cwd, args, plan.context]);
+    let output = invocations.get(key);
+    if (!output) {
+      output = join(dir, `push-${invocations.size}`);
+      invocations.set(key, output);
+      const matches = [`[ "$#" -eq ${args.length} ]`, `[ "$(pwd -P)" = ${shellQuote(cwd)} ]`,
+        ...args.map((arg, i) => `[ "\${${i + 1}}" = ${shellQuote(arg)} ]`)];
+      const pending = shellQuote(`${output}.pending`);
+      // Query through the same physical cwd, -C options and inherited environment as the actual
+      // invocation, on both sides of it. Keep full endpoint usernames/config privately: Git's
+      // anonymized display is never the authority. A failed context read cannot promote evidence.
+      const queries = [
+        ["remote", "get-url", "--all", plan.remote],
+        ["remote", "get-url", "--push", "--all", plan.remote],
+        ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        ["config", "--null", "--list"],
+      ];
+      const captureContext = (side: string) => [
+        ...queries.slice(0, side === "before" ? 4 : 3).map((query, i) =>
+          `command git ${[...contextArgs, ...query].map(shellQuote).join(" ")} > ${shellQuote(`${output}.${side}-${i}`)}`,
+        ),
+        `command ${shellQuote(process.execPath)} -e ${shellQuote(`process.stdout.write(${ENVIRONMENT_CAPTURE})`)} > ${shellQuote(`${output}.${side}-env`)}`,
+      ].join(" && ");
+      branches.push([
+        `if ${matches.join(" && ")}; then`,
+        "  local status context_ok=0",
+        `  if ${captureContext("before")}; then context_ok=1; fi`,
+        `  if command git ${porcelainArgs.map(shellQuote).join(" ")} > ${pending}; then status=0; else status=$?; fi`,
+        `  command cat ${pending} || :`,
+        // Up-to-date output is saved too, but cannot confirm a moved ref. Failed push output is
+        // never promoted, even if another writer publishes the very same local source later.
+        `  if [ "$status" -eq 0 ] && [ "$context_ok" -eq 1 ] && ${captureContext("after")}; then command mv ${pending} ${shellQuote(output)} || :; fi`,
+        "  return \"$status\"",
+        "fi",
+      ].join("\n"));
+    }
+    outputs.set(plan, output);
+  }
+  return {
+    command: branches.length ? `git() {\n${branches.join("\n")}\ncommand git "$@"\n}\n${command}` : command,
+    outputs,
+    dispose: () => rmSync(dir, { recursive: true, force: true }),
+  };
+}
+
+/** The successful invocation must report THIS ref's exact old/new update, not merely exit 0.
+ *  In particular an up-to-date push after a foreign same-source publication proves no move.
+ *  core.abbrev=40 above makes porcelain's update range full length; no prefix equality grants. */
+function executionConfirms(plan: PlannedGitPush, move: Moved, evidence: PushExecutionEvidence): boolean {
+  const path = evidence.outputs.get(plan);
+  if (!path) return false;
+  let output: string;
+  try {
+    output = readFileSync(path, "utf8");
+  } catch {
+    return false;
+  }
+  if (!plan.context) return false;
+  const { endpoint, commonDir, config, environment } = plan.context;
+  try {
+    for (const side of ["before", "after"]) {
+      // --set-upstream legitimately writes branch config during a push; the exact pre-execution
+      // config binds selection, while both sides must retain the endpoint/repository/environment.
+      const expected = side === "before" ? [endpoint, endpoint, commonDir, config] : [endpoint, endpoint, commonDir];
+      if (expected.some((value, i) => readFileSync(`${path}.${side}-${i}`, "utf8").replace(/\n$/, "") !== value)) return false;
+      if (readFileSync(`${path}.${side}-env`, "utf8") !== environment) return false;
+    }
+  } catch {
+    return false;
+  }
+  const lines = output.split("\n");
+  const endpoints = lines.filter((line) => line.startsWith("To "));
+  // Git removes SSH userinfo from porcelain's display. Only compare that presentation AFTER
+  // full exact private endpoint/config equality above, so another SSH user cannot inherit it.
+  const display = endpoint.replace(/^(ssh:\/\/)[^/@]+@/, "$1").replace(/^[^/@:]+@([^/:]+:)/, "$1");
+  if (endpoints.length !== 1 || endpoints[0] !== `To ${display}`) return false;
+  return lines.some((line) => {
+    const [flag, refspec, summary] = line.split("\t");
+    if (!refspec || refspec.slice(refspec.indexOf(":") + 1) !== move.ref) return false;
+    if (move.old === null) return flag === "*" && summary === "[new branch]";
+    if (flag !== " " && flag !== "+") return false;
+    const range = /^([0-9a-f]{40})\.{2,3}([0-9a-f]{40})(?: |$)/.exec(summary ?? "");
+    return range?.[1] === move.old && range?.[2] === move.new;
+  });
 }
 
 const isoSeconds = () => new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
@@ -500,7 +701,8 @@ async function pushMoves(plan: PlannedGitPush): Promise<Moved[]> {
     if (!next) continue;
     const old = plan.before.get(ref) ?? null;
     if (old === next) continue;
-    // Only the commit this push sent: never a value another writer pushed since.
+    // Restrict to the planned source. Root execution evidence also distinguishes another
+    // writer publishing this SAME source from a publication by the planned invocation.
     const sent = new Set<string>();
     const before = plan.localBefore.get(ref);
     if (before) sent.add(before);
@@ -523,12 +725,14 @@ async function mergeMoves(plan: PlannedPrMerge): Promise<Moved[]> {
   return [{ ref: plan.baseRef, old: plan.old, new: oid }];
 }
 
-/** After a successful command: append a line for every planned branch this command moved. */
-export async function recordPushes(plans: PlannedPush[], meta: PushLogMeta): Promise<number> {
+/** Append verified remote moves. Root git plans require captured successful execution; the
+ *  root excludes PR merge plans on failed calls. Lanes call only after an enclosing success. */
+export async function recordPushes(plans: PlannedPush[], meta: PushLogMeta, evidence?: PushExecutionEvidence): Promise<number> {
   const lines: string[] = [];
   for (const plan of plans) {
     const moves = plan.kind === "merge" ? await mergeMoves(plan) : await pushMoves(plan);
     for (const move of moves) {
+      if (evidence && plan.kind === "push" && !executionConfirms(plan, move, evidence)) continue;
       lines.push(
         JSON.stringify({
           v: 1,
