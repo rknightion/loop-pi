@@ -79,6 +79,10 @@ public statement of those contracts.
   a separate no-push right on a granted lane's foreground descendants.
   Installed homes adopt it only after a lock bump.
 
+## Recorded timing read seam
+
+Optional retained assistant metadata `loopPiTiming` has `{firstTokenAt: epoch ms, attempts: int, processingMs: int, headers: {x-request-id, x-ratelimit-remaining-requests, x-ratelimit-reset-requests, service-tier}}`; catalogue readers use `firstTokenAt - message.timestamp` for `ttft_ms` and explicit `attempts` / `processingMs` only, with absent or invalid values NULL. This read seam does not promise a timing emitter or a first-delta/header hook in the extension API.
+
 ## Request ceiling
 
 `extensions/request-ceiling/` is installed by both loop-guard entries (`installRequestCeiling`), so
