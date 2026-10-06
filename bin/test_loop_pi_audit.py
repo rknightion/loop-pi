@@ -688,7 +688,8 @@ class AutomationTests(unittest.TestCase):
                 "after": self.NEW if new is None else new, "timestamp": "2026-10-02T15:21:13Z",
                 "activity_type": "force_push", "actor": {"login": actor or self.ACTOR}}
 
-    def compare(self, entries, ref=None, old=None, new=None, items=None, unavailable=False):
+    def compare(self, entries, ref=None, old=None, new=None, items=None, unavailable=False,
+                pages=None):
         ref = ref or self.REF
         old = self.OLD if old is None else old
         new = self.NEW if new is None else new
@@ -714,9 +715,17 @@ class AutomationTests(unittest.TestCase):
                 json.dump({repo: {"automation": items if items is not None else [
                     {"ref_prefix": "refs/heads/renovate/", "actor": self.ACTOR}]}}, fh)
             fake = make_bin_with_gh_stub(tmp)
+            # Recorded SHAs have no local objects. Keep refusal tests offline and simulate
+            # a verified non-fast-forward, so the CLI must actually report UNGRANTED.
+            os.unlink(os.path.join(fake, "git"))
+            with open(os.path.join(fake, "git"), "w") as fh:
+                fh.write('#!/bin/sh\ncase "$*" in *" fetch "*) exit 0;; '
+                         '*" merge-base --is-ancestor "*) exit 1;; esac\n'
+                         f'exec {GIT} "$@"\n')
+            os.chmod(os.path.join(fake, "git"), 0o755)
             with open(os.path.join(fake, "gh"), "w") as fh:
                 fh.write("#!/bin/sh\n" + ("exit 1\n" if unavailable else
-                         "printf '%s\\n' '" + json.dumps([entries]) + "'\n"))
+                         "printf '%s\\n' '" + json.dumps(pages if pages is not None else [entries]) + "'\n"))
             return run_audit("compare", *paths, "--grants", grants, env_overrides={"PATH": fake})
 
     def test_recorded_two_force_push_replay(self):
@@ -726,6 +735,57 @@ class AutomationTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         self.assertIn("automation", result.stdout)
         self.assertIn(self.ACTOR, result.stdout)
+
+    def four_hops(self):
+        shas = [self.OLD, "a" * 40, self.MID, "b" * 40, self.NEW]
+        entries = [self.activity(old=old, new=new) for old, new in zip(shas, shas[1:])]
+        for index, entry in enumerate(entries):
+            entry.update(id=index, timestamp=f"2026-10-02T15:{index:02d}:00Z")
+        return entries
+
+    def test_four_hops_with_duplicate_activity_records_across_pages(self):
+        entries = self.four_hops()
+        duplicate = {**entries[1], "id": 100}  # Same transition, distinct API activity ID.
+        pages = [[entries[3], entries[2], duplicate], [entries[1], entries[0]]]
+        result = self.compare([], pages=pages)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"[automation actor={self.ACTOR}]", result.stdout)
+        self.assertNotIn("UNGRANTED", result.stdout)
+
+    def test_four_hop_chain_refuses_ungranted_missing_and_gapped_hops(self):
+        for fault in ("ungranted", "missing", "gap", "duplicate-actor", "duplicate-time",
+                      "duplicate-type", "missing-first", "missing-last"):
+            entries = self.four_hops()
+            if fault == "ungranted":
+                entries[1]["actor"] = {"login": "other-app[bot]"}
+            elif fault.startswith("missing"):
+                del entries[{"missing": 1, "missing-first": 0, "missing-last": 3}[fault]]
+            elif fault == "gap":
+                entries[2]["before"] = "c" * 40
+            else:
+                duplicate = {**entries[1], "id": 100}
+                if fault == "duplicate-actor":
+                    duplicate["actor"] = {"login": "other-app[bot]"}
+                elif fault == "duplicate-time":
+                    duplicate["timestamp"] = "2026-10-02T15:01:01Z"
+                else:
+                    duplicate["activity_type"] = "push"
+                entries.insert(2, duplicate)
+            with self.subTest(fault=fault):
+                result = self.compare(list(reversed(entries)))
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("NON-FAST-FORWARD UNGRANTED", result.stdout)
+                self.assertNotIn("[automation actor=", result.stdout)
+
+    def test_duplicate_does_not_hide_intervening_untrusted_move(self):
+        entries = self.four_hops()
+        untrusted = self.activity(old=entries[1]["after"], new=entries[1]["before"],
+                                  actor="other-app[bot]")
+        untrusted["timestamp"] = entries[1]["timestamp"]
+        entries[2:2] = [untrusted, {**entries[1], "id": 100}]
+        result = self.compare(list(reversed(entries)))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("NON-FAST-FORWARD UNGRANTED", result.stdout)
 
     def test_creation_and_deletion(self):
         zero = "0" * 40

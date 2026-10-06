@@ -620,7 +620,11 @@ def activity_entries(repo: str, remote: str, ref: str, times: tuple[str, str]) -
 def automation_actor(repo: str, remote: str, ref: str, old: str, new: str,
                      items: list[dict], defaults: list[str | None],
                      times: tuple[str, str]) -> str | None:
-    """Read push records, never commit metadata. Unknown or incomplete evidence fails closed."""
+    """Require a complete chronological chain by one granted actor, never commit metadata.
+    Adjacent records of the same transition at the same instant may have distinct API IDs;
+    collapse only those exact duplicates, not gaps, conflicting actors or later repeats.
+    Unknown or incomplete evidence fails closed.
+    """
     if (not ref.startswith("refs/heads/") or ref == "refs/heads/main"
             or None in defaults or ref in defaults):
         return None
@@ -635,13 +639,21 @@ def automation_actor(repo: str, remote: str, ref: str, old: str, new: str,
     try:
         zero = "0" * 40
         expected = old or zero
+        previous = None
         for entry in entries:
             if (entry["ref"] != ref or entry["actor"]["login"] not in candidates
                     or entry["actor"]["login"] != entries[0]["actor"]["login"]
                     or entry["activity_type"] not in {"push", "force_push", "branch_creation", "branch_deletion"}
-                    or entry["before"] != expected
+                    or not re.fullmatch(r"[0-9a-f]{40}", entry["before"])
                     or not re.fullmatch(r"[0-9a-f]{40}", entry["after"])):
                 return None
+            transition = (entry["ref"], entry["actor"]["login"], entry["activity_type"],
+                          entry["timestamp"], entry["before"], entry["after"])
+            if transition == previous:
+                continue
+            if entry["before"] != expected:
+                return None
+            previous = transition
             expected = entry["after"]
         return entries[0]["actor"]["login"] if expected == (new or zero) else None
     except (KeyError, TypeError, AttributeError):
