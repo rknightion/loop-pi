@@ -34,6 +34,11 @@ function opaque(value: string): string {
   return createHash("sha256").update(value).digest("hex").slice(0, 32);
 }
 
+/** Pinned pi-subagents uses lane.key before task text for native worktree naming. */
+export function nativeLaneKey(runDir: string, lane: string, task: string): string {
+  return `r${opaque(resolve(runDir))}l${opaque(JSON.stringify([lane, task]))}`;
+}
+
 export function laneBranch(runDir: string, lane: string, allocation = ""): string {
   return `loop/r${opaque(resolve(runDir))}/l${opaque(allocation ? JSON.stringify([lane, allocation]) : lane)}`;
 }

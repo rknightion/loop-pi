@@ -8,7 +8,7 @@ import { basename, isAbsolute, join, resolve } from "node:path";
 import { after, test } from "node:test";
 import laneWorktrees from "./index.ts";
 import { relativeGitdir } from "./metadata.ts";
-import { landParkEvents, laneBranch, lanePath, parseLaneBrief, safeLaneId } from "./core.ts";
+import { landParkEvents, laneBranch, lanePath, nativeLaneKey, parseLaneBrief, safeLaneId } from "./core.ts";
 
 const dirs: string[] = [];
 after(() => dirs.forEach((d) => rmSync(d, { recursive: true, force: true })));
@@ -754,5 +754,56 @@ test("simultaneous resumes retain single-flight ownership during asynchronous id
     const results = await Promise.all([resume("resume-a"), resume("resume-b")]);
     assert.equal(results.filter((r: any) => r?.block).length, 1);
     assert.equal(results.filter((r: any) => r === undefined).length, 1);
+  } finally { s.restore(); }
+});
+
+test("native naming is opaque, scoped and retains exact task/run identity through reload and revival", async () => {
+  const s = setup();
+  const task = ["H", "R", "N"].join("") + "-" + String(902).padStart(4, "0");
+  const text = `Lane: N1 · Task: ${task} (private native identity) · Tier: guarded\nObjective: x`;
+  try {
+    for (const extra of [{}, { worktree: true }, { isolation: "worktree", lane: { version: 1, key: task, mode: "scout", claims: ["src/**"] } }]) {
+      const a = await s.launch(text, extra);
+      const metadata = a.input.lane as Record<string, unknown>;
+      assert.equal(a.result, undefined);
+      assert.equal(a.input.task, text, "do not redact the governed brief or context");
+      assert.equal(a.input.cwd, undefined, "native/default allocations keep package-owned cwd binding");
+      assert.equal(metadata.key, nativeLaneKey(realpathSync(s.runDir), "N1", task));
+      assert.match(String(metadata.key), /^r[0-9a-f]{32}l[0-9a-f]{32}$/);
+      if ("lane" in extra) {
+        assert.equal(metadata.mode, "scout");
+        assert.deepEqual(metadata.claims, ["src/**"]);
+      }
+      await s.end(a.id, { runId: `native-${a.id}` });
+    }
+    s.reload();
+    const input = { action: "resume", id: "native-call-1" };
+    assert.equal(await s.handlers.get("tool_call")!({ toolName: "subagent", toolCallId: "revive-native", input }, s.ctx), undefined);
+    await s.end("revive-native", { runId: "revived-native" });
+    const names = s.entries.at(-1)!.data.nativeNames;
+    assert.deepEqual(names, [{ key: nativeLaneKey(realpathSync(s.runDir), "N1", task), lane: "N1", task, runs: ["native-call-1", "native-call-2", "native-call-3", "revived-native"] }]);
+    assert.notEqual(nativeLaneKey(s.runDir, "N1", task), nativeLaneKey(s.runDir, "N2", task));
+    assert.notEqual(nativeLaneKey(s.runDir, "N1", task), nativeLaneKey(s.runDir, "N1", task + "x"));
+    assert.notEqual(nativeLaneKey(s.runDir, "N1", task), nativeLaneKey(s.runDir + "x", "N1", task));
+  } finally { s.restore(); }
+});
+
+test("native naming never repairs malformed lane metadata or changes explicit shared-cwd requests", async () => {
+  const s = setup();
+  const text = "Lane: N1 · Task: T1 · Tier: guarded\nObjective: x";
+  try {
+    for (const lane of [null, [], "bad", { version: 2, key: "valid" }, { version: 1, key: "bad/key" }, { version: 1, key: "" }]) {
+      const a = await s.launch(text, { worktree: true, lane });
+      assert.equal(a.result?.block, true);
+      assert.deepEqual(a.input.lane, lane, "a refused input must not be healed");
+    }
+    for (const extra of [{ worktree: false }, { isolation: "none" }, { isolation: "worktree", worktree: false }, { workflow: "example" }]) {
+      const a = await s.launch(text, extra);
+      assert.deepEqual(a.input, { agent: "lane-worker", task: text, ...extra });
+    }
+    const extra = { version: 1, key: "valid", unexpected: true };
+    const a = await s.launch(text, { worktree: true, lane: extra });
+    assert.equal((a.input.lane as Record<string, unknown>).unexpected, true, "unknown fields remain for package rejection");
+    assert.equal(existsSync(join(s.runDir, "worktrees")), false);
   } finally { s.restore(); }
 });

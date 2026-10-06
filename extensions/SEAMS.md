@@ -367,6 +367,19 @@ paths are exact, bash write detection is best-effort.
   the recorded allocation base. After session start, earlier runs remain live
   until their async `status.json` is terminal; absent status keeps them. Merged branches may be
   removed on authorised release, unmerged branches retained. State entry: `lane-worktrees-state`.
+  Under protocol 2, governed named single-agent tool launches not intercepted for root-owned
+  retention (including omitted worktree flags resolved by package defaults and missing or
+  unsupported Landing) bind version-1 lane metadata with an opaque `r<32hex>l<32hex>` key derived
+  from the canonical run directory and original lane/task pair. Explicit shared-cwd requests,
+  workflows, conflicting shapes and RPC launches keep their existing handling. Existing lane
+  fields are preserved; malformed lane version/key is refused before naming is changed, and
+  the package still validates all other fields. The original brief, task identity and guard-owned
+  `extensionBindings` are unchanged. Optional `nativeNames [{key,lane,task,runs}]` in
+  `lane-worktrees-state` records native launch and tool-resume run correlations when results provide
+  a run id; multiple naming-identity prefix matches refuse, while package validation remains
+  authoritative for target resolution, ownership and revival. This map is best-effort correlation,
+  not allocation or cleanup authority: it neither rewrites old refs nor changes package cleanup
+  or guarantees native resumability. Existing root-owned retained-worktree release rules are unchanged.
 - **loop-guard, root**: refuses `loop-state` with `--by ext|daemon|dispatcher`, a `by=` field other
   than `root`, `--run-dir`, a stdin `by` field or an `append` event on stdin from a file (`< file`),
   edit/write into the run dir, `~/repos/agent-docs/authority/` or the planner's
