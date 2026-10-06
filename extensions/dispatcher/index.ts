@@ -14,8 +14,8 @@
 // not loaded in a dispatcher session.
 // Before `loopPi.onClose` it commits the backlog Done edits with `git commit -- backlog`, unpushed.
 // The completion pi-subagents injects for each lane is capped like a model root's (S6,
-// ../loop-state/return-cap.ts) when pi hands it to `message_end`: the scheduler reads the full text
-// from the async-complete payload. An idle-wake notice reaches no extension message event; the lane
+// ../loop-state/return-cap.ts) when pi hands it to `message_end`: the scheduler reads the lane's
+// output from the async-complete payload, which the lane has already capped. An idle-wake notice reaches no extension message event; the lane
 // has already capped its own return to fit (S6, loop-guard's lane entry).
 
 import { execFile } from "node:child_process";

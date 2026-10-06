@@ -310,19 +310,27 @@ paths are exact, bash write detection is best-effort.
   a notify message; the dispatcher lets the wake prompt through to its idle model; and the lane caps
   its own return (below).
 - **Return cap** (lane: loop-guard's lane entry at the child's assistant `message_end`; root:
-  loop-state at `message_end`, plus the `context` hook for already-stored messages). A lane's final
-  assistant text (no tool call, not an error) over 14,336 bytes is capped in the lane the same way,
-  with the full text at `<run dir>/returns/lane-<lane id or session id>-<sha16>.md`; with no run dir
-  it is left whole. That keeps an idle-wake notify, which no root extension can rewrite, at 16 KB or
-  less with the notify's own lines. At the root a
-  `subagent-notify` message over 16,384 bytes becomes its first 6,144 bytes, an omission line naming
-  the full copy, its last 8,192 bytes and the `lane-return` block if it is not in the tail. The
-  `return` event is parsed from the uncapped payload. With no run dir it is left uncapped. The
-  dispatcher's RPC completion path applies the same cap. The full copy is pi-subagents' saved output
-  only when its structured completion (the async-complete payload's single result `savedOutputPath`,
-  for the notify's own last `Retention-managed async directory:` line) or a reference-only marker on
-  the first line of the lane's output names it; a path in the return body is never used. Otherwise
-  `returns/<runId>.md`.
+  loop-state at `message_end`, plus the `context` hook for already-stored messages).
+  - Lane: the last non-empty text part of an assistant message with no tool call and no error (the
+    part pi-subagents' `getFinalOutput` returns) over 14,336 bytes becomes its first 4,096 bytes, an
+    omission line naming `<run dir>/returns/lane-<lane id or session id>-<sha16>.md` (the full
+    text), the `lane-return` block if it is not in the tail, and its last 6,144 bytes. It is
+    replaced in place without its text signature; other parts are untouched. With no run dir it is
+    left whole. Every child that loads the lane entry is capped, foreground children included, and
+    the lane's own session keeps only the capped text. A lane's output, its async-complete payload
+    and pi-subagents' saved output file are therefore the capped text: the `return` event is parsed
+    from it, and the full text is behind the lane's omission line.
+  - Root: a `subagent-notify` message over 16,384 bytes becomes its first 6,144 bytes, an omission
+    line naming the full copy, its last 8,192 bytes and the `lane-return` block if it is not in the
+    tail. With no run dir it is left uncapped. The dispatcher's RPC completion path applies the same
+    cap. The full copy is pi-subagents' saved output only when its structured completion (the
+    async-complete payload's single result `savedOutputPath`, for the notify's own last
+    `Retention-managed async directory:` line) or a reference-only marker on the first line of the
+    lane's output names it; a path in the return body is never used. Otherwise `returns/<runId>.md`.
+  - Either cap: a head cut that would fall inside the last block ends before it instead.
+  - Limit: an idle-wake notify (no root extension can rewrite it) holds one capped lane return in
+    16 KB with its framing, but pi-subagents batches completions that finish together into one
+    notify, which is stored at their sum. The `context` hook still caps what the model sees.
 - **Closeout**: `/loop-closeout` (loop-wait) emits `pi.events.emit("loop-closeout", {lines, pending})`
   after its sweep; loop-continuation runs
   `loop-pi-audit closeout --run-dir <rd> [--grants <rd>/audit-grants.json --grants-sha256 <hex>] --push-log <rd>/push-log.jsonl`,

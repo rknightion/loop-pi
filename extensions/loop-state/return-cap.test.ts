@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import loopState from "./index.ts";
+import { parseLaneReturn } from "./core.ts";
 import { capLaneAssistantMessage, capNotifyContent, capText, completionInfo, HEAD_BYTES, LANE_RETURN_CAP_BYTES, RETURN_CAP_BYTES, TAIL_BYTES } from "./return-cap.ts";
 
 const dirs: string[] = [];
@@ -180,4 +181,27 @@ test("a lane message that calls a tool, ended in error, fits, or has no run dir 
   assert.equal(capLaneAssistantMessage({ role: "assistant", content: text(huge) }, undefined, "k"), undefined);
   assert.equal(capLaneAssistantMessage({ role: "user", content: text(huge) }, runDir, "k"), undefined);
   assert.ok(capLaneAssistantMessage({ role: "assistant", content: text(huge) }, runDir, "k"));
+});
+
+test("a block that straddles the head cut is not split: the head stops before it and the block parses", () => {
+  const block = `\`\`\`lane-return\n{"v":2,"lane":"L1","status":"complete","sha":null,"landed":false,"pad":"${"p".repeat(400)}"}\n\`\`\``;
+  const text = `${"a".repeat(HEAD_BYTES - 100)}\n${block}\n${"log line\n".repeat(3_000)}END`;
+  for (const capped of [capText(text, "/full.md"), capLaneAssistantMessage({ role: "assistant", content: [{ type: "text", text }] }, fresh(), "k")?.content]) {
+    const out = typeof capped === "string" ? capped : (capped as { text: string }[])[0].text;
+    assert.ok(out, "capped");
+    assert.deepEqual(parseLaneReturn(out), parseLaneReturn(text));
+    assert.equal(out.split("```lane-return").length - 1, 1, "exactly one opener");
+  }
+});
+
+test("a lane caps only the last non-empty text part, which is the output pi-subagents returns", () => {
+  const runDir = fresh();
+  const last = `${BLOCK}\n${"z".repeat(LANE_RETURN_CAP_BYTES)}`;
+  const content = [{ type: "text", text: "early note" }, { type: "thinking", thinking: "t" }, { type: "text", text: last, textSignature: "sig" }, { type: "text", text: " " }];
+  const capped = capLaneAssistantMessage({ role: "assistant", content }, runDir, "k")!.content as { type: string; text?: string; textSignature?: string }[];
+  assert.deepEqual(capped.map((p) => p.type), ["text", "thinking", "text", "text"]);
+  assert.equal(capped[0].text, "early note");
+  assert.equal(capped[2].textSignature, undefined, "the signature of altered text is dropped");
+  assert.ok(capped[2].text!.includes(BLOCK) && Buffer.byteLength(capped[2].text!) <= LANE_RETURN_CAP_BYTES);
+  assert.equal(capLaneAssistantMessage({ role: "assistant", content: [{ type: "text", text: last }, { type: "text", text: "short final" }] }, runDir, "k"), undefined);
 });
