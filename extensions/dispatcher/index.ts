@@ -33,6 +33,7 @@ import { parseLaunch } from "./launch.ts";
 import { isParentWake } from "../loop-continuation/state.ts";
 import { Dispatcher, type CloseReason, type Ports } from "./scheduler.ts";
 import { capNotifyMessage } from "../loop-state/return-cap.ts";
+import laneWorktrees from "../lane-worktrees/index.ts";
 
 export const IDLE_PROVIDER = "loop-dispatch";
 export const IDLE_MODEL = "idle";
@@ -109,6 +110,9 @@ export function backlogTitle(plain: string): string | undefined {
 }
 
 export default function (pi: ExtensionAPI) {
+  // Passive RPC request/reply correlation and completion/startup patch capture; no disposition
+  // inference from dispatcher task-level land/accept events and no durable patch cleanup.
+  laneWorktrees(pi);
   const idle = fauxProvider({ provider: IDLE_PROVIDER, models: [{ id: IDLE_MODEL, contextWindow: 1_000_000, maxTokens: 16 }] });
   const reply = async () => {
     idle.appendResponses([reply]);
