@@ -9,7 +9,7 @@
   "toolActivation": "eager",
   "disabledFeatures": [
     "agent-management", "watchdog", "panes", "missions", "lane-management", "spawn-budget-grants",
-    "preflight", "lane-metadata", "gates", "usage-budgets", "tool-budgets", "control-overrides",
+    "preflight", "gates", "usage-budgets", "tool-budgets", "control-overrides",
     "external-machines"
   ],
   "control": { "activeNoticeAfterMs": 3600000 },

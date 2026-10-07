@@ -26,7 +26,8 @@ public statement of those contracts.
   whole (proved live 2026-10-01: 120 s `upstream_request_timeout` with the flags on, 1.6 s with them
   off). pi's built-in extensions are switched off in `settings.json`; `bg_wait` and
   `subagents_enable` are excluded at the launcher. Unused pi-subagents feature groups are in
-  `disabledFeatures`; `workflow-scripts` stays enabled and guarded, because disabling it swaps
+  `disabledFeatures`; `lane-metadata` stays enabled because lane-worktrees binds `lane.key` on governed
+  native launches, and `workflow-scripts` stays enabled and guarded, because disabling it swaps
   `workflow` for unguarded `tasks` / `chain`.
 - Installed layout: `<prefix>/extensions/<name>/...` next to `<prefix>/node_modules/`
   (pi-subagents at `<prefix>/node_modules/pi-subagents`). In the source checkout the same relative

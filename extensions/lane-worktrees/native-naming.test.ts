@@ -32,7 +32,10 @@ function fixture() {
   mkdirSync(join(agentDir, "agents"));
   writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [PI_SUBAGENTS_PACKAGE_DIR] }));
   mkdirSync(join(agentDir, "extensions", "subagent"), { recursive: true });
-  writeFileSync(join(agentDir, "extensions", "subagent", "config.json"), JSON.stringify({ agentExcludeDirs: ["~/.agents"], worktree: true, worktreeProvider: "native", worktreeBaseDir: freshDir("naming-native-") }));
+  // Start from the shipped feature configuration so a disabled feature that rejects the injected
+  // lane metadata fails here, not in a live loop.
+  const shipped = JSON.parse(readFileSync(join(ROOT, "home", "extensions", "subagent", "config.json"), "utf8"));
+  writeFileSync(join(agentDir, "extensions", "subagent", "config.json"), JSON.stringify({ ...shipped, agentExcludeDirs: ["~/.agents"], worktree: true, worktreeProvider: "native", worktreeBaseDir: freshDir("naming-native-") }));
   writeFileSync(join(agentDir, "agents", "lane-worker.md"), [
     "---", "name: lane-worker", "description: Naming proof", "tools: bash", "extensions: []",
     `subagentOnlyExtensions: ${FAUX_EXTENSION}`, "model: faux/faux-1", "---", "", "worker",
