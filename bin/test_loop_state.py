@@ -14,6 +14,15 @@ SCRIPT = os.path.join(HERE, "loop-state")
 OPEN = ["open", "goal_sha256=" + "a" * 64, "tier=routine", "root=llm", "root_model=m", 'envelope=["T1","T2"]']
 
 
+def legacy_audit(lanes):
+    return {
+        "by_tier": {tier: {"lanes": len(lanes) if tier == "unknown" else 0, "reviews": 0, "coderabbit": 0}
+                    for tier in ("routine", "guarded", "unknown")},
+        "audit_lanes": [{"lane": lane, "run": run, "tasks": tasks, "tier": "unknown",
+                         "surface": None, "kind": None, "coderabbit": False} for lane, run, tasks in lanes],
+    }
+
+
 def load_cli():
     """bin/loop-state as a module, to render digest detail levels a small log never reaches."""
     import importlib.machinery
@@ -55,6 +64,41 @@ class Base(unittest.TestCase):
         self.append(*OPEN)
         self.append("admit", "task=T1", "source=envelope", 'owned=["a/**"]', "accept=ok")
         self.append("admit", "task=T2", "source=loop-created", "owned=b.txt", "accept=ok")
+
+
+class TierSurfaceTests(Base):
+    def test_malformed_constituent_does_not_break_tolerant_digest(self):
+        self.append(*OPEN)
+        with open(self.log, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"ev": "dispatch", "task": "T1", "run": "r1", "tasks": [["T1"]]}) + "\n")
+        result = run("digest", self.log, "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["by_tier"]["unknown"]["lanes"], 1)
+
+    def test_tier_surface_audit_and_legacy(self):
+        self.append(*OPEN)
+        self.append("admit", "task=T1", "source=envelope", 'owned=["src/auth/**"]',
+                    "accept=ok", "tier=guarded", 'surfaces=["**/auth/**"]')
+        self.append("admit", "task=T2", "source=envelope", "owned=b.ts", "accept=ok", "tier=routine")
+        self.append("dispatch", "lane=L1", "task=T1", "agent=lane-worker", "run=r1", "base=abc", "surface=**/auth/**")
+        self.append("return", "lane=L1", "run=r1", "status=complete",
+                    'coderabbit={"ran":true,"major":0,"unreviewed":0}')
+        self.append("dispatch", "lane=L2", "task=T2", "agent=lane-worker", "run=r2", "base=abc")
+        self.append("dispatch", "lane=L3", "task=T1,T2", 'tasks=["T1","T2"]',
+                    "agent=reviewer", "run=r3", "base=abc", "kind=review")
+        self.append("dispatch", "lane=L4", "task=old", "agent=reviewer", "run=r4", "base=abc")
+        self.assertEqual(run("check", self.log).returncode, 0)
+        summary = json.loads(run("digest", self.log, "--json").stdout)
+        self.assertEqual(summary["by_tier"]["guarded"]["lanes"], 2)
+        self.assertEqual(summary["by_tier"]["guarded"]["reviews"], 1)
+        self.assertEqual(summary["by_tier"]["guarded"]["coderabbit"], 1)
+        self.assertEqual(summary["by_tier"]["routine"]["lanes"], 1)
+        self.assertEqual(summary["by_tier"]["unknown"]["lanes"], 1)
+        self.assertEqual(summary["by_tier"]["unknown"]["reviews"], 0)
+        self.assertEqual(summary["audit_lanes"][2]["tasks"], ["T1", "T2"])
+        self.assertIn("guarded: lanes 2 reviews 1 coderabbit 1", run("digest", self.log).stdout)
+        self.assertEqual(self.events()[1]["surfaces"], ["**/auth/**"])
+        self.assertEqual(self.events()[3]["surface"], "**/auth/**")
 
 
 class ValidationTests(Base):
@@ -523,7 +567,8 @@ class DigestTests(Base):
         self.assertIn("## Admissible (1)\nT2", text)
         self.assertEqual(
             json.loads(self.digest("--json")),
-            {"live_lanes": 1, "open_tasks": 2, "admissible": ["T2"], "parked": ["T4"]},
+            {"live_lanes": 1, "open_tasks": 2, "admissible": ["T2"], "parked": ["T4"],
+             **legacy_audit([("L1", "r1", ["T1"]), ("L2", "r2", ["T3"])])},
         )
 
     def test_landed_task_whose_run_failed_shows_its_status(self):
@@ -607,7 +652,7 @@ class DigestTests(Base):
         self.append(*OPEN)
         self.assertEqual(
             json.loads(self.digest("--json")),
-            {"live_lanes": 0, "open_tasks": 0, "admissible": [], "parked": []},
+            {"live_lanes": 0, "open_tasks": 0, "admissible": [], "parked": [], **legacy_audit([])},
         )
 
     def test_missing_log_exits_1(self):
@@ -622,7 +667,8 @@ class DigestTests(Base):
         self.assertEqual(j["admissible"], ["T1", "T2"])
         self.append("return", "lane=L5", "run=r5", "status=failed", "exit=1")
         j = json.loads(self.digest("--json"))
-        self.assertEqual(j, {"live_lanes": 0, "open_tasks": 2, "admissible": ["T1", "T2"], "parked": []})
+        self.assertEqual(j, {"live_lanes": 0, "open_tasks": 2, "admissible": ["T1", "T2"], "parked": [],
+                             **legacy_audit([("L5", "r5", ["T1,T2"])])})
         self.assertNotIn("T1,T2", self.digest())
 
     def test_a_gate_exit_may_be_null(self):

@@ -293,7 +293,33 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
         agent: brief.agent,
         run: runId,
         base: await gitHead(),
+        tier: brief.tier,
       };
+      if (brief.surface) event.surface = brief.surface;
+      const review = ["reviewer", "reviewer-high", "security-reviewer"].includes(brief.agent);
+      const tasks = brief.tasks ?? [...new Set(brief.task.split(","))];
+      event.tasks = tasks;
+      if (review) {
+        // Record the selected launch role now; readers must not guess historical roles from names.
+        event.kind = "review";
+        delete event.tier;
+        const admitted = new Map<string, string>();
+        try {
+          for (const line of readFileSync(log, "utf8").split("\n")) {
+            try {
+              const row = JSON.parse(line);
+              if (row.ev === "admit" && typeof row.task === "string") {
+                if (row.tier === "routine" || row.tier === "guarded") admitted.set(row.task, row.tier);
+                else admitted.delete(row.task);
+              }
+            } catch { /* A torn line holds no usable admit. */ }
+          }
+        } catch { /* No admit evidence means an unknown review tier, not the brief's tier. */ }
+        const tiers = tasks.map((task) => admitted.get(task));
+        if (tiers.length && tiers.every((tier) => tier !== undefined)) {
+          event.tier = tiers.includes("guarded") ? "guarded" : "routine";
+        }
+      }
       if (deadline) event.deadline = deadline;
       const result = await append(event, log);
       if (result.code !== 0) {
@@ -434,7 +460,13 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
       const input = event.input as Record<string, unknown>;
       if (input.action !== undefined || typeof input.agent !== "string") return;
       const brief = parseBrief(input.task);
-      if (brief) briefs.set(event.toolCallId, { ...brief, agent: input.agent });
+      if (brief) {
+        // A guard-bound ops surface is an explicit identifier, never inferred from an agent name.
+        const bindings = input.extensionBindings as Record<string, unknown> | undefined;
+        const binding = bindings?.["loop-pi.guard/1"] as { surface?: unknown } | undefined;
+        const surface = typeof binding?.surface === "string" && binding.surface ? binding.surface : brief.surface;
+        briefs.set(event.toolCallId, { ...brief, ...(surface ? { surface } : {}), agent: input.agent });
+      }
     } catch (error) {
       warn(String(error));
     }

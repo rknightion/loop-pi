@@ -138,6 +138,7 @@ export class Dispatcher {
           owned: t.owned,
           accept: t.acceptance,
           tier: this.plan.tiers[t.id],
+          surfaces: guardedHits(t.owned, this.plan.guardedExtra, this.plan.files),
         });
       }
       await this.pump();
@@ -232,7 +233,18 @@ export class Dispatcher {
       return false;
     }
     this.lanes.set(result.runId, lane);
-    await this.ports.append({ ev: "dispatch", lane: lane.lane, task, agent, run: result.runId, base: lane.base });
+    const tiers = lane.tasks.map((id) => this.plan.tiers[id]);
+    const tier = tiers.every((value) => value === "routine" || value === "guarded")
+      ? (tiers.includes("guarded") ? "guarded" : "routine") : undefined;
+    const surfaces = [...new Set(lane.tasks.flatMap((id) => {
+      const spec = this.tasks.get(id)?.current;
+      return spec ? guardedHits(spec.owned, this.plan.guardedExtra, this.plan.files) : [];
+    }))];
+    await this.ports.append({
+      ev: "dispatch", lane: lane.lane, task, tasks: lane.tasks, kind: lane.kind,
+      agent, run: result.runId, base: lane.base,
+      ...(tier ? { tier } : {}), ...(surfaces.length ? { surface: surfaces.join(", ") } : {}),
+    });
     const early = this.early.get(result.runId);
     if (early !== undefined) {
       this.early.delete(result.runId);
@@ -422,7 +434,7 @@ export class Dispatcher {
       this.addTask(spec, t.spec.id, after);
       after = spec.id;
       t.children.push(spec.id);
-      await this.ports.append({ ev: "admit", task: spec.id, source: "loop-created", owned: spec.owned, accept: spec.acceptance, tier: this.plan.tiers[spec.id] });
+      await this.ports.append({ ev: "admit", task: spec.id, source: "loop-created", owned: spec.owned, accept: spec.acceptance, tier: this.plan.tiers[spec.id], surfaces: guardedHits(spec.owned, this.plan.guardedExtra, this.plan.files) });
     }
   }
 
