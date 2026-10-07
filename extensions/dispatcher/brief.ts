@@ -6,6 +6,7 @@ import { splitList, type TaskSpec } from "./goal.ts";
 export const ATTEMPT_CEILING = 4;
 
 const DEFAULT_STOP = "Stop when the acceptance check and the gate pass on your landed candidate, or when the next step needs a file outside Owned files.";
+const CANDIDATE_STOP = "For returns candidate, leave changes uncommitted; no commit and no push. Return sha=null, landed=false and the base SHA/worktree path; the root verifies and lands the retained tree or captured patch.";
 const DEFAULT_ESCALATION = "Return status blocked with the question in `questions`; do not guess.";
 
 export interface BriefFields {
@@ -20,6 +21,8 @@ export interface BriefFields {
   stop: string;
   escalation: string;
   deadline?: string;
+  /** Gate and triage briefs return evidence, not editable candidates. Not a rendered S3 field. */
+  readOnly?: boolean;
 }
 
 export function renderBrief(f: BriefFields): string {
@@ -30,7 +33,7 @@ export function renderBrief(f: BriefFields): string {
     `Acceptance check: ${f.acceptance}`,
     `Gate: ${f.gate}`,
     `Landing: ${f.landing}`,
-    `Stop rule: ${f.stop}`,
+    `Stop rule: ${f.stop}${f.landing === "returns candidate" && !f.readOnly ? ` ${CANDIDATE_STOP}` : ""}`,
     `Escalation: ${f.escalation}`,
   ];
   if (f.deadline) lines.push(`Deadline: ${f.deadline}`);
@@ -48,7 +51,7 @@ export function taskBrief(task: TaskSpec, lane: string, tier: string): string {
     acceptance: task.acceptance,
     gate: task.gate,
     landing: task.landing,
-    stop: task.stop || DEFAULT_STOP,
+    stop: task.stop || (task.landing === "returns candidate" ? DEFAULT_STOP.replace("landed candidate", "candidate") : DEFAULT_STOP),
     escalation: task.escalation || DEFAULT_ESCALATION,
     deadline: task.deadline,
   });
@@ -69,6 +72,7 @@ export function gateBrief(lane: string, tasks: string[], tier: string, sha: stri
     landing: "returns candidate",
     stop: "Stop after one run of the gate.",
     escalation: "Return status failed with the failing tail; never edit a file.",
+    readOnly: true,
   });
 }
 
@@ -97,6 +101,7 @@ export function triageBrief(
     landing: "returns candidate",
     stop: "Stop once you can name the action and its reason.",
     escalation: "Decide park with needs owner when only the owner can decide.",
+    readOnly: true,
   });
   return [
     head,
