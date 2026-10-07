@@ -26,10 +26,12 @@ export default function (pi: ExtensionAPI) {
         output.push({ type: kind === "text" ? "text_delta" : "thinking_delta", contentIndex: 0, delta: "first", partial: message });
         await new Promise((resolve) => setTimeout(resolve, 100));
         const second = Date.now();
-        if (kind === "text") message.content = [{ type: "text", text: "firstsecond" }];
-        else message.content = [{ type: "thinking", thinking: "firstsecond" }];
-        output.push({ type: kind === "text" ? "text_delta" : "thinking_delta", contentIndex: 0, delta: "second", partial: message });
-        output.push({ type: kind === "text" ? "text_end" : "thinking_end", contentIndex: 0, content: "firstsecond", partial: message });
+        const secondDelta = kind === "text" ? script.secondDelta ?? "second" : "second";
+        const content = `first${secondDelta}`;
+        if (kind === "text") message.content = [{ type: "text", text: content }];
+        else message.content = [{ type: "thinking", thinking: content }];
+        output.push({ type: kind === "text" ? "text_delta" : "thinking_delta", contentIndex: 0, delta: secondDelta, partial: message });
+        output.push({ type: kind === "text" ? "text_end" : "thinking_end", contentIndex: 0, content, partial: message });
         if (script.trace) writeFileSync(script.trace, JSON.stringify({ first, second }));
       }
       message.stopReason = "stop";
