@@ -141,6 +141,36 @@ test("dispatch then return are appended with by=ext, base from git and the lane-
   assert.deepEqual(h.notes, []);
 });
 
+test("native review dispatch records explicit constituents, admitted tiers and ops-bound surface", async () => {
+  const r = makeRepo();
+  for (const [task, tier] of [["T1", "routine"], ["T2", "guarded"]]) {
+    execFileSync(BIN, ["append", r.log, "admit", `task=${task}`, "source=envelope", "owned=src/x.ts", "accept=ok", `tier=${tier}`]);
+  }
+  const h = harness({ reportPath: r.report, cwd: r.repo });
+  h.start();
+  h.call("review", { agent: "reviewer", task: "Lane: R1 · Task: T1,T2 · Tier: routine\nObjective: review", });
+  h.result("review", "", { runId: "review-run" });
+  h.call("security", { agent: "security-reviewer", task: "Lane: R2 · Task: batch · Tier: guarded\nTasks: T1, missing\nSurface: brief-probe",
+    extensionBindings: { "loop-pi.guard/1": { agent: "security-reviewer", surface: "bound-probe" } } });
+  h.result("security", "", { runId: "security-run" });
+  await h.shutdown();
+  const dispatches = events(r.log).filter((row) => row.ev === "dispatch");
+  assert.equal(dispatches.length, 2);
+  assert.equal(dispatches[0].kind, "review");
+  assert.deepEqual(dispatches[0].tasks, ["T1", "T2"]);
+  assert.equal(dispatches[0].tier, "guarded", "constituent tier wins over a routine review header");
+  assert.equal(dispatches[1].kind, "review");
+  assert.deepEqual(dispatches[1].tasks, ["T1", "missing"]);
+  assert.equal(dispatches[1].tier, undefined, "missing constituent evidence is not guessed from the brief");
+  assert.equal(dispatches[1].surface, "bound-probe");
+  const audit = JSON.parse(execFileSync(BIN, ["digest", r.log, "--json"], { encoding: "utf8" }));
+  assert.equal(audit.by_tier.guarded.reviews, 1);
+  assert.equal(audit.by_tier.unknown.reviews, 1);
+  assert.deepEqual(audit.audit_lanes[0].tasks, ["T1", "T2"]);
+  assert.equal(execFileSync(BIN, ["check", r.log]).length, 0);
+  assert.deepEqual(h.notes, []);
+});
+
 test("a refused resume falls back once and duplicate completions are ignored", async () => {
   const r = makeRepo();
   const h = harness({ reportPath: r.report, cwd: r.repo });

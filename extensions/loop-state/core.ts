@@ -6,6 +6,9 @@ export interface Brief {
   task: string;
   tier: "routine" | "guarded";
   deadline?: string;
+  surface?: string;
+  /** Explicit constituent task ids for a batch review, never inferred from prose. */
+  tasks?: string[];
 }
 
 const HEADER_RE = /^Lane:\s*(\S+?)\s*·\s*Task:\s*(\S+?)(?:\s*\([^·]*\))?\s*·\s*Tier:\s*(routine|guarded)\b/;
@@ -21,6 +24,13 @@ export function parseBrief(text: unknown): Brief | null {
   const brief: Brief = { lane: m[1], task: m[2], tier: m[3] as Brief["tier"] };
   const deadline = lines.map((l) => /^Deadline:\s*(\S+)\s*$/.exec(l.trim())).find((x) => x !== null);
   if (deadline) brief.deadline = deadline[1];
+  const surface = lines.map((line) => /^Surface:\s*(\S+)\s*$/.exec(line.trim())).find((match) => match !== null);
+  if (surface) brief.surface = surface[1];
+  const tasks = lines.map((line) => /^Tasks:\s*(.+)\s*$/.exec(line.trim())).find((match) => match !== null);
+  if (tasks) {
+    const ids = tasks[1].split(",").map((id) => id.trim());
+    if (ids.every((id) => /^\S+$/.test(id))) brief.tasks = [...new Set(ids)];
+  }
   return brief;
 }
 

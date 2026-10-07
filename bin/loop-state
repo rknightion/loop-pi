@@ -60,11 +60,12 @@ SCHEMA = {
     ),
     "admit": (
         {"task": STR, "source": ("envelope", "loop-created"), "owned": OWNED, "accept": STR},
-        {"tier": TIER},
+        {"tier": TIER, "surfaces": STRLIST},
     ),
     "dispatch": (
         {"lane": STR, "task": STR, "agent": STR, "run": STR, "base": STR},
-        {"deadline": STR, "model": STR, "effort": STR, "surface": STR},
+        {"deadline": STR, "model": STR, "effort": STR, "surface": STR,
+         "tier": TIER, "tasks": STRLIST, "kind": ("work", "gate", "triage", "review")},
     ),
     "return": (
         {"lane": STR, "run": STR, "status": STATUS},
@@ -502,6 +503,7 @@ def fold(path):
         "tasks": {},
         "order": [],
         "lanes": {},  # run -> {lane, task, agent, deadline}
+        "audit_lanes": {},  # dispatch metadata retained after return
         "lane_task": {},  # lane -> task
         "judgements": [],
         "last_gate": None,
@@ -544,7 +546,8 @@ def fold(path):
             st["close"] = obj
         elif ev == "admit" and isinstance(obj.get("task"), str):
             t = task(obj["task"])
-            t.update(state="admitted", dispatched=False, accepted=False, landed=False, parked=None)
+            t.update(state="admitted", dispatched=False, accepted=False, landed=False, parked=None,
+                     tier=obj.get("tier"), surfaces=obj.get("surfaces", []))
         elif ev == "dispatch" and obj.get("agent") == GATE_AGENT:
             # A composed gate names its batch (`T2,T3`) as its task. It is a live lane until it
             # returns, never a task: its result reaches tasks through gate, accept and park.
@@ -574,6 +577,9 @@ def fold(path):
             }
             st["lane_task"][lane] = obj["task"]
         elif ev == "return":
+            audit = st["audit_lanes"].get(obj.get("run"))
+            if audit is not None:
+                audit["coderabbit"] = isinstance(obj.get("coderabbit"), dict) and obj["coderabbit"].get("ran") is True
             run, lane = obj.get("run"), obj.get("lane")
             info = st["lanes"].pop(run, None)
             if info and info.get("agent") == GATE_AGENT:
@@ -629,7 +635,30 @@ def fold(path):
                 st["watches"].pop(key, None)
         elif ev == "judgement" and isinstance(obj.get("text"), str):
             st["judgements"].append(obj)
+        if ev == "dispatch":
+            constituents = obj.get("tasks")
+            if not isinstance(constituents, list) or not constituents:
+                constituents = [obj.get("task")]
+            tiers = [st["tasks"].get(tid, {}).get("tier") if isinstance(tid, str) else None
+                     for tid in constituents]
+            tier = obj.get("tier")
+            if tier not in TIER:
+                tier = ("guarded" if "guarded" in tiers else "routine") if all(t in TIER for t in tiers) else "unknown"
+            st["audit_lanes"][obj.get("run")] = {
+                "lane": obj.get("lane"), "run": obj.get("run"), "tasks": constituents,
+                "tier": tier, "surface": obj.get("surface"), "kind": obj.get("kind"), "coderabbit": False,
+            }
     return st
+
+
+def tier_audit(st):
+    counts = {tier: {"lanes": 0, "reviews": 0, "coderabbit": 0} for tier in (*TIER, "unknown")}
+    for lane in st["audit_lanes"].values():
+        group = counts[lane["tier"]]
+        group["lanes"] += 1
+        group["reviews"] += lane["kind"] == "review"
+        group["coderabbit"] += lane["coderabbit"]
+    return counts
 
 
 def classify(st):
@@ -650,6 +679,8 @@ def classify(st):
         "open_tasks": len(open_tasks),
         "admissible": admissible,
         "parked": parked,
+        "by_tier": tier_audit(st),
+        "audit_lanes": list(st["audit_lanes"].values()),
     }
 
 
@@ -724,6 +755,10 @@ def render_digest(st, judgements, task_level):
         out.append("## Root watches (%d)" % len(st["watches"]))
         for watch in st["watches"].values():
             out.append("- %s deadline %s" % (_clip(watch["what"], 160), watch.get("deadline")))
+    out.append("")
+    out.append("## Tier audit")
+    for tier, counts in summary["by_tier"].items():
+        out.append("- %s: lanes %d reviews %d coderabbit %d" % (tier, counts["lanes"], counts["reviews"], counts["coderabbit"]))
     out.append("")
     out.append("## Live lanes (%d)" % summary["live_lanes"])
     for run, info in st["lanes"].items():
