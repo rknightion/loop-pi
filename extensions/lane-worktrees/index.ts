@@ -23,6 +23,10 @@ import type { CustomEntry, ExtensionAPI, ExtensionContext } from "@earendil-work
 import { deriveLogPath, parseBrief } from "../loop-state/core.ts";
 import { landParkEvents, laneBranch, lanePath, launchedRunId, nativeLaneKey, parseLaneBrief, safeLaneId, STATE_CUSTOM_TYPE } from "./core.ts";
 import { relativeGitdir } from "./metadata.ts";
+import { captureLanePatches, decideLanePatches, type PatchRun } from "./retention.ts";
+
+export const PATCH_STATE_CUSTOM_TYPE = "lane-patches-state";
+export const PATCH_DECISION_EVENT = "lane-worktrees:patch-decision";
 import { allocationIdentity, confinedPath, prepareParent, registerAllocation, verifyAllocation, verifyRunCwd, type AllocationIdentity } from "./identity.ts";
 
 const PROTO_FILE = "loop-pi-proto";
@@ -136,6 +140,9 @@ export default function (pi: ExtensionAPI) {
   const unknown = new Set<string>();
   // Tool call id -> the lane a launch or resume belongs to, and whether this call made its worktree.
   const pending = new Map<string, { lane: string; created: boolean; branchCreated: boolean; cwd: string }>();
+  const patchRuns = new Map<string, PatchRun>();
+  const patchCalls = new Map<string, { lane: string; task: string }>();
+  const patchRpcReplies = new Map<string, { off: () => void; timer: ReturnType<typeof setTimeout> }>();
   const bashCalls = new Set<string>();
   const allocating = new Set<string>();
   const releasing = new Set<string>();
@@ -172,6 +179,85 @@ export default function (pi: ExtensionAPI) {
     });
     return typeof reportPath === "string" && reportPath ? deriveLogPath(reportPath) : null;
   }
+
+  function persistPatches() {
+    try {
+      pi.appendEntry(PATCH_STATE_CUSTOM_TYPE, { runs: [...patchRuns.values()] });
+    } catch (error) {
+      // A journal failure must not prevent byte capture or existing allocation bookkeeping.
+      warn(`patch correlation persistence failed: ${String(error)}`);
+    }
+  }
+
+  function capturePatches(run: PatchRun) {
+    const dir = runDir();
+    if (!dir) return;
+    try {
+      captureLanePatches(dir, run);
+    } catch (error) {
+      warn(`patch retention failed for ${run.runId}: ${String(error)}`);
+    }
+  }
+
+  function recordPatchRun(owner: { lane: string; task: string }, result: unknown) {
+    const id = launchedRunId(result);
+    if (!id) return;
+    const explicit = (result as { details?: { asyncDir?: unknown } } | undefined)?.details?.asyncDir;
+    const root = defaultAsyncRoot();
+    if ((typeof explicit === "string" && isAbsolute(explicit)) || root) {
+      const run: PatchRun = { ...owner, runId: id, asyncDir: typeof explicit === "string" && isAbsolute(explicit) ? explicit : join(root!, id) };
+      patchRuns.set(id, run);
+      capturePatches(run);
+      persistPatches();
+    }
+  }
+
+  function clearPatchRpcReplies() {
+    for (const reply of patchRpcReplies.values()) {
+      clearTimeout(reply.timer);
+      reply.off();
+    }
+    patchRpcReplies.clear();
+  }
+
+  // Supported package RPC bus (also used by dispatcher). Observe the unredacted request and its
+  // exact success reply; async-started.task is redacted and cannot establish lane/task identity.
+  // This observer supplies no authority, changes no params, and never rewrites package refs.
+  pi.events.on("subagents:rpc:v1:request", (data) => {
+    const d = data as { version?: unknown; requestId?: unknown; method?: unknown; params?: Record<string, unknown> } | null;
+    if (!runDir() || !d || d.version !== 1 || typeof d.requestId !== "string" || !d.requestId || patchRpcReplies.has(d.requestId)) return;
+    const params = d.params;
+    if (!params || typeof params !== "object" || Array.isArray(params)) return;
+    let owner: { lane: string; task: string } | undefined;
+    if (d.method === "spawn" && typeof params.agent === "string" && params.workflow === undefined
+      && params.script === undefined && params.tasks === undefined && params.chain === undefined) {
+      owner = parseBrief(params.task) ?? undefined;
+    } else if (d.method === "resume") {
+      const target = typeof params.id === "string" ? params.id.trim() : typeof params.runId === "string" ? params.runId.trim()
+        : typeof params.dir === "string" ? basename(resolve(params.dir)) : undefined;
+      const matches = target ? [...patchRuns.values()].filter((run) => run.runId === target || run.runId.startsWith(target)) : [];
+      if (matches.length === 1) owner = matches[0];
+    }
+    if (!owner) return;
+    const requestId = d.requestId;
+    const identity = { lane: owner.lane, task: owner.task };
+    const dispose = () => {
+      const pendingReply = patchRpcReplies.get(requestId);
+      if (!pendingReply) return;
+      clearTimeout(pendingReply.timer);
+      pendingReply.off();
+      patchRpcReplies.delete(requestId);
+    };
+    const off = pi.events.on(`subagents:rpc:v1:reply:${requestId}`, (reply) => {
+      const r = reply as { version?: unknown; requestId?: unknown; success?: unknown; data?: unknown } | null;
+      if (!r || r.version !== 1 || r.requestId !== requestId) return;
+      dispose();
+      if (r.success === true) recordPatchRun(identity, r.data);
+    });
+    const timer = setTimeout(dispose, 2 * 60_000);
+    timer.unref?.();
+    patchRpcReplies.set(requestId, { off, timer });
+  });
 
   function readLog(): string {
     const log = stateLog();
@@ -347,6 +433,9 @@ export default function (pi: ExtensionAPI) {
     lastCtx = ctx;
     sessionKey = ctx.sessionManager.getSessionFile?.() ?? ctx.sessionManager.getSessionId();
     trees.clear();
+    patchRuns.clear();
+    patchCalls.clear();
+    clearPatchRpcReplies();
     retiredRuns.clear();
     nativeNames.clear();
     pendingNames.clear();
@@ -354,6 +443,10 @@ export default function (pi: ExtensionAPI) {
     unknown.clear();
     lastSeq = null;
     for (const entry of ctx.sessionManager.getBranch()) {
+      if (entry.type === "custom" && entry.customType === PATCH_STATE_CUSTOM_TYPE) {
+        patchRuns.clear();
+        for (const run of (entry as CustomEntry<{ runs?: PatchRun[] }>).data?.runs ?? []) patchRuns.set(run.runId, run);
+      }
       if (entry.type === "custom" && entry.customType === STATE_CUSTOM_TYPE) {
         const data = (entry as CustomEntry<Persisted>).data;
         trees.clear();
@@ -367,6 +460,18 @@ export default function (pi: ExtensionAPI) {
     }
     // This runtime saw none of these runs start, so it cannot see them end: liveness is unknown.
     for (const tree of trees.values()) for (const id of tree.runs) unknown.add(id);
+    // Upgrade reconciliation includes allocations persisted before durable patch capture existed.
+    for (const owner of [...trees.values(), ...nativeNames.values()]) {
+      for (const id of owner.runs) {
+        const root = defaultAsyncRoot();
+        const explicit = "asyncDirs" in owner ? owner.asyncDirs?.[id] : undefined;
+        if (!patchRuns.has(id) && (explicit || root)) patchRuns.set(id, {
+          runId: id, lane: owner.lane, task: owner.task, asyncDir: explicit ?? join(root!, id),
+        });
+      }
+    }
+    for (const run of patchRuns.values()) capturePatches(run);
+    if (patchRuns.size) persistPatches();
   });
 
   pi.on("tool_call", async (event, ctx) => {
@@ -380,6 +485,8 @@ export default function (pi: ExtensionAPI) {
     const input = event.input as Record<string, unknown>;
     if (input.action === "resume") {
       const target = typeof input.id === "string" ? input.id.trim() : typeof input.runId === "string" ? input.runId.trim() : typeof input.dir === "string" ? basename(resolve(input.dir)) : undefined;
+      const retained = target ? [...patchRuns.values()].filter((r) => r.runId === target || r.runId.startsWith(target)) : [];
+      if (retained.length === 1) patchCalls.set(event.toolCallId, { lane: retained[0].lane, task: retained[0].task });
       if (target && [...retiredRuns].some((id) => id === target || id.startsWith(target))) return { block: true, reason: "lane-worktrees: this run's allocation was explicitly released; same-protocol resume is refused." };
       const matches = target ? [...trees.values()].flatMap((tree) => tree.runs.filter((id) => id === target || id.startsWith(target)).map((id) => ({ tree, id }))) : [];
       if (matches.length > 1) return { block: true, reason: "lane-worktrees: ambiguous resume target; use an exact run id." };
@@ -407,6 +514,7 @@ export default function (pi: ExtensionAPI) {
     if ((input.isolation === "worktree" && input.worktree === false) || (input.isolation !== undefined && input.isolation !== "worktree")) return;
     const governed = parseBrief(input.task);
     if (!governed) return;
+    patchCalls.set(event.toolCallId, { lane: governed.lane, task: governed.task });
     const dir = runDir()!;
     const brief = parseLaneBrief(input.task);
     if (!brief || (input.isolation !== "worktree" && input.worktree !== true)) {
@@ -509,6 +617,9 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("tool_execution_end", async (event) => {
+    const patchCall = patchCalls.get(event.toolCallId);
+    patchCalls.delete(event.toolCallId);
+    if (patchCall) recordPatchRun(patchCall, event.result);
     const key = pendingNames.get(event.toolCallId);
     if (key) {
       pendingNames.delete(event.toolCallId);
@@ -556,10 +667,28 @@ export default function (pi: ExtensionAPI) {
     const d = data as { runId?: unknown; id?: unknown } | null;
     const id = typeof d?.runId === "string" ? d.runId : typeof d?.id === "string" ? d.id : undefined;
     if (!id) return;
+    const patchRun = patchRuns.get(id);
+    if (patchRun) capturePatches(patchRun);
     live.delete(id);
     unknown.delete(id);
     for (const tree of [...trees.values()]) {
       if (tree.release && tree.runs.includes(id) && !isLive(tree)) void release(tree, tree.release);
+    }
+  });
+
+  // Root integration may publish an exact run decision. No inference from a lane-return claim.
+  pi.events.on(PATCH_DECISION_EVENT, (data) => {
+    const d = data as { runId?: unknown; decision?: unknown } | null;
+    const run = typeof d?.runId === "string" ? patchRuns.get(d.runId) : undefined;
+    const dir = runDir();
+    if (!dir || !run || (d?.decision !== "landed" && d?.decision !== "rejected")) return;
+    // An explicit root decision also works after package pruning made source liveness unknown.
+    // This grants future cleanup permission only; no original or durable patch is removed here.
+    try {
+      captureLanePatches(dir, run);
+      decideLanePatches(dir, run.runId, d.decision);
+    } catch (error) {
+      warn(`patch decision failed for ${run.runId}: ${String(error)}`);
     }
   });
 
@@ -579,7 +708,10 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", () => {
+    clearPatchRpcReplies();
     // Quit/reload is not root release authority. Keep candidates and original run context resumable.
+    for (const run of patchRuns.values()) capturePatches(run);
+    if (patchRuns.size) persistPatches();
     persist();
   });
 }
