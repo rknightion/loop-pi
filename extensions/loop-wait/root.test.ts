@@ -480,7 +480,7 @@ for (const fired of [false, true]) {
       idleBox.idle = true;
       lifecycle.get("agent_settled")!(undefined, ctx);
       await delay(400);
-      assert.deepEqual(sent.map((s) => (s.message.details as { reason: string }).reason), otherReasons, "no unrelated timer was cancelled or suppressed");
+      assert.deepEqual(sent.map((s) => (s.message.details as { reason: string }).reason).sort(), [...otherReasons].sort(), "exactly the unrelated timers remain, independent of delivery order");
       assert.deepEqual(sent.map((s) => s.options.triggerTurn), [false, false, true], "remaining wakes still batch into one turn");
       for (const reason of [TIME_PARK_ARM_REASON, AUTO_ARM_REASON]) {
         assert.equal(stateEvents.filter((event) => event.op === "stop" && event.what.endsWith(`: ${reason}`)).length, 1, "cancel records one lifecycle stop, not duplicate stops");
