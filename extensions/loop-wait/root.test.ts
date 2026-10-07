@@ -17,6 +17,8 @@ import {
   writeFauxScript,
 } from "./test-helpers.ts";
 
+import { AUTO_ARM_REASON, TIME_PARK_ARM_REASON } from "../loop-continuation/state.ts";
+
 const RACE_TRIGGER_EXTENSION = join(import.meta.dirname, "test-support-race-trigger.ts");
 
 // Only the direct-unit-call test below needs this: see test-support-resolve-nested-deps.mjs for
@@ -459,6 +461,34 @@ test("reconciliation after a restart re-arms a timer and reports an orphan watch
     await session2.close();
   }
 });
+
+for (const fired of [false, true]) {
+  test(`root.ts: a stop removes ${fired ? "fired queued" : "armed"} continuation clocks but preserves lane, ops and root timers`, async () => {
+    await withFakeAgentDir(async (agentDir) => {
+      const { tools, lifecycle, sent, stateEvents } = await loadRootWithFakePi();
+      const idleBox = { idle: false };
+      const ctx = fakeCtx(agentDir, idleBox);
+      lifecycle.get("session_start")!(undefined, ctx);
+      const otherReasons = ["lane run=keep agent=ops deadline", "ops clock", "root clock"];
+      for (const reason of [TIME_PARK_ARM_REASON, AUTO_ARM_REASON, ...otherReasons]) {
+        await tools.get("wake_at")!.execute("arm", { at: new Date(Date.now() + 100).toISOString(), reason }, undefined, undefined, ctx);
+      }
+      if (fired) await delay(250);
+      lifecycle.get("agent_before_settle")!({ outcome: "completed", context: { contextMessages: [{ role: "assistant", content: "PAUSED: operator stop" }] } }, ctx);
+      await delay(250);
+      assert.equal(sent.length, 0, "busy root still has not delivered wakes");
+      idleBox.idle = true;
+      lifecycle.get("agent_settled")!(undefined, ctx);
+      await delay(400);
+      assert.deepEqual(sent.map((s) => (s.message.details as { reason: string }).reason), otherReasons, "no unrelated timer was cancelled or suppressed");
+      assert.deepEqual(sent.map((s) => s.options.triggerTurn), [false, false, true], "remaining wakes still batch into one turn");
+      for (const reason of [TIME_PARK_ARM_REASON, AUTO_ARM_REASON]) {
+        assert.equal(stateEvents.filter((event) => event.op === "stop" && event.what.endsWith(`: ${reason}`)).length, 1, "cancel records one lifecycle stop, not duplicate stops");
+      }
+      await lifecycle.get("session_shutdown")!(undefined, ctx);
+    });
+  });
+}
 
 test("root.ts: wake_cancel by a unique prefix also drops a fired wake still queued behind a busy root", async () => {
   await withFakeAgentDir(async (agentDir) => {

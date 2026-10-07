@@ -24,6 +24,9 @@ import {
   subagentArgsDeadlineMs,
 } from "./lane-timers.ts";
 import { registerRuntimeEntry } from "./runtime-entry.ts";
+import { AUTO_ARM_REASON, TIME_PARK_ARM_REASON, STATE_CUSTOM_TYPE, type ContinuationState } from "../loop-continuation/state.ts";
+import { finalMarker, reportCounts } from "../loop-continuation/report-status.ts";
+import { continuationClockStopped, lastAssistantText } from "../loop-continuation/stop-controls.ts";
 
 interface WatchEvent {
   ev: "watch";
@@ -84,6 +87,7 @@ export default function (pi: ExtensionAPI): void {
   let deliveryQueue: DeliveryQueue<LoopWaitMessage> | undefined;
   let liveCtx: ExtensionContext | undefined;
   let suppressDelivery = false;
+  let clockAbortSignal: AbortSignal | undefined;
   // Session identities pi-subagents may stamp on this session's async-started events.
   let sessionIdentities = new Set<string>();
   // Deadline from a launching call's brief, by toolCallId, until that call's result names the run.
@@ -139,6 +143,8 @@ export default function (pi: ExtensionAPI): void {
   const drainEvents = () => Promise.all([...recording.values()]);
 
   const teardown = (note: string) => {
+    clockAbortSignal?.removeEventListener("abort", cancelContinuationClocks);
+    clockAbortSignal = undefined;
     suppressDelivery = true;
     watchManager?.shutdownAll(note);
     timerManager?.shutdownAll();
@@ -380,6 +386,44 @@ export default function (pi: ExtensionAPI): void {
     armLaneTimer(runId, agent, deadlineMs);
   });
 
+  function cancelContinuationClocks() {
+    const ownedReason = (reason: unknown) => reason === TIME_PARK_ARM_REASON || reason === AUTO_ARM_REASON;
+    const clocks = (timerManager?.list() ?? []).filter((timer) => ownedReason(timer.reason));
+    for (const clock of clocks) timerManager?.cancel(clock.id);
+    const dropped = deliveryQueue?.removePending((message) =>
+      message.customType === "loop-wake" && ownedReason((message.details as { reason?: unknown } | undefined)?.reason),
+    ) ?? [];
+    if (clocks.length || dropped.length) persist();
+  }
+
+  // pi skips agent_before_settle when the operator aborts an active run. Its public run signal
+  // is available at agent_start: revoke the clock synchronously on abort, even during a tool.
+  pi.on("agent_start", (_event, ctx) => {
+    liveCtx = ctx;
+    clockAbortSignal?.removeEventListener("abort", cancelContinuationClocks);
+    clockAbortSignal = ctx.signal;
+    if (clockAbortSignal?.aborted) cancelContinuationClocks();
+    else clockAbortSignal?.addEventListener("abort", cancelContinuationClocks, { once: true });
+  });
+
+  // A later stop revokes continuation's earlier promise to wake. Do this at the actionable
+  // settle boundary, before agent_settled can flush fired-but-queued wakes. Only the two exact
+  // continuation-owned reasons are eligible: root, lane deadline and ops timers remain untouched.
+  // The launch is read from its already-frozen branch entry, not a new cross-extension channel.
+  pi.on("agent_before_settle", (event, ctx) => {
+    liveCtx = ctx;
+    let continuation: ContinuationState | undefined;
+    for (const entry of ctx.sessionManager.getBranch()) {
+      if (entry.type === "custom" && entry.customType === STATE_CUSTOM_TYPE) {
+        continuation = entry.data as ContinuationState;
+      }
+    }
+    const counted = !!(continuation?.armed && continuation.launch && reportCounts(continuation.launch, ctx.cwd));
+    const marker = finalMarker(lastAssistantText(event.context.contextMessages as never[]));
+    if (!continuationClockStopped(event.outcome, counted, marker)) return;
+    cancelContinuationClocks();
+  });
+
   // session_compact/session_compact_failed fire while the session's own isCompacting flag is
   // still true (it clears immediately afterward, in the same synchronous call), so a same-tick
   // flush can see a false "still busy" reading. Retry on a short backoff instead of trusting the
@@ -404,6 +448,8 @@ export default function (pi: ExtensionAPI): void {
   });
   pi.on("agent_settled", (_event, ctx) => {
     liveCtx = ctx;
+    clockAbortSignal?.removeEventListener("abort", cancelContinuationClocks);
+    clockAbortSignal = undefined;
     scheduleFlush();
   });
 

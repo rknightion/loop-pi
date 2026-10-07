@@ -58,6 +58,7 @@ import { CONTEXT_OVERFLOW_CLASS, OPS_GRANTS_REJECTED_CLASS, runOnIncident, write
 import { loopStateBinary, readDigest } from "./close-out.ts";
 import { freezeOpsGrants } from "./ops-grants.ts";
 import { freezeStanding, STANDING_REJECTED_CLASS } from "./standing.ts";
+import { lastAssistantText } from "./stop-controls.ts";
 
 /** How often an open session re-checks the checkpoint throttle (lanes run without extensions). */
 const SYNC_TICK_MS = 60 * 1000;
@@ -78,26 +79,6 @@ function appendOpen(agentDir: string, log: string, event: Record<string, unknown
       done({ ok: false, detail: String(error) });
     }
   });
-}
-
-/** The text content of an assistant message's content blocks, or null when there is none. */
-function lastAssistantText(messages: readonly { role: string; content: unknown }[]): string | null {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const message = messages[i];
-    if (message.role !== "assistant") continue;
-    const content = message.content;
-    if (typeof content === "string") return content;
-    if (Array.isArray(content)) {
-      return content
-        .filter((block: unknown): block is { type: string; text: string } => {
-          return typeof block === "object" && block !== null && (block as { type?: unknown }).type === "text";
-        })
-        .map((block) => block.text)
-        .join("\n");
-    }
-    return null;
-  }
-  return null;
 }
 
 export default function (pi: ExtensionAPI) {

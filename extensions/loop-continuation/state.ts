@@ -3,6 +3,7 @@
 
 import type { LaunchInfo } from "./launch-detect.ts";
 import type { OpsGrants } from "./ops-grants.ts";
+import { continuationClockStopped } from "./stop-controls.ts";
 
 export const STATE_CUSTOM_TYPE = "loop-continuation-state";
 export const NUDGE_CUSTOM_TYPE = "loop-continuation";
@@ -31,15 +32,18 @@ export const MAX_NUDGES = 3;
 export const WAITING_STALE_TOLERANCE_MS = 5000;
 
 /** Why a "nudge" decision was reached, for wording the nudge text. */
-export type NudgeReason = "unmarked" | "stale-waiting" | "close-out";
+export type NudgeReason = "unmarked" | "stale-waiting" | "close-out" | "expired-park";
 
 /** The reason on the loop-wait timer this extension arms to back a WAITING deadline. */
 export const AUTO_ARM_REASON = "loop-continuation auto-arm for WAITING deadline";
+export const TIME_PARK_ARM_REASON = "loop-continuation time-gated park deadline";
 
 /** The part of `loop-state digest --json` the close-out check reads. */
 export interface CloseOutDigest {
   live_lanes: number;
   admissible: string[];
+  /** Local enrichment from recorded evidence-later parks; not part of digest --json's schema. */
+  timeParkDeadline?: string;
 }
 
 export interface ContinuationState {
@@ -103,7 +107,7 @@ export interface SettleInput {
 
 /** True when the digest shows no live lane and nothing admissible. */
 export function digestIsDrained(digest: CloseOutDigest | null): boolean {
-  return digest !== null && digest.live_lanes === 0 && digest.admissible.length === 0;
+  return digest !== null && digest.live_lanes === 0 && digest.admissible.length === 0 && !digest.timeParkDeadline;
 }
 
 export type SettleDecision =
@@ -134,8 +138,10 @@ function isStaleWaitingDeadline(deadlineIso: string, nowIso: string): boolean {
  *     NOT current: it is never queried or auto-armed, and falls straight into the same nudge path as
  *     an unmarked stop below, with `reason: "stale-waiting"` so the nudge text tells the root its
  *     deadline has passed and it must reconcile;
- *   - before the WAITING check, close out (`reason: "close-out"`) when the digest is drained and
- *     nothing but the auto-arm is armed;
+ *   - recorded evidence-later parks with a future clock get one covering timer; expired clocks
+ *     nudge the root to reconcile without automatically readmitting the task;
+ *   - before the WAITING check, close out (`reason: "close-out"`) when the digest is drained,
+ *     has no active time-gated evidence park and nothing but the auto-arm is armed;
  *   - otherwise nudge (`reason: "unmarked"`), up to MAX_NUDGES per chain; the next stop after that
  *     is allowed (release-exhausted) and, the first time in the chain, calls for an incident file.
  * A push-started turn resets the chain before any of the above is evaluated.
@@ -148,11 +154,7 @@ export function evaluateSettle(input: SettleInput): SettleDecision {
     ? { ...input.state, nudgeCount: 0, chainIncidentWritten: false }
     : input.state;
 
-  if (input.reportCounted) {
-    return { action: "release", newState: released(state) };
-  }
-
-  if (input.marker === "paused") {
+  if (continuationClockStopped(input.outcome, input.reportCounted, input.marker)) {
     return { action: "release", newState: released(state) };
   }
 
@@ -161,6 +163,27 @@ export function evaluateSettle(input: SettleInput): SettleDecision {
     input.marker === "waiting" && input.waitingDeadline
       ? isStaleWaitingDeadline(input.waitingDeadline, nowIso)
       : false;
+
+  // A clock-gated evidence park is work owed, even though digest --json lists it as parked rather
+  // than admissible. Back its clock with the existing loop-wait transport, including an unmarked
+  // stop. Never readmit the task here: a wake gives the root a turn to reevaluate its evidence.
+  // PAUSED, counted reports and abort/error outcomes returned above and remain hard stop controls.
+  const parkDeadline = input.closeOut?.digest?.timeParkDeadline;
+  const parkEpoch = parkDeadline ? Date.parse(parkDeadline) : NaN;
+  const expiredPark = Number.isFinite(parkEpoch) && parkEpoch <= Date.parse(nowIso);
+  if (parkDeadline && Number.isFinite(parkEpoch) && !expiredPark) {
+    const timers = input.queryTimers();
+    if (timers !== null) {
+      const waitingEpoch = input.marker === "waiting" && !stale && input.waitingDeadline
+        ? Date.parse(input.waitingDeadline) : NaN;
+      const at = Number.isFinite(waitingEpoch) && waitingEpoch < parkEpoch ? input.waitingDeadline! : parkDeadline;
+      const covered = timers.some((timer) => Date.parse(timer.at) <= Date.parse(at));
+      if (covered || input.armTimer(at, TIME_PARK_ARM_REASON)) {
+        return { action: "release", newState: released(state) };
+      }
+    }
+    // Missing wait provider falls through to bounded nudging, never an idle release on trust.
+  }
 
   // Close-out: a WAITING that would be released, or a plain stop that would be nudged, ends the run
   // instead when the state log shows nothing live and nothing admissible and nothing but this
@@ -174,7 +197,7 @@ export function evaluateSettle(input: SettleInput): SettleDecision {
     }
   }
 
-  if (input.marker === "waiting" && input.waitingDeadline && !stale) {
+  if (input.marker === "waiting" && input.waitingDeadline && !stale && !expiredPark) {
     const timers = input.queryTimers();
     if (timers !== null) {
       const deadlineEpoch = Date.parse(input.waitingDeadline);
@@ -198,7 +221,7 @@ export function evaluateSettle(input: SettleInput): SettleDecision {
   // A stale WAITING deadline falls straight through to here without ever querying or arming a
   // timer for a deadline that has already passed.
 
-  const reason: NudgeReason = stale ? "stale-waiting" : "unmarked";
+  const reason: NudgeReason = expiredPark ? "expired-park" : stale ? "stale-waiting" : "unmarked";
 
   if (state.nudgeCount >= MAX_NUDGES) {
     return {

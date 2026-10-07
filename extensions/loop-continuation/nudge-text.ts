@@ -39,8 +39,17 @@ export const STALE_WAITING_NOTE = [
 /** Sent when the loop state log shows nothing admissible, no live lane and nothing armed to wake. */
 export const CLOSE_OUT_TEXT = "close out: nothing admissible remains; generate the report and end the run";
 
+export const EXPIRED_PARK_NOTE = [
+  "## A time-gated park deadline has passed",
+  "",
+  "Reevaluate the recorded evidence-later park now. Its clock is a wake source, not permission to",
+  "bypass evidence or authority: resume work if its condition is satisfied, otherwise record a fresh",
+  "condition and deadline or PAUSED reason. Do not close out merely because the task is parked.",
+].join("\n");
+
 /** The nudge message body for a given nudge reason. */
 export function nudgeTextFor(reason: NudgeReason): string {
   if (reason === "close-out") return CLOSE_OUT_TEXT;
+  if (reason === "expired-park") return `${EXPIRED_PARK_NOTE}\n\n${NUDGE_TEXT}`;
   return reason === "stale-waiting" ? `${STALE_WAITING_NOTE}\n\n${NUDGE_TEXT}` : NUDGE_TEXT;
 }
