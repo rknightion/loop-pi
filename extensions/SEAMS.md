@@ -238,6 +238,15 @@ before any `await`. A missing reply means the provider extension is not loaded; 
   `codex/state-<stem>-loop<N>.jsonl` (sibling of the report) through `<agentDir>/bin/loop-state`
   for `subagent` calls whose brief starts `Lane: <id> · Task: <id> [(<title>)] · Tier: ...`, and injects the
   recovery digest (`loop-state-digest`, no turn) after compaction and at session start.
+  Admit metadata may include resolved `tier` (`routine` or `guarded`) and `surfaces` (explicit
+  ops surfaces or guarded owned-path matches). Dispatch metadata preserves `tier`, `surface`,
+  `kind` and explicit constituent `tasks`. `Ops surface:` takes precedence over `Surface:` in
+  a brief. Native reviewer launches emit `kind: review`; a `Tasks:` line or comma-separated task
+  header identifies constituents, whose admitted maximum tier is used only when every tier is
+  known. Historical missing metadata stays unknown, never inferred from an agent name.
+  Digest/query audit counts split implementation dispatches, review dispatches and reported
+  CodeRabbit reviews by known tier, with a separate unknown bucket. These fields are telemetry,
+  not authority or enforcement inputs.
   pi-subagents' async events carry `sessionId` as the parent's session file path
   (`getSessionFile() ?? getSessionId()`) and `deadlineAt` in epoch ms.
 - Lane timers: loop-wait root arms a timer on `subagent:async-started` for this session (brief
