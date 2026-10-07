@@ -432,6 +432,18 @@ paths are exact, bash write detection is best-effort.
   authoritative for target resolution, ownership and revival. This map is best-effort correlation,
   not allocation or cleanup authority: it neither rewrites old refs nor changes package cleanup
   or guarantees native resumability. Existing root-owned retained-worktree release rules are unchanged.
+  Durable patch retention is separate: `lane-patches-state` correlates named single-agent tool
+  and dispatcher RPC runs. Lifecycle completion, startup reconciliation and shutdown copy patch
+  bytes into `<run-dir>/lane-patches/<sha256(run-id)>/` outside the package's prunable async tree.
+  Content-addressed blobs and a locked, fsynced manifest preserve versions and exact lane/run/task
+  identity. Capture rejects symlink/conflicting authority and warns on journal failure without
+  skipping byte capture. The package's pruning and version pins remain unchanged.
+  `lane-worktrees:patch-decision` is a trusted extension-bus event with exact `runId` and
+  `decision: landed|rejected`; matching recorded content hashes are required before any future
+  cleanup is permitted. Task-only land/accept, child completion, park and closeout never change
+  disposition. No automatic root decision producer or durable cleanup caller is enabled:
+  missing decisions conservatively retain copies indefinitely. This does not retain workflows
+  or multi-agent launches, restore already-pruned bytes, or change retained-worktree release.
 - **loop-guard, root**: refuses `loop-state` with `--by ext|daemon|dispatcher`, a `by=` field other
   than `root`, `--run-dir`, a stdin `by` field or an `append` event on stdin from a file (`< file`),
   edit/write into the run dir, `~/repos/agent-docs/authority/` or the planner's
