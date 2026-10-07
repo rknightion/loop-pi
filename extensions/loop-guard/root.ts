@@ -98,6 +98,7 @@ export default function (pi: ExtensionAPI) {
     const sessionId = ctx.sessionManager.getSessionId();
     const extensions: { id: string; path: string }[] = [
       { id: "loop-guard-lane", path: fileURLToPath(new URL("./lane.ts", import.meta.url)) },
+      { id: "loop-call-timing", path: fileURLToPath(new URL("../call-timing/index.ts", import.meta.url)) },
     ];
     const loopWaitLanePath = fileURLToPath(new URL("../loop-wait/lane.ts", import.meta.url));
     // loop-wait is a sibling B4 lane; only register it once it exists so this

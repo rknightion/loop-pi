@@ -80,9 +80,33 @@ public statement of those contracts.
   a separate no-push right on a granted lane's foreground descendants.
   Installed homes adopt it only after a lock bump.
 
-## Recorded timing read seam
+## Recorded timing seam
 
-Optional retained assistant metadata `loopPiTiming` has `{firstTokenAt: epoch ms, attempts: int, processingMs: int, headers: {x-request-id, x-ratelimit-remaining-requests, x-ratelimit-reset-requests, service-tier}}`; catalogue readers use `firstTokenAt - message.timestamp` for `ttft_ms` and explicit `attempts` / `processingMs` only, with absent or invalid values NULL. This read seam does not promise a timing emitter or a first-delta/header hook in the extension API.
+`extensions/call-timing/index.ts` retains assistant metadata `loopPiTiming` with
+`{firstTokenAt: epoch ms | null, attempts: null, processingMs: int | null, headers: {x-request-id?, x-ratelimit-remaining-requests?, x-ratelimit-reset-requests?, service-tier?}}`.
+The root launcher loads it, and both loop-guard root and dispatcher register it as a required
+child extension (including children declaring `extensions: []`).
+
+- pi 1.0.4 supports `after_provider_response` with response headers before stream consumption,
+  `message_update` with normalized assistant deltas, and `message_end` replacement before session
+  persistence. No provider, request payload, retry policy or upstream behavior is changed.
+- `firstTokenAt` is the local `Date.now()` at the first nonempty text, thinking or tool-call delta,
+  not stream start, an empty delta, or a guessed timestamp from final content. It measures extension
+  delivery of normalized content, not raw HTTP bytes or a provider's token clock. A response without
+  such a delta has null timing. Turn/session boundaries clear state; the last observed response's
+  headers replace rather than merge earlier responses. Hooks without an active turn are ignored.
+- Only the four named response headers are retained, matched case-insensitively and stored with
+  lowercase names. No request headers or full response headers are recorded. `processingMs` is the
+  nonnegative 32-bit integer supplied by `openai-processing-ms`, or null if absent/invalid; no
+  rounding, truncation or inference from elapsed time. `service-tier` is a response header only,
+  never substituted from the request setting or response body.
+- `attempts` stays null: pi's provider-internal retries have no authoritative extension counter.
+  Catalogue readers use `firstTokenAt - message.timestamp` for `ttft_ms` and explicit
+  `attempts` / `processingMs` only, with absent or invalid values NULL. Null attempts is compatible
+  with the existing reader; natural live evidence remains open.
+- The response-header event has no request identity. This emitter scopes observations to the
+  agent's serialized turn, not arbitrary nested model calls or idle cache warming. Providers that
+  do not implement pi's instrumentation hooks yield missing headers, not invented values.
 
 ## Request ceiling
 

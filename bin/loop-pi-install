@@ -47,12 +47,12 @@ BUILD_MANIFEST = ".loop-pi-build.json"
 HOME_MANIFEST = ".loop-pi-managed.json"
 # Root-only extensions, loaded by launcher flags, never by settings packages.
 ROOT_EXTENSIONS = ("loop-guard/root.ts", "loop-wait/root.ts", "loop-continuation/index.ts", "loop-state/index.ts",
-                   "lane-worktrees/index.ts")
+                   "lane-worktrees/index.ts", "call-timing/index.ts")
 # The dispatcher host loads only its own entry: it registers the lane children itself and answers
 # pi-subagents' completion turns with an in-process idle model (extensions/dispatcher).
 DISPATCH_EXTENSIONS = ("dispatcher/index.ts",)
 # Lane entries, registered by the root guard as required child extensions.
-LANE_EXTENSIONS = ("loop-guard/lane.ts", "loop-wait/lane.ts")
+LANE_EXTENSIONS = ("loop-guard/lane.ts", "loop-wait/lane.ts", "call-timing/index.ts")
 # Operator and root CLIs from bin/, installed next to the launcher.
 CLI_TOOLS = ("loop-pi-preflight", "loop-pi-audit", "loop-gate-lock")
 # Installed into <home>/bin/ (not next to the launcher) when the source carries it.
@@ -245,7 +245,7 @@ def same_major_keg_link(missing: str, recorded_version: object) -> str:
 
 
 def missing_extensions(prefix: Path) -> List[str]:
-    return [rel for rel in ROOT_EXTENSIONS + LANE_EXTENSIONS + DISPATCH_EXTENSIONS
+    return [rel for rel in dict.fromkeys(ROOT_EXTENSIONS + LANE_EXTENSIONS + DISPATCH_EXTENSIONS)
             if not (prefix / "extensions" / rel).is_file()]
 
 

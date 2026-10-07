@@ -123,7 +123,10 @@ export default function (pi: ExtensionAPI) {
   let active: Dispatcher | undefined;
 
   pi.on("session_start", (_event, ctx: ExtensionContext) => {
-    const extensions = [{ id: "loop-guard-lane", path: fileURLToPath(new URL("../loop-guard/lane.ts", import.meta.url)) }];
+    const extensions = [
+      { id: "loop-guard-lane", path: fileURLToPath(new URL("../loop-guard/lane.ts", import.meta.url)) },
+      { id: "loop-call-timing", path: fileURLToPath(new URL("../call-timing/index.ts", import.meta.url)) },
+    ];
     const loopWaitLane = fileURLToPath(new URL("../loop-wait/lane.ts", import.meta.url));
     if (existsSync(loopWaitLane)) extensions.push({ id: "loop-wait-lane", path: loopWaitLane });
     try {

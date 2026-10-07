@@ -280,6 +280,20 @@ class InstallerTests(unittest.TestCase):
                                  "loop-pi", "loop-pi-install")
         self.assertTrue("--version" in absent and "--extension" not in absent)
 
+    def test_call_timing_is_installed_for_root_and_children_and_missing_is_reported_once(self):
+        entry = "call-timing/index.ts"
+        self.assertIn(entry, m.ROOT_EXTENSIONS)
+        self.assertIn(entry, m.LANE_EXTENSIONS)
+        rels = {rel for rel, _ in m.source_files()}
+        self.assertIn(f"extensions/{entry}", rels)
+        self.assertFalse(any(rel.startswith("extensions/call-timing/test-support/") for rel in rels))
+        self.assertNotIn("extensions/call-timing/timing.test.ts", rels)
+        prefix = fake_prefix(self.tmp)
+        self.assertEqual(m.missing_extensions(prefix).count(entry), 1)
+        text = m.launcher_text(prefix, self.tmp / "h", "/usr/bin/node",
+                               {"label": "x", "missing_extensions": []}, "loop-pi", "loop-pi-install")
+        self.assertIn(f"--extension '{prefix}/extensions/{entry}'", text)
+
     def test_ops_probe_is_in_the_installed_agent_set(self):
         self.assertIn("ops-probe", m.AGENT_SET)
         prefix = fake_prefix(self.tmp)
