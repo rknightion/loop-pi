@@ -3,7 +3,7 @@
 // then behaves as it did before close-out existed.
 
 import { execFile } from "node:child_process";
-import { accessSync, constants, existsSync } from "node:fs";
+import { accessSync, constants, existsSync, readFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import type { CloseOutDigest } from "./state.ts";
 
@@ -40,6 +40,38 @@ function parseDigest(stdout: string): CloseOutDigest | null {
   return { live_lanes, admissible: admissible.map(String) };
 }
 
+// `digest --json` names parked tasks but deliberately does not make them admissible by time.
+// Read only the explicit clock condition of still-parked evidence-later tasks. Owner/authority,
+// budget and dependency parks are not clock permission; the root must still reconcile on wake.
+// This is local continuation input, not a change to the loop-state digest/event contract.
+export function timeParkDeadline(log: string, parked: readonly string[]): string | null {
+  try {
+    const deadlines = new Map<string, string>();
+    for (const line of readFileSync(log, "utf8").split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      const event = JSON.parse(line);
+      if (event.ev === "close") deadlines.clear();
+      if (typeof event.task !== "string") continue;
+      if (event.ev === "park") {
+        deadlines.delete(event.task);
+        if (event.needs === "evidence-later" && typeof event.until === "string" &&
+          /(?:Z|[+-]\d\d:\d\d)$/.test(event.until) && Number.isFinite(Date.parse(event.until))) {
+          deadlines.set(event.task, event.until);
+        }
+      } else if (event.ev === "admit" || event.ev === "dispatch" || event.ev === "land" ||
+        (event.ev === "accept" && event.accepted === true)) {
+        deadlines.delete(event.task);
+      }
+    }
+    const active = [...deadlines].filter(([task]) => parked.includes(task)).map(([, at]) => at);
+    active.sort((a, b) => Date.parse(a) - Date.parse(b));
+    return active[0] ?? null;
+  } catch {
+    // Missing, malformed or concurrently incomplete log: no inferred clock permission.
+    return null;
+  }
+}
+
 export interface ReadDigestOptions {
   agentDir: string;
   reportPath: string;
@@ -57,7 +89,15 @@ export function readDigest(opts: ReadDigestOptions): Promise<CloseOutDigest | nu
         ["digest", log, "--json"],
         { timeout: opts.timeoutMs ?? DIGEST_TIMEOUT_MS, env: opts.env ?? process.env, maxBuffer: 1 << 20 },
         (error, stdout) => {
-          resolve(error ? null : parseDigest(String(stdout)));
+          const digest = error ? null : parseDigest(String(stdout));
+          if (digest) {
+            const { parked } = JSON.parse(String(stdout));
+            if (Array.isArray(parked) && parked.every((task) => typeof task === "string")) {
+              const deadline = timeParkDeadline(log, parked);
+              if (deadline) digest.timeParkDeadline = deadline;
+            }
+          }
+          resolve(digest);
         },
       );
     } catch {
