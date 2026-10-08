@@ -468,7 +468,14 @@ function opsRoot(ops?: unknown) {
   return { launch, started, completed, end, ctx };
 }
 
-test("root ops: a frozen surface is bound with agent, surface and the full entry", async () => {
+test("root ops: a frozen surface is bound with agent, surface and the full entry", async (t) => {
+  const previousRunDir = process.env.LOOP_PI_RUN_DIR;
+  t.after(() => {
+    if (previousRunDir === undefined) delete process.env.LOOP_PI_RUN_DIR;
+    else process.env.LOOP_PI_RUN_DIR = previousRunDir;
+  });
+  // This fixture exercises the binding without a loop run dir, regardless of its caller.
+  delete process.env.LOOP_PI_RUN_DIR;
   const { launch } = opsRoot(OPS_FILE);
   const input: Record<string, unknown> = {
     agent: "ops",
@@ -537,7 +544,14 @@ test("root ops: a launch that ends in error releases its surface; one with no ru
   assert.equal((await launch("3", { agent: "ops", task: OPS_BRIEF }))?.block, true);
 });
 
-test("root ops: a model-supplied binding is replaced on a single launch and dropped on any other shape", async () => {
+test("root ops: a model-supplied binding is replaced on a single launch and dropped on any other shape", async (t) => {
+  const previousRunDir = process.env.LOOP_PI_RUN_DIR;
+  t.after(() => {
+    if (previousRunDir === undefined) delete process.env.LOOP_PI_RUN_DIR;
+    else process.env.LOOP_PI_RUN_DIR = previousRunDir;
+  });
+  // This fixture exercises the binding without a loop run dir, regardless of its caller.
+  delete process.env.LOOP_PI_RUN_DIR;
   const { launch } = opsRoot(OPS_FILE);
   const forged = { "loop-pi.guard/1": { agent: "ops", surface: "deploy:svc-worker", entry: OPS_ENTRY } };
   const single: Record<string, unknown> = { agent: "lane-worker", task: "x", extensionBindings: forged };
