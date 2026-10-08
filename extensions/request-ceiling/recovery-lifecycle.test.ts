@@ -53,3 +53,31 @@ test("switching away from an opted provider disposes exhausted recovery state", 
   const result=h.emit("message_end",failure);
   assert.equal(result,undefined);assert.equal(h.aborted,1);h.emit("session_shutdown");
 });
+
+test("queued genuine input preserves current request error observation and deadline", async () => {
+  const h = harness();
+  h.emit("turn_start");
+  h.emit("before_provider_request", { payload: { input: [{ role: "user", content: "first" }] } });
+  h.emit("input", { source: "rpc" });
+  h.emit("provider_stream_event", { data: { type: "response.failed", response: { error: {
+    code: "stream_incomplete", type: "server_error",
+    message: "The previous response anchor was rejected upstream; retry the request.",
+  } } } });
+  const result = h.emit("message_end", failure);
+  assert.equal(result.message.loopPiRecovery.disposition, "retry");
+  await new Promise((resolve) => setTimeout(resolve, 45));
+  assert.equal(h.aborted, 1, "queued input must not disable the active request deadline");
+  h.emit("session_shutdown");
+});
+
+test("queued input preserves an existing recovery deadline", (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
+  const h = harness();
+  h.emit("turn_start");
+  h.emit("message_end", failure);
+  t.mock.timers.tick(20);
+  h.emit("input", { source: "rpc" });
+  t.mock.timers.tick(20);
+  assert.equal(h.aborted, 1, "queued input must not extend the active episode");
+  h.emit("session_shutdown");
+});

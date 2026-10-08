@@ -83,7 +83,11 @@ export function installRecovery(pi: ExtensionAPI, loadSettings: () => unknown): 
   pi.events.on("loop-recovery:request-timeout", () => { if (active) timedOut = true; });
   pi.on("session_start", reset);
   pi.on("session_shutdown", reset);
-  pi.on("input", (event) => { if (event.source !== "extension") reset(); });
+  pi.on("input", (event) => {
+    // Input may be queued while a request or retry is active. Only an idle
+    // genuine user turn resets the episode; queued input cannot extend it.
+    if (event.source !== "extension" && !active) reset();
+  });
   pi.on("turn_start", (_event, ctx) => {
     if (provider !== ctx.model?.provider) reset();
     provider = ctx.model?.provider;

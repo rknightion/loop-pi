@@ -9,17 +9,17 @@ public statement of those contracts.
 
 ## Runtime facts
 
-- pi 1.0.4 loads `.ts` extensions through jiti. An entry file default-exports
+- pi 1.1.0 loads `.ts` extensions through jiti. An entry file default-exports
   `(pi: ExtensionAPI) => void | Promise<void>`. Type imports come from
   `@earendil-works/pi-coding-agent`; `@earendil-works/pi-ai` and `typebox` are pi's dependencies,
-  not ours, and resolve through pi's loader at runtime. pi 1.0.4 publishes no
+  not ours, and resolve through pi's loader at runtime. pi 1.1.0 publishes no
   `npm-shrinkwrap.json`, so npm hoists them to the top-level `node_modules`; never rely on either
   layout (`tsconfig.json` lists both, and the loop-wait test hook resolves from pi's directory).
 - **Project trust (pi-subagents 0.76.1):** children follow the parent session's project trust, so
   with `defaultProjectTrust: "never"` a child no longer loads the target repository's `.pi/`
   settings, system prompt files, skills or extensions. Agent discovery is not trust-gated:
   repository `.pi/agents` and `.agents/*.md` still outrank the home's agents. `loop-pi-preflight` stays.
-- **Tool list (pi 1.0.4 / pi-subagents 0.76.1):** `toolActivation` is `"eager"`; never `"auto"`.
+- **Tool list (pi 1.1.0 / pi-subagents 0.76.1):** `toolActivation` is `"eager"`; never `"auto"`.
   codex-lb never acknowledges a request carrying an `additional_tools` item, which pi sends for a
   mid-conversation tool addition when a model's `compat.supportsAdditionalTools` is true. The overlay
   sets that and `supportsToolSearch` false for every family model, so a changed tool list is resent
@@ -87,7 +87,7 @@ public statement of those contracts.
 The root launcher loads it, and both loop-guard root and dispatcher register it as a required
 child extension (including children declaring `extensions: []`).
 
-- pi 1.0.4 supports `after_provider_response` with response headers before stream consumption,
+- pi 1.1.0 supports `after_provider_response` with response headers before stream consumption,
   `message_update` with normalized assistant deltas, and `message_end` replacement before session
   persistence. No provider, request payload, retry policy or upstream behavior is changed.
 - `firstTokenAt` is the local `Date.now()` at the first nonempty text, thinking or tool-call delta,
@@ -111,7 +111,7 @@ child extension (including children declaring `extensions: []`).
 ## Request ceiling
 
 `extensions/request-ceiling/` is installed by both loop-guard entries (`installRequestCeiling`), so
-the root and every lane carry it. pi 1.0.4 has no wall-clock bound on a streaming request:
+the root and every lane carry it. pi 1.1.0 has no wall-clock bound on a streaming request:
 `httpIdleTimeoutMs` is an idle timer reset by every streamed event, so a model that keeps streaming
 reasoning never trips it, and the provider `timeoutMs` (`retry.provider.timeoutMs`) is cleared once
 response headers arrive. The output budget is pi's model `maxTokens` (sent as `max_output_tokens`),
@@ -139,10 +139,11 @@ accepts `episodeMs` (default 1200000) and `providerIds` (default empty). The epi
 proxy classification are enabled only for those provider ids; other providers retain their
 existing retry policy. An episode starts at
 its first failed assistant attempt, counts that attempt's duration, and includes subsequent waits and requests. Successful
-assistant completion or genuine interactive/RPC input resets it. Compaction and extension
+assistant completion or genuine interactive/RPC input received while idle resets it. Queued input
+cannot reset or extend an active episode. Compaction and extension
 follow-ups do not. Settlement disarms the active timer but retains its deadline; expiry
 aborts active work and refuses synthetic restart, without starting a replacement turn.
-A denied partial/protected attempt latches recovery off until genuine input or session/model
+A denied partial/protected attempt latches recovery off until idle genuine input or session/model
 reset. `loop-recovery:may-follow-up` synchronously gates the per-request ceiling's synthetic
 continuation; a timeout never authorizes replay after output or with protected context.
 Changing providers disposes the previous episode. Ordinary user abort preserves its outcome.
@@ -155,7 +156,7 @@ Only explicitly configured provider ids receive structured proxy classification 
 parsed provider errors before normalization; bounded status/code metadata is retained on the
 assistant message. Only portable originally unanchored requests with no observed output may
 receive the narrow transient allowlist. Protected requests and partial-output failures stop.
-The pi 1.0.4 retry API accepts text only: allowlisted server failures are normalized to the
+The pi 1.1.0 retry API accepts text only: allowlisted server failures are normalized to the
 standard `server error` wording at message_end; denied failures use a nonretryable explanation.
 This is an adapter to pi's classifier, not a new retry loop. Header ids describe provider
 invocations, not hidden SDK retries; use provider maxRetries zero for attempt-level proof.
@@ -163,7 +164,7 @@ invocations, not hidden SDK retries; use provider maxRetries zero for attempt-le
 ## Retry backoff
 
 `installRetryBackoff` (in `extensions/request-ceiling/`, `backoff.ts` for the pure delay function)
-is installed by both loop-guard entries next to `installRequestCeiling`. pi 1.0.4's agent-level
+is installed by both loop-guard entries next to `installRequestCeiling`. pi 1.1.0's agent-level
 retry waits `retryDelayMs(settings.retry, attempt)` (`pi-ai` `utils/retry.js`): `baseDelayMs *
 2^(n-1)` capped at `maxAgentDelayMs`, no jitter and no split by status. That wait cannot be replaced
 from an extension, so the extension adds a wait in front of it.

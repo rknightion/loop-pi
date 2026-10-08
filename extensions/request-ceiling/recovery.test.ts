@@ -36,8 +36,8 @@ async function runScenario(kind: "anchor" | "partial" | "budget" | "active-budge
   const address = server.address() as { port: number };
   const home = freshDir("recovery-home-");
   const fixture = join(home, "provider.ts");
-  writeFileSync(fixture, `export default function(pi) { ${kind === "synthetic" ? 'let sent=false; pi.on("agent_settled", () => { if (!sent) { sent=true; pi.sendMessage({customType:"test-followup",content:"CONTINUE",display:false},{triggerTurn:true}); } });' : ""} ${kind === "protected" ? 'pi.on("before_provider_request", (e) => ({...e.payload, previous_response_id:"resp_bound"}));' : ""} pi.registerProvider("fixture", {baseUrl:"http://127.0.0.1:${address.port}/v1",apiKey:"test",api:"openai-responses",models:[{id:"fixture",name:"Fixture",reasoning:false,input:["text"],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:100000,maxTokens:1000}]}); }`);
-  writeFileSync(join(home, "settings.json"), JSON.stringify({ retry: { maxRetries: kind === "partial" ? 3 : 60, baseDelayMs: 200, maxAgentDelayMs: 200, provider: { maxRetries: 0 } }, loopPi: { retryRecovery: { episodeMs: ["budget", "synthetic"].includes(kind) ? 120 : kind === "active-budget" ? 700 : ["ceiling", "partial-ceiling"].includes(kind) ? 1200 : 10000, providerIds: ["fixture"] }, requestCeiling: { wallClockMs: ["ceiling", "partial-ceiling"].includes(kind) ? 800 : 5000, maxFollowUps: ["ceiling", "partial-ceiling"].includes(kind) ? 2 : 0 } } }));
+  writeFileSync(fixture, `export default function(pi) { ${kind === "budget" ? "Math.random = () => 0;" : ""} ${kind === "synthetic" ? 'let sent=false; pi.on("agent_settled", () => { if (!sent) { sent=true; pi.sendMessage({customType:"test-followup",content:"CONTINUE",display:false},{triggerTurn:true}); } });' : ""} ${kind === "protected" ? 'pi.on("before_provider_request", (e) => ({...e.payload, previous_response_id:"resp_bound"}));' : ""} pi.registerProvider("fixture", {baseUrl:"http://127.0.0.1:${address.port}/v1",apiKey:"test",api:"openai-responses",models:[{id:"fixture",name:"Fixture",reasoning:false,input:["text"],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:100000,maxTokens:1000}]}); }`);
+  writeFileSync(join(home, "settings.json"), JSON.stringify({ retry: { maxRetries: kind === "partial" ? 3 : 60, baseDelayMs: kind === "budget" ? 5000 : 200, maxAgentDelayMs: kind === "budget" ? 5000 : 200, provider: { maxRetries: 0 } }, loopPi: { retryRecovery: { episodeMs: kind === "budget" ? 1200 : kind === "synthetic" ? 120 : kind === "active-budget" ? 700 : ["ceiling", "partial-ceiling"].includes(kind) ? 1200 : 10000, providerIds: ["fixture"] }, requestCeiling: { wallClockMs: ["ceiling", "partial-ceiling"].includes(kind) ? 800 : 5000, maxFollowUps: ["ceiling", "partial-ceiling"].includes(kind) ? 2 : 0 } } }));
   const session = startPiRpc({ extensions: [fixture, ...(process.env.RECOVERY_BASELINE ? [] : [join(HERE, "index.ts")])], extraArgs: ["--provider", "fixture", "--model", "fixture"], agentDir: home, subagentTempRoot: freshDir(), cwd: freshDir(), fauxScriptPath: "" });
   try {
     session.send({ type: "prompt", id: "go", message: "GO" });
@@ -72,6 +72,8 @@ test("real pi refuses replay after output", { timeout: 20000 }, async () => {
   assert.equal(seen.length, 1);
   assert.ok(events.some((e) => e.type === "message_end" && (e.message as any)?.loopPiRecovery?.disposition === "stop"));
 });
+// Remove random extension backoff in this subprocess so expiry exercises pi's own retry wait.
+// Allow request setup under parallel-suite load, then bound a much longer native retry wait.
 test("real pi episode expires during built-in retry sleep", { timeout: 20000 }, async () => {
   const { seen, events } = await runScenario("budget");
   assert.equal(seen.length, 1);
