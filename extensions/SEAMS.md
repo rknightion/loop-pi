@@ -232,8 +232,19 @@ before any `await`. A missing reply means the provider extension is not loaded; 
 - A return with no usable `lane-return` block is ultimately `failed`. Model-root `loop-state`
   first attempts exactly one package-owned resume asking for the block, correlating the revived
   run to the original lane and run; a refused resume or another missing block falls back to failed
-  without recursive resumes or duplicate accounting. The dispatcher retains immediate failed
-  behavior. `loop-state` folds a `gate-runner` dispatch into a live lane only, never a task.
+  without recursive resumes or duplicate accounting. Each native resume has its own dispatch and
+  return under the package's new run id. Ordinary tool resumes inherit the recorded source brief
+  unless a replacement brief supplies a new lane/task; unknown or ambiguous sources are not guessed.
+  A block-only recovery dispatch additionally records `recovery_of: <original run id>`: its live
+  lifecycle is independent, but it never replaces the task's implementation dispatch or outcome.
+  The recovered block is returned separately for the original run, preserving any original failure.
+  Restarts restore that linkage without issuing another resume. Older unlinked, overlapping runs
+  remain conservative: a first non-complete outcome from overlapping work prevents a later complete
+  outcome from hiding unfinished work, but replayed returns never replace a live successor's state.
+  Stale `landed: true` claims remain attached to the task of their own dispatch and constrain admission
+  without terminating a live successor. The older landed-claim safety contract below is unchanged.
+  The dispatcher retains immediate failed behavior. `loop-state` folds a `gate-runner` dispatch into
+  a live lane only, never a task.
 - Root extensions also include `loop-state/index.ts`: it appends `dispatch` and `return` to
   `codex/state-<stem>-loop<N>.jsonl` (sibling of the report) through `<agentDir>/bin/loop-state`
   for `subagent` calls whose brief starts `Lane: <id> · Task: <id> [(<title>)] · Tier: ...`, and injects the

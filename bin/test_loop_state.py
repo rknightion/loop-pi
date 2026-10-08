@@ -101,6 +101,84 @@ class TierSurfaceTests(Base):
         self.assertEqual(self.events()[3]["surface"], "**/auth/**")
 
 
+class ResumeIdentityTests(Base):
+    def test_stale_landed_claim_constrains_only_its_original_task(self):
+        self.seed()
+        self.append("dispatch", "lane=L1", "task=T1", "agent=lane-worker-push", "run=original", "base=b")
+        self.append("return", "lane=L1", "run=original", "status=partial", "landed=false")
+        self.append("dispatch", "lane=L1", "task=T1", "agent=lane-worker-push", "run=revived", "base=b")
+        self.append("return", "lane=L1", "run=original", "status=partial", "landed=true", "sha=pushed")
+        self.assertIn("T1: dispatched lane=L1 run=revived", run("digest", self.log).stdout)
+        self.assertEqual(json.loads(run("digest", self.log, "--json").stdout)["live_lanes"], 1)
+        self.append("return", "lane=L1", "run=revived", "status=failed", "landed=false")
+        self.assertNotIn("T1", json.loads(run("digest", self.log, "--json").stdout)["admissible"])
+        self.append("dispatch", "lane=L1", "task=T2", "agent=lane-worker", "run=other", "base=b")
+        self.append("return", "lane=L1", "run=original", "status=failed", "landed=true", "sha=pushed")
+        self.append("return", "lane=L1", "run=other", "status=failed", "landed=false")
+        self.assertIn("T2", json.loads(run("digest", self.log, "--json").stdout)["admissible"])
+
+    def test_unlinked_overlapping_failure_cannot_be_hidden_in_either_return_order(self):
+        for original_first in (False, True):
+            with self.subTest(original_first=original_first):
+                log = self.log + str(original_first)
+                for run_id in ("original", "revived"):
+                    self.assertEqual(run("append", log, "dispatch", "lane=L1", "task=T1", "agent=lane-worker",
+                                         "run=" + run_id, "base=b").returncode, 0)
+                returns = [("original", "failed"), ("revived", "complete")]
+                if not original_first:
+                    returns.reverse()
+                for run_id, status in returns:
+                    self.assertEqual(run("append", log, "return", "lane=L1", "run=" + run_id, "status=" + status).returncode, 0)
+                self.assertIn("T1: returned status=failed", run("digest", log).stdout)
+                summary = json.loads(run("digest", log, "--json").stdout)
+                self.assertEqual(summary["live_lanes"], 0)
+                self.assertIn("T1", summary["admissible"], "failed work must not induce drained closeout")
+
+    def test_linked_recovery_is_live_but_never_replaces_the_work_outcome(self):
+        self.seed()
+        self.append("dispatch", "lane=L1", "task=T1", "agent=lane-worker", "run=original", "base=b")
+        self.append("dispatch", "lane=L1", "task=T1", "agent=lane-worker", "run=revived", "base=b", "recovery_of=original")
+        self.assertIn("T1: dispatched lane=L1 run=original", run("digest", self.log).stdout)
+        self.append("return", "lane=L1", "run=original", "status=failed")
+        summary = json.loads(run("digest", self.log, "--json").stdout)
+        self.assertEqual(summary["live_lanes"], 1)
+        self.assertNotIn("T1", summary["admissible"], "recovery still owns a live lifecycle")
+        self.append("return", "lane=L1", "run=revived", "status=complete", "landed=false")
+        self.assertIn("T1: returned status=failed lane=L1 run=original", run("digest", self.log).stdout)
+        summary = json.loads(run("digest", self.log, "--json").stdout)
+        self.assertEqual(summary["live_lanes"], 0)
+        self.assertIn("T1", summary["admissible"])
+        self.assertEqual(run("check", self.log).returncode, 0)
+
+    def test_earlier_review_return_cannot_overwrite_a_live_resume(self):
+        self.seed()
+        self.append("dispatch", "lane=L1", "task=T1", "agent=reviewer", "run=original", "base=b", "kind=review")
+        self.append("return", "lane=L1", "run=original", "status=complete")
+        self.append("dispatch", "lane=L1", "task=T1", "agent=reviewer", "run=revived", "base=b", "kind=review")
+        self.append("return", "lane=L1", "run=original", "status=failed")
+        digest = run("digest", self.log)
+        self.assertEqual(digest.returncode, 0, digest.stderr)
+        self.assertIn("## Live lanes (1)", digest.stdout)
+        self.assertIn("T1: dispatched lane=L1 run=revived", digest.stdout)
+        self.assertNotIn("T1: returned", digest.stdout)
+        self.append("return", "lane=L1", "run=revived", "status=partial")
+        self.append("return", "lane=L1", "run=original", "status=complete")
+        digest = run("digest", self.log)
+        self.assertIn("## Live lanes (0)", digest.stdout)
+        self.assertIn("T1: returned status=partial", digest.stdout)
+        self.assertEqual(run("check", self.log).returncode, 0)
+
+    def test_lane_reuse_does_not_attribute_an_old_return_to_a_new_task(self):
+        self.seed()
+        self.append("dispatch", "lane=L1", "task=T1", "agent=reviewer", "run=original", "base=b")
+        self.append("return", "lane=L1", "run=original", "status=complete")
+        self.append("dispatch", "lane=L1", "task=T2", "agent=reviewer", "run=revived", "base=b")
+        self.append("return", "lane=L1", "run=original", "status=failed")
+        digest = run("digest", self.log)
+        self.assertIn("T2: dispatched lane=L1 run=revived", digest.stdout)
+        self.assertIn("## Live lanes (1)", digest.stdout)
+
+
 class ValidationTests(Base):
     def reject(self, *args, needle):
         before = self.events() if os.path.exists(self.log) else []

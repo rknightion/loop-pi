@@ -208,14 +208,22 @@ test("a failed original run stays failed after recovering a valid block", async 
   h.call("tc1", { agent: "lane-worker", task: BRIEF });
   h.result("tc1", "", { runId: "run1" });
   h.emit("subagent:async-complete", { runId: "run1", sessionId: SESS, success: false, results: [{ summary: "missing" }] });
-  await until(() => events(r.log).length === 2);
-  assert.equal(events(r.log)[1].run, "run1");
-  assert.equal(events(r.log)[1].status, "failed");
+  await until(() => events(r.log).length === 4);
+  assert.deepEqual(events(r.log).map(r => [r.ev, r.run]), [["dispatch", "run1"], ["dispatch", "revived"], ["return", "revived"], ["return", "run1"]]);
+  assert.equal(events(r.log)[2].status, "complete", "recovery's own outcome is independent");
+  assert.equal(events(r.log)[3].status, "failed", "original failure remains evidence");
+  const digest = execFileSync(BIN, ["digest", r.log], { encoding: "utf8", timeout: 10_000 });
+  assert.match(digest, /T1: returned status=failed lane=L1 run=run1/, "block generation success cannot upgrade implementation failure");
+  const summary = JSON.parse(execFileSync(BIN, ["digest", r.log, "--json"], { encoding: "utf8", timeout: 10_000 }));
+  assert.equal(summary.live_lanes, 0);
+  assert.deepEqual(summary.admissible, ["T1"], "unfinished work must not produce a drained closeout");
+  assert.equal(events(r.log)[1].recovery_of, "run1");
 });
 
-test("a terminal revived run with lost completion falls back from package lifecycle proof", { timeout: 75_000 }, async () => {
+test("a terminal revived run with lost completion falls back from package lifecycle proof", async () => {
   const r = makeRepo();
-  const h = harness({ reportPath: r.report, cwd: r.repo });
+  const jobs: (() => void)[] = [];
+  const h = harness({ reportPath: r.report, cwd: r.repo, schedule: job => { jobs.push(job); return { unref() {} } as any; } });
   const asyncDir = join(r.repo, "revived");
   mkdirSync(asyncDir);
   writeFileSync(join(asyncDir, "status.json"), JSON.stringify({ runId: "lost", sessionId: SESS, state: "failed" }));
@@ -227,10 +235,13 @@ test("a terminal revived run with lost completion falls back from package lifecy
   h.call("tc1", { agent: "lane-worker", task: BRIEF });
   h.result("tc1", "", { runId: "run1" });
   h.emit("subagent:async-complete", { runId: "run1", sessionId: SESS, results: [{ summary: "missing" }] });
-  await until(() => events(r.log).length === 2, 70_000);
-  h.shutdown();
-  assert.equal(events(r.log)[1].run, "run1");
-  assert.equal(events(r.log)[1].status, "failed");
+  await until(() => jobs.length === 1);
+  jobs.shift()!();
+  await until(() => events(r.log).length === 4);
+  await h.shutdown();
+  assert.deepEqual(events(r.log).map(r => [r.ev, r.run]), [["dispatch", "run1"], ["dispatch", "lost"], ["return", "lost"], ["return", "run1"]]);
+  assert.equal(events(r.log)[2].status, "failed");
+  assert.equal(events(r.log)[3].status, "failed");
 });
 
 for (const lifecycle of ["running", "unknown"] as const) {
@@ -251,26 +262,27 @@ test(`restart preserves ${lifecycle} recovery and accepts later completion exact
   h.result("tc1", "", { runId: "run1" });
   h.emit("subagent:async-complete", { runId: "run1", sessionId: SESS, results: [{ summary: "missing" }] });
   await until(() => attempts === 1);
-  h.shutdown();
+  await h.shutdown();
   const jobs: (() => void)[] = [];
   const restarted = harness({ reportPath: r.report, cwd: r.repo, entries: h.entries,
     schedule: job => { jobs.push(job); return { unref() {} } as any; } });
   restarted.on("subagents:rpc:v1:request", () => { attempts++; });
   restarted.start();
   await new Promise(r => setTimeout(r, 200));
-  assert.equal(events(r.log).length, 1, "restart is not terminal proof");
+  assert.equal(events(r.log).length, 2, "restart is not terminal proof and does not duplicate either dispatch");
   assert.equal(jobs.length, 1, "persisted asyncDir restores lifecycle reconciliation");
   jobs.shift()!();
   await until(() => jobs.length === 1, 1000);
-  assert.equal(events(r.log).length, 1, "running or unknown lifecycle remains pending after checking");
+  assert.equal(events(r.log).length, 2, "running or unknown lifecycle remains pending after checking");
   const completion = { runId: "lost", sessionId: SESS, results: [{ summary: LANE_RETURN("complete") }] };
   restarted.emit("subagent:async-complete", completion);
   restarted.emit("subagent:async-complete", completion);
-  await until(() => events(r.log).length === 2);
+  await until(() => events(r.log).length === 4);
   assert.equal(attempts, 1);
-  assert.equal(events(r.log)[1].run, "run1");
-  assert.equal(events(r.log)[1].status, "complete");
-  restarted.shutdown();
+  assert.equal(events(r.log)[2].run, "lost");
+  assert.equal(events(r.log)[3].run, "run1");
+  assert.equal(events(r.log)[3].status, "complete");
+  await restarted.shutdown();
 });
 }
 
@@ -289,13 +301,14 @@ test("restart reconciles a terminal failed child once without another resume", a
   let attempts = 0;
   h.on("subagents:rpc:v1:request", () => { attempts++; });
   h.start();
-  assert.equal(jobs.length, 1);
+  await until(() => jobs.length === 1);
   jobs.shift()!();
-  await until(() => events(r.log).length === 2);
+  await until(() => events(r.log).length === 4);
   h.emit("subagent:async-complete", { runId: "lost", sessionId: SESS, results: [{ summary: LANE_RETURN("complete") }] });
   await new Promise(r => setTimeout(r, 100));
-  assert.equal(events(r.log).length, 2);
-  assert.equal(events(r.log)[1].status, "failed");
+  assert.equal(events(r.log).length, 4);
+  assert.equal(events(r.log)[2].status, "failed");
+  assert.equal(events(r.log)[3].status, "failed");
   assert.equal(attempts, 0);
 });
 
@@ -320,12 +333,13 @@ test("15 unknown lifecycle checks warn but preserve pending ownership and later 
   }
   await until(() => h.notes.some(n => n.message.includes("still lacks terminal proof")), 1000);
   assert.equal(jobs.length, 0, "exactly fifteen checks, no unbounded poll");
-  assert.equal(events(r.log).length, 1);
+  assert.equal(events(r.log).length, 2);
   h.emit("subagent:async-complete", { runId: "lost", sessionId: SESS, results: [{ summary: LANE_RETURN("complete") }] });
-  await until(() => events(r.log).length === 2);
+  await until(() => events(r.log).length === 4);
   assert.equal(attempts, 1);
-  assert.equal(events(r.log)[1].status, "complete");
-  assert.equal(events(r.log)[1].run, "run1");
+  assert.equal(events(r.log)[2].run, "lost");
+  assert.equal(events(r.log)[3].status, "complete");
+  assert.equal(events(r.log)[3].run, "run1");
 });
 
 test("the run id is read from the launch text when details carry none, and Deadline comes from the brief", async () => {
@@ -503,7 +517,32 @@ test("a dispatch whose append fails leaves no started deadline or pending comple
   assert.equal(written[0].deadline, "2026-10-03T12:00:00Z", "the brief's Deadline, not the failed attempt's");
 });
 
-test("a recorded dispatch drops its started deadline, so a later dispatch of the run id does not reuse it", async () => {
+test("ordinary resume after root restart correlates an early completion and replays neither lifecycle event", async () => {
+  const r = makeRepo();
+  execFileSync(BIN, ["append", r.log, "dispatch", "lane=L1", "task=T1", "agent=lane-worker", "run=original", "base=b", "tier=guarded", "surface=probe"]);
+  execFileSync(BIN, ["append", r.log, "return", "lane=L1", "run=original", "status=complete"]);
+  const h = harness({ reportPath: r.report, cwd: r.repo });
+  h.start();
+  h.call("resume", { action: "resume", id: "orig", message: "continue" });
+  h.emit("subagent:async-started", { id: "revived", sessionId: SESS, deadlineAt: Date.UTC(2026, 9, 4) });
+  const completion = { runId: "revived", sessionId: SESS, success: true, results: [{ summary: LANE_RETURN("complete") }] };
+  h.emit("subagent:async-complete", completion);
+  h.result("resume", "", { runId: "revived" });
+  h.emit("subagent:async-complete", completion);
+  await h.shutdown();
+  assert.deepEqual(events(r.log).map(row => [row.ev, row.run]), [["dispatch", "original"], ["return", "original"], ["dispatch", "revived"], ["return", "revived"]]);
+  const revived = events(r.log)[2];
+  assert.deepEqual([revived.lane, revived.task, revived.tier, revived.surface, revived.deadline], ["L1", "T1", "guarded", "probe", "2026-10-04T00:00:00Z"]);
+  const restarted = harness({ reportPath: r.report, cwd: r.repo });
+  restarted.start();
+  restarted.call("replay", { action: "resume", id: "original", message: "continue" });
+  restarted.result("replay", "", { runId: "revived" });
+  restarted.emit("subagent:async-complete", completion);
+  await restarted.shutdown();
+  assert.equal(events(r.log).length, 4, "the durable log suppresses duplicate dispatch and terminal return after restart");
+});
+
+test("a recorded dispatch is never duplicated by a later result for the same run id", async () => {
   const r = makeRepo();
   const h = harness({ reportPath: r.report, cwd: r.repo });
   h.start();
@@ -514,6 +553,6 @@ test("a recorded dispatch drops its started deadline, so a later dispatch of the
   assert.equal(first[0].deadline, "2026-10-03T11:30:00Z");
   h.call("tc2", { agent: "lane-worker", task: BRIEF });
   h.result("tc2", "Async: lane-worker [run1]", { runId: "run1" });
-  const log = await until(() => events(r.log).length >= 2 && events(r.log));
-  assert.equal(log[1].deadline, "2026-10-03T12:00:00Z", "the brief's Deadline, not the earlier dispatch's");
+  await h.shutdown();
+  assert.equal(events(r.log).length, 1, "one dispatch per native identity");
 });

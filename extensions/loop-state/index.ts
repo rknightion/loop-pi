@@ -24,6 +24,7 @@ export const DIGEST_CUSTOM_TYPE = "loop-state-digest";
 const CLI_TIMEOUT_MS = 10_000;
 const MAX_COMPLETIONS = 256;
 const RECOVERY_STATE = "loop-state-return-recovery";
+type LaneBrief = Omit<Brief, "tier"> & { tier?: Brief["tier"]; agent: string };
 
 interface CliResult {
   code: number;
@@ -69,9 +70,10 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
   let chain: Promise<unknown> = Promise.resolve();
   let lastHeartbeatRecordedAt: number | null = null;
   const warned = new Set<string>();
-  const briefs = new Map<string, Brief & { agent: string }>();
+  const briefs = new Map<string, LaneBrief>();
   const started = new Map<string, { deadlineAt?: string }>();
-  const dispatched = new Map<string, { lane: string; task: string }>();
+  const dispatched = new Map<string, LaneBrief>();
+  const returned = new Set<string>();
   const pendingComplete = new Map<string, Record<string, unknown>>();
   const handled = new Set<string>();
   const resumedFrom = new Map<string, { run: string; failed: boolean; log: string; info: { lane: string } }>();
@@ -172,6 +174,41 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
     return derived;
   }
 
+  // The append-only log is the durable identity ledger, including across root restarts.
+  // Native start events deliberately redact tasks; never guess identities from that text.
+  function restoreIdentities(log: string) {
+    try {
+      for (const line of readFileSync(log, "utf8").split("\n")) {
+        try {
+          const row = JSON.parse(line);
+          if (typeof row.run !== "string") continue;
+          if (row.ev === "return") returned.add(row.run);
+          if (row.ev === "dispatch" && typeof row.lane === "string" && typeof row.task === "string" && typeof row.agent === "string") {
+            dispatched.set(row.run, { lane: row.lane, task: row.task, agent: row.agent,
+              ...(row.tier === "routine" || row.tier === "guarded" ? { tier: row.tier } : {}),
+              ...(typeof row.surface === "string" ? { surface: row.surface } : {}),
+              ...(Array.isArray(row.tasks) && row.tasks.every((t: unknown) => typeof t === "string") ? { tasks: row.tasks } : {}),
+            });
+          }
+        } catch { /* Torn lines hold no usable identity. */ }
+      }
+    } catch { /* No log yet. */ }
+  }
+
+  function resumeBrief(input: Record<string, unknown>): LaneBrief | null {
+    const target = input.id ?? input.runId;
+    if (typeof target !== "string" || !target) return null;
+    const log = resolveLog();
+    if (log) restoreIdentities(log);
+    const matches = [...dispatched.entries()].filter(([run]) => run === target || run.startsWith(target));
+    const source = dispatched.get(target) ?? (matches.length === 1 ? matches[0][1] : undefined);
+    if (!source) return null;
+    // A new brief explicitly changes the lane/task; otherwise resume inherits the
+    // exact launched identity, not the redacted package task or a lane's latest return.
+    const replacement = parseBrief(input.message);
+    return replacement ? { ...replacement, agent: source.agent } : { ...source };
+  }
+
   async function append(event: Record<string, unknown>, log: string): Promise<CliResult> {
     return runCli(cliBin(), ["append", log, "--by", "ext"], JSON.stringify(event));
   }
@@ -222,8 +259,12 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
     });
   }
 
-  function restoreRecovery(runId: string, revived: string, asyncDir: string | undefined, data: Record<string, unknown>, log: string, info: { lane: string }) {
+  async function restoreRecovery(runId: string, revived: string, asyncDir: string | undefined, data: Record<string, unknown>, log: string, info: { lane: string }) {
     resumedFrom.set(revived, { run: runId, failed: runFailed(data), log, info });
+    restoreIdentities(log);
+    const brief = dispatched.get(runId);
+    if (brief) await recordDispatch(revived, brief, runId);
+    else warn(`recovery for run ${runId} has no recorded dispatch identity`);
     // Restart and exhausted checks are not terminal proof. Only package-owned
     // lifecycle artifacts can authorize a fallback when completion is lost.
     if (!asyncDir) return;
@@ -237,6 +278,7 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
             if (status.runId === revived && status.sessionId === sessionId &&
                 ["complete", "failed", "partial", "paused", "stopped", "rejected"].includes(status.state)) {
               handled.add(revived);
+              await recordReturn(revived, { success: false }, log, info, true);
               await recordReturn(runId, data, log, info, true);
               return;
             }
@@ -252,6 +294,7 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
   }
 
   async function recordReturn(runId: string, data: Record<string, unknown>, log: string, info: { lane: string }, final = false) {
+    if (returned.has(runId)) return;
     const results = Array.isArray(data.results) ? (data.results as Record<string, unknown>[]) : [];
     const first = results[0];
     const candidates = [first?.summary, first?.output, data.summary];
@@ -265,7 +308,7 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
       const revived = await resumeForBlock(runId, info.lane);
       if (revived) {
         pi.appendEntry(RECOVERY_STATE, { ...pending, revived: revived.id, asyncDir: revived.asyncDir });
-        restoreRecovery(runId, revived.id, revived.asyncDir, data, log, info);
+        await restoreRecovery(runId, revived.id, revived.asyncDir, data, log, info);
         return;
       }
     }
@@ -277,14 +320,28 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
       result = await append({ ev: "return", lane: info.lane, run: runId, status: event.status }, log);
     }
     if (result.code !== 0) warn(`return for run ${runId} not recorded: ${result.stderr.trim()}`);
-    else if (resumeAttempted.has(runId)) pi.appendEntry(RECOVERY_STATE, { runId, phase: "done" });
+    else {
+      returned.add(runId);
+      if (resumeAttempted.has(runId)) pi.appendEntry(RECOVERY_STATE, { runId, phase: "done" });
+    }
   }
 
-  async function recordDispatch(runId: string, brief: Brief & { agent: string }) {
+  async function recordDispatch(runId: string, brief: LaneBrief, recoveryOf?: string) {
     let recorded = false;
     try {
       const log = resolveLog();
       if (!log) return;
+      restoreIdentities(log);
+      if (dispatched.has(runId)) {
+        recorded = true;
+        started.delete(runId);
+        const pending = pendingComplete.get(runId);
+        if (pending) {
+          pendingComplete.delete(runId);
+          await handleComplete(runId, pending);
+        }
+        return;
+      }
       const deadline = started.get(runId)?.deadlineAt ?? brief.deadline;
       const event: Record<string, unknown> = {
         ev: "dispatch",
@@ -295,6 +352,7 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
         base: await gitHead(),
         tier: brief.tier,
       };
+      if (recoveryOf) event.recovery_of = recoveryOf;
       if (brief.surface) event.surface = brief.surface;
       const review = ["reviewer", "reviewer-high", "security-reviewer"].includes(brief.agent);
       const tasks = brief.tasks ?? [...new Set(brief.task.split(","))];
@@ -328,12 +386,11 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
       }
       recorded = true;
       started.delete(runId);
-      dispatched.set(runId, { lane: brief.lane, task: brief.task });
+      dispatched.set(runId, brief);
       const pending = pendingComplete.get(runId);
       if (pending) {
         pendingComplete.delete(runId);
-        handled.add(runId);
-        await recordReturn(runId, pending, log, { lane: brief.lane });
+        await handleComplete(runId, pending);
       }
     } finally {
       // An unrecorded dispatch keeps nothing for this run id: no started deadline, no early completion.
@@ -345,10 +402,11 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
   }
 
   async function handleComplete(runId: string, data: Record<string, unknown>) {
-    if (handled.has(runId)) return;
+    if (handled.has(runId) || returned.has(runId)) return;
     const original = resumedFrom.get(runId);
     if (original) {
       handled.add(runId);
+      await recordReturn(runId, data, original.log, dispatched.get(runId) ?? original.info, true);
       await recordReturn(original.run, original.failed ? { ...data, success: false } : data, original.log, original.info, true);
       return;
     }
@@ -385,6 +443,11 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
     for (const timer of recoveryTimers) clearTimeout(timer);
     recoveryTimers.clear();
     handled.clear();
+    briefs.clear();
+    started.clear();
+    dispatched.clear();
+    returned.clear();
+    pendingComplete.clear();
     resumedFrom.clear();
     resumeAttempted.clear();
     type Recovery = { runId: string; phase: string; revived?: string; asyncDir?: string; sessionId?: string; data?: Record<string, unknown>; log?: string; info?: { lane: string } };
@@ -404,13 +467,17 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
         if (state.revived) handled.add(state.revived);
       } else if (state.phase === "pending" && state.revived && state.data && state.log && state.info &&
                  (!state.sessionId || state.sessionId === sessionId)) {
-        restoreRecovery(state.runId, state.revived, state.asyncDir, state.data, state.log, state.info);
+        enqueue(() => restoreRecovery(state.runId, state.revived!, state.asyncDir, state.data!, state.log!, state.info!));
       }
       // A pre-launch record lacking a revived id stays pending: neither a
       // second resume nor a false failure is authorized by incomplete metadata.
     }
     // Let loop-continuation restore its launch state first.
-    setImmediate(() => enqueue(injectDigest));
+    setImmediate(() => enqueue(async () => {
+      const log = resolveLog();
+      if (log) restoreIdentities(log);
+      await injectDigest();
+    }));
   });
 
   pi.on("session_shutdown", async () => {
@@ -458,6 +525,11 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
     try {
       if (event.toolName !== "subagent") return;
       const input = event.input as Record<string, unknown>;
+      if (input.action === "resume") {
+        const brief = resumeBrief(input);
+        if (brief) briefs.set(event.toolCallId, brief);
+        return;
+      }
       if (input.action !== undefined || typeof input.agent !== "string") return;
       const brief = parseBrief(input.task);
       if (brief) {

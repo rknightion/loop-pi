@@ -65,7 +65,8 @@ SCHEMA = {
     "dispatch": (
         {"lane": STR, "task": STR, "agent": STR, "run": STR, "base": STR},
         {"deadline": STR, "model": STR, "effort": STR, "surface": STR,
-         "tier": TIER, "tasks": STRLIST, "kind": ("work", "gate", "triage", "review")},
+         "tier": TIER, "tasks": STRLIST, "kind": ("work", "gate", "triage", "review"),
+         "recovery_of": STR},
     ),
     "return": (
         {"lane": STR, "run": STR, "status": STATUS},
@@ -504,6 +505,8 @@ def fold(path):
         "order": [],
         "lanes": {},  # run -> {lane, task, agent, deadline}
         "audit_lanes": {},  # dispatch metadata retained after return
+        "dispatches": {},  # run -> original dispatch, even after lane reuse
+        "returns": {},  # first terminal outcome per run; replays are not new work
         "lane_task": {},  # lane -> task
         "judgements": [],
         "last_gate": None,
@@ -529,6 +532,7 @@ def fold(path):
                 "status": None,
                 "sha": None,
                 "reason": None,
+                "overlap_runs": set(),  # conservative outcomes for older unlinked logs
             }
             st["order"].append(tid)
         return st["tasks"][tid]
@@ -557,8 +561,18 @@ def fold(path):
                 "agent": GATE_AGENT,
                 "deadline": obj.get("deadline"),
             }
+        elif ev == "dispatch" and isinstance(obj.get("recovery_of"), str):
+            # Block generation is a separate live lifecycle, not implementation work.
+            st["lanes"][obj.get("run")] = {
+                "lane": obj.get("lane"), "task": obj.get("task"),
+                "agent": obj.get("agent"), "deadline": obj.get("deadline"),
+                "recovery_of": obj["recovery_of"],
+            }
         elif ev == "dispatch" and isinstance(obj.get("task"), str):
             t = task(obj["task"])
+            overlapping = any(i.get("task") == obj["task"] and not i.get("recovery_of")
+                              for i in st["lanes"].values())
+            t["overlap_runs"] = (t["overlap_runs"] if overlapping else set()) | {obj.get("run")}
             lane, run = obj.get("lane"), obj.get("run")
             t.update(
                 state="dispatched",
@@ -584,12 +598,28 @@ def fold(path):
             info = st["lanes"].pop(run, None)
             if info and info.get("agent") == GATE_AGENT:
                 continue
-            tid = (info or {}).get("task") or st["lane_task"].get(lane)
+            dispatch = st["dispatches"].get(run) or info or {}
+            tid = dispatch.get("task") or st["lane_task"].get(lane)
+            replay = run in st["returns"]
+            st["returns"].setdefault(run, obj)
             if tid in st["tasks"]:
                 t = st["tasks"][tid]
+                # Irreversible evidence belongs to the run's original task, even
+                # on a stale/replayed return. Never close a successor's lifecycle.
+                if obj.get("landed") is True:
+                    t["landed"] = True
+                    t["sha"] = obj.get("sha")
+                    if t["state"] == "returned":
+                        t["state"] = "landed"
+                if dispatch.get("recovery_of") or replay:
+                    continue
+                # A prior run's return is history, not the latest work outcome.
+                if t["run"] is not None and t["run"] != run:
+                    continue
                 t["status"] = obj.get("status")
-                t["sha"] = obj.get("sha")
-                t["state"] = "returned"
+                if not t["landed"] or obj.get("landed") is True:
+                    t["sha"] = obj.get("sha")
+                t["state"] = "landed" if t["landed"] else "returned"
                 t["dispatched"] = obj.get("status") == "complete"
                 if obj.get("landed") is True:
                     t["landed"] = True
@@ -636,6 +666,7 @@ def fold(path):
         elif ev == "judgement" and isinstance(obj.get("text"), str):
             st["judgements"].append(obj)
         if ev == "dispatch":
+            st["dispatches"][obj.get("run")] = obj
             constituents = obj.get("tasks")
             if not isinstance(constituents, list) or not constituents:
                 constituents = [obj.get("task")]
@@ -648,6 +679,21 @@ def fold(path):
                 "lane": obj.get("lane"), "run": obj.get("run"), "tasks": constituents,
                 "tier": tier, "surface": obj.get("surface"), "kind": obj.get("kind"), "coderabbit": False,
             }
+    # Legacy logs lack explicit recovery linkage. A first unfinished outcome
+    # from overlapping work must not disappear behind another run's success.
+    # Apply only after folding so neither delivery order nor replay can falsely
+    # drain the task, and never replace the displayed state of a live successor.
+    for t in st["tasks"].values():
+        if t["state"] != "returned" or t["status"] != "complete":
+            continue
+        for run in sorted(t["overlap_runs"], key=str):
+            outcome = st["returns"].get(run)
+            if outcome and outcome.get("status") in ("partial", "blocked", "failed"):
+                t.update(status=outcome["status"], dispatched=False,
+                         lane=outcome.get("lane"), run=run)
+                if not t["landed"]:
+                    t["sha"] = outcome.get("sha")
+                break
     return st
 
 

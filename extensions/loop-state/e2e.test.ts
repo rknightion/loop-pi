@@ -89,8 +89,8 @@ test("a forced compaction is followed by a fresh loop-state-digest message", asy
   }
 });
 
-for (const outcome of ["valid", "recovered", "missing-again", "resume-failed"] as const) {
-test(`a real lane yields one identity-preserving return: ${outcome}`, async () => {
+for (const outcome of ["valid", "recovered", "missing-again", "resume-failed", "original-failed"] as const) {
+test(`each real package recovery has its own dispatch and return: ${outcome}`, async () => {
   const s = scaffold();
   const requests = join(s.repo, "rpc.jsonl");
   const completions = join(s.repo, "completions.jsonl");
@@ -121,6 +121,7 @@ test(`a real lane yields one identity-preserving return: ${outcome}`, async () =
       "name: lane-worker",
       "description: Test lane worker for the loop-state e2e proof",
       "tools: bash",
+      "timeoutMs: 60000",
       "extensions: []",
       `subagentOnlyExtensions: ${FAUX_EXTENSION}`,
       "model: faux/faux-1",
@@ -142,12 +143,12 @@ test(`a real lane yields one identity-preserving return: ${outcome}`, async () =
         },
       ],
     },
-    { match: "CHILD_LANE_MARKER", once: true, text: outcome === "valid" ? `Finished.\n${block}` : "Finished without a return block." },
-    { match: "Return only the missing fenced lane-return", text: outcome === "recovered" ? block : "Still missing.", ...(outcome === "resume-failed" ? { stopReason: "error" as const, errorMessage: "scripted child failure" } : {}) },
+    { match: "CHILD_LANE_MARKER", once: true, text: outcome === "valid" ? `Finished.\n${block}` : "Finished without a return block.", ...(outcome === "original-failed" ? { stopReason: "error" as const, errorMessage: "scripted implementation failure" } : {}) },
+    { match: "Return only the missing fenced lane-return", delayMs: 1500, text: outcome === "recovered" || outcome === "original-failed" ? block : "Still missing.", ...(outcome === "resume-failed" ? { stopReason: "error" as const, errorMessage: "scripted child failure" } : {}) },
     { match: ".*", text: "ok" },
   ]);
   const session = startPiRpc({
-    extensions: [FAUX_EXTENSION, STATE_EXTENSION, s.stub],
+    extensions: [FAUX_EXTENSION, STATE_EXTENSION, s.stub, join(HERE, "..", "loop-wait", "root.ts")],
     fauxScriptPath: fauxScript,
     agentDir: s.agentDir,
     subagentTempRoot: freshDir("loop-state-e2e-sub-"),
@@ -161,14 +162,15 @@ test(`a real lane yields one identity-preserving return: ${outcome}`, async () =
       try {
         const rows = readFileSync(s.log, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
         const laneRows = rows.filter(r => r.ev === "dispatch" || r.ev === "return");
-        return laneRows.some((r) => r.ev === "return") ? laneRows : undefined;
+        return laneRows.filter((r) => r.ev === "return").length === (outcome === "valid" ? 1 : 2) ? laneRows : undefined;
       } catch {
         return undefined;
       }
     }, 60_000, 250).catch((error: Error) => {
       throw new Error(`${error.message}\nstderr: ${session.stderr.join("").slice(0, 2000)}`);
     });
-    const [dispatch, ret] = events;
+    const dispatch = events[0];
+    const ret = events.find(r => r.ev === "return" && r.run === dispatch.run)!;
     assert.equal(dispatch.ev, "dispatch");
     assert.deepEqual(
       { by: dispatch.by, lane: dispatch.lane, task: dispatch.task, agent: dispatch.agent },
@@ -180,7 +182,7 @@ test(`a real lane yields one identity-preserving return: ${outcome}`, async () =
       { lane: ret.lane, status: ret.status, check: ret.check, exit: ret.exit },
       outcome === "missing-again" || outcome === "resume-failed"
         ? { lane: "L1", status: "failed", check: undefined, exit: undefined }
-        : { lane: "L1", status: "complete", check: "just check", exit: 0 },
+        : { lane: "L1", status: outcome === "original-failed" ? "failed" : "complete", check: "just check", exit: 0 },
     );
     await new Promise(r => setTimeout(r, 500));
     const rpc = (() => { try { return readFileSync(requests, "utf8").trim().split("\n").map(l => JSON.parse(l)); } catch { return []; } })();
@@ -194,16 +196,101 @@ test(`a real lane yields one identity-preserving return: ${outcome}`, async () =
       if (outcome === "recovered") assert.match(finished[1].results[0].summary, /"v":2/);
     }
     const laneRows = readFileSync(s.log, "utf8").trim().split("\n").map(l => JSON.parse(l)).filter(r => r.ev === "dispatch" || r.ev === "return");
-    assert.equal(laneRows.length, 2, "replayed completions never double account (root activity is logged separately)");
+    assert.equal(laneRows.length, outcome === "valid" ? 2 : 4, "each distinct run is accounted exactly once despite replayed completions");
+    if (rpc.length) {
+      const finished = readFileSync(completions, "utf8").trim().split("\n").map(l => JSON.parse(l));
+      const revived = finished[1].runId;
+      assert.deepEqual(laneRows.filter(r => r.run === revived).map(r => [r.ev, r.lane, r.task]),
+        [["dispatch", "L1", "T1"], ["return", "L1", undefined]]);
+      assert.equal(laneRows.find(r => r.ev === "dispatch" && r.run === revived).recovery_of, dispatch.run);
+      if (outcome === "original-failed") {
+        assert.equal(laneRows.find(r => r.ev === "return" && r.run === revived).status, "complete", "recovery successfully generated the block");
+      }
+    }
     execFileSync(BIN, ["check", s.log]);
     const digest = execFileSync(BIN, ["digest", s.log], { encoding: "utf8" });
     assert.match(digest, /## Live lanes \(0\)/);
+    const summary = JSON.parse(execFileSync(BIN, ["digest", s.log, "--json"], { encoding: "utf8", timeout: 10_000 }));
+    const unfinished = ["original-failed", "missing-again", "resume-failed"].includes(outcome);
+    assert.deepEqual(summary.admissible, unfinished ? ["T1"] : [], "recovery lifecycle success must not falsely drain failed work");
+    assert.match(digest, new RegExp(`T1: returned status=${unfinished ? "failed" : "complete"} lane=L1 run=${dispatch.run}`));
+    const watches = readFileSync(s.log, "utf8").trim().split("\n").map(l => JSON.parse(l)).filter(r => r.ev === "watch");
+    assert.equal(watches.length, outcome === "valid" ? 2 : 4, "package recovery and completion replays never duplicate deadline watches");
+    assert.equal(new Set(watches.map(r => r.what)).size, outcome === "valid" ? 1 : 2);
   } finally {
     await session.close();
   }
 });
 
 }
+
+test("ordinary native resumes each retain their own identity and stay live past an earlier return", { timeout: 90_000 }, async () => {
+  const s = scaffold();
+  mkdirSync(join(s.agentDir, "agents"), { recursive: true });
+  writeFileSync(join(s.agentDir, "settings.json"), JSON.stringify({ packages: [PI_SUBAGENTS_PACKAGE_DIR], subagents: { agentExcludeDirs: ["~/.agents"] } }));
+  writeFileSync(join(s.agentDir, "agents", "reviewer.md"),
+    ["---", "name: reviewer", "description: Test reviewer", "tools: bash", "extensions: []", `subagentOnlyExtensions: ${FAUX_EXTENSION}`, "model: faux/faux-1", "---", "", "worker"].join("\n"));
+  const block = (lane: string) => '```lane-return\n' + JSON.stringify({ v: 2, lane, status: "complete", sha: null, landed: false, check: "fixture", exit: 0 }) + '\n```';
+  const observed = join(s.repo, "starts.jsonl");
+  writeFileSync(s.stub, readFileSync(s.stub, "utf8") + `
+    import { appendFileSync } from "node:fs";
+    export const install = (pi) => {
+      let latest;
+      pi.events.on("subagent:async-started", d => { latest = d.id; appendFileSync(${JSON.stringify(observed)}, JSON.stringify(d) + "\\n"); });
+      pi.on("tool_call", e => { if (e.toolName === "subagent" && e.input.id === "LATEST_TEST_RUN") e.input.id = latest; });
+    };
+  `);
+  writeFileSync(s.stub, readFileSync(s.stub, "utf8").replace("export default function (pi) {", "export default function (pi) { install(pi);"));
+  const script = writeFauxScript([
+    { match: "SPAWN_ORIGINAL", once: true, toolCalls: [{ name: "subagent", args: { agent: "reviewer", task: "Lane: L1 · Task: T1 · Tier: guarded\nObjective: ORIGINAL_CHILD" } }] },
+    ...([1, 2] as const).flatMap(index => [
+      { match: `ROOT_FOLLOWUP_${index}`, once: true, toolCalls: [{ name: "subagent", args: { action: "resume", id: "LATEST_TEST_RUN", timeoutMs: 30_000, message: index === 1 ? "FOLLOWUP_1" : "Lane: L2 · Task: T2 · Tier: guarded\nObjective: FOLLOWUP_2" } }] },
+      { match: `FOLLOWUP_${index}`, delayMs: 3000, text: block(index === 1 ? "L1" : "L2") },
+    ]),
+    { match: "ORIGINAL_CHILD", text: block("L1") },
+    { match: ".*", text: "ok" },
+  ]);
+  const session = startPiRpc({ extensions: [FAUX_EXTENSION, s.stub, STATE_EXTENSION, join(HERE, "..", "loop-wait", "root.ts")], fauxScriptPath: script,
+    agentDir: s.agentDir, subagentTempRoot: freshDir("loop-state-e2e-sub-"), cwd: s.repo,
+    sessionArgs: [], extraArgs: ["--exclude-tools", "subagents_enable"] });
+  const rows = () => { try { return readFileSync(s.log, "utf8").trim().split("\n").map(l => JSON.parse(l)).filter(r => ["dispatch", "return"].includes(r.ev)); } catch { return []; } };
+  const digest = () => execFileSync(BIN, ["digest", s.log], { encoding: "utf8" });
+  try {
+    session.send({ id: "original", type: "prompt", message: "SPAWN_ORIGINAL" });
+    await waitForCondition(() => rows().length === 2 ? true : undefined, 30_000);
+    const original = rows()[0].run;
+    let source = original;
+    for (const [index, lane, task] of [[1, "L1", "T1"], [2, "L2", "T2"]] as const) {
+      const marker = `FOLLOWUP_${index}`;
+      session.send({ id: marker, type: "prompt", message: `ROOT_${marker}` });
+      const native = await waitForCondition(() => {
+        const starts = readFileSync(observed, "utf8").trim().split("\n").map(l => JSON.parse(l));
+        return starts[index];
+      }, 20_000);
+      assert.notEqual(native.id, source, "native resume exposes a new run identity");
+      const revived = await waitForCondition(() => rows().find(r => r.ev === "dispatch" && r.run === native.id), 10_000)
+        .catch(() => { throw new Error(`native resumed identity ${native.id} has no dispatch: ${JSON.stringify(rows())}`); });
+      assert.equal(revived.lane, lane);
+      assert.equal(revived.task, task);
+      assert.equal(revived.agent, "reviewer");
+      assert.equal(revived.deadline, new Date(native.deadlineAt).toISOString().replace(/\.\d{3}Z$/, "Z"), "the resumed deadline comes from this native run");
+      assert.match(digest(), /## Live lanes \(1\)/);
+      append(s.log, "return", "lane=L1", `run=${original}`, "status=complete");
+      assert.match(digest(), /## Live lanes \(1\)/, "an earlier reviewer return cannot terminate the revived run");
+      assert.match(digest(), new RegExp(`${task}: dispatched lane=${lane} run=${revived.run}`));
+      await waitForCondition(() => rows().some(r => r.ev === "return" && r.run === revived.run) ? true : undefined, 20_000);
+      source = revived.run;
+    }
+    const lifecycle = rows().filter(r => r.by === "ext");
+    assert.equal(lifecycle.length, 6);
+    for (const run of new Set(lifecycle.map(r => r.run))) assert.deepEqual(lifecycle.filter(r => r.run === run).map(r => r.ev), ["dispatch", "return"]);
+    assert.match(digest(), /## Live lanes \(0\)/);
+    const watches = readFileSync(s.log, "utf8").trim().split("\n").map(l => JSON.parse(l)).filter(r => r.ev === "watch");
+    assert.equal(watches.length, 6, "one deadline watch start/stop for each native run, no replay attempts");
+    assert.equal(new Set(watches.map(r => r.what)).size, 3);
+    execFileSync(BIN, ["check", s.log]);
+  } finally { await session.close(); }
+});
 
 test("S6: a 3.37 MB lane return reaches the root at 16 KB or less with its lane-return block, and the return event keeps its fields", async () => {
   const s = scaffold();
