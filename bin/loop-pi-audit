@@ -68,15 +68,43 @@ downgrade those audits.
 file; a file whose bytes differ is refused (exit 2) before it covers anything. Under protocol 2 a
 `--grants` file without it still works, with a warning on stderr.
 
+`induced_effects` in a repository's grants is an opt-in, frozen v1 envelope for
+one approved push-triggered execution at an exact publication SHA. It requires
+--grants-sha256, repository ID/name, snapshot remote name/URL, workflow ID/path
+and source SHA-256, exact initiating actor ID/login, run_attempt, dedicated
+trusted writer_job name, valid_from/valid_until and finite destinations:
+[{"ref": "refs/heads/exact", "old": "<full SHA>", "allow_non_fast_forward": false}].
+Optional referenced_workflows pins are exact {path, sha} pairs. Approval of the
+source digest and writer job means the owner trusts that job's write-producing
+code and output channel, including its immutable dependencies; it must not run
+untrusted log-producing code or dry-run writes. Actor means execution initiator,
+NOT the credential/app performing the write.
+
+Only moved non-default branches with full-endpoint successful Git porcelain
+output from provider-retrieved job logs can pass. Grouped log sections (including
+GitHub Run command echoes) are never write evidence. Unambiguous, complete
+To/source:destination/Done framing is required. The approved producer must use
+core.abbrev=no; incomplete/new-only output remains UNVERIFIED. Provider run,
+exact attempt, job membership, workflow source and destination ref are fetched
+with bounded read-only gh api GETs. Caller ledgers are never induced authority.
+An induced envelope disables legacy automation/ops-release shortcuts for that
+repository; its destinations cannot borrow explicit/shared ref grants on failure.
+Tags, releases, creation and deletion are not admitted by this adapter. Existing
+ancestry verification is independent and still applies. No workflow is dispatched
+or instrumented by the audit.
+
 Stdlib only.
 """
 import argparse
+import base64
 from datetime import datetime, timezone
 from urllib.parse import quote, urlparse
 import fcntl
 import hashlib
 import json
 import re
+import resource
+import tempfile
 import os
 import shutil
 import subprocess
@@ -530,6 +558,262 @@ def validate_automation(grants_by_repo: dict) -> None:
                 raise ValueError("automation ref is not a valid branch or tag ref")
 
 
+def validate_induced(grants_by_repo: dict, frozen: str | None) -> None:
+    """Validate owner authority before collecting any induced evidence; no defaults grant it."""
+    required = {"v", "repository_id", "repository", "remote", "remote_url", "publication_sha",
+                "workflow_id", "workflow_path", "workflow_sha256", "actor", "event", "run_attempt",
+                "writer_job", "valid_from", "valid_until", "destinations"}
+    for grants in grants_by_repo.values():
+        if not isinstance(grants, dict) or "induced_effects" not in grants:
+            continue
+        envelope = grants["induced_effects"]
+        if not isinstance(envelope, dict) or "publication_sha" not in envelope:
+            raise ValueError("induced_effects needs publication_sha")
+        if frozen is None:
+            raise ValueError("induced_effects requires --grants-sha256")
+        if not required <= envelope.keys() or envelope.keys() - required - {"referenced_workflows"}:
+            raise ValueError("induced_effects needs the exact v1 authority fields")
+        if type(envelope["v"]) is not int or envelope["v"] != 1 or envelope["event"] != "push":
+            raise ValueError("induced_effects supports only v1 push executions")
+        for key in ("repository_id", "workflow_id", "run_attempt"):
+            if type(envelope[key]) is not int or envelope[key] < 1:
+                raise ValueError(f"induced_effects invalid {key}")
+        for key, pattern in (("repository", r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"),
+                             ("publication_sha", r"[0-9a-f]{40}"),
+                             ("workflow_sha256", r"[0-9a-f]{64}"),
+                             ("workflow_path", r"\.github/workflows/[A-Za-z0-9_-]+\.ya?ml")):
+            if not isinstance(envelope[key], str) or not re.fullmatch(pattern, envelope[key]):
+                raise ValueError(f"induced_effects invalid {key}")
+        if not valid_receipt_remote(envelope["remote"]):
+            raise ValueError("induced_effects invalid remote")
+        if (not isinstance(envelope["remote_url"], str)
+                or github_repository("", "", envelope["remote_url"]) is None
+                or github_repository("", "", envelope["remote_url"])[1] != envelope["repository"]):
+            raise ValueError("induced_effects remote URL must identify its exact repository")
+        actor = envelope["actor"]
+        if (not isinstance(actor, dict) or set(actor) != {"id", "login"}
+                or type(actor["id"]) is not int or actor["id"] < 1
+                or not isinstance(actor["login"], str)
+                or not re.fullmatch(r"[A-Za-z0-9-]+(?:\[bot\])?", actor["login"])):
+            raise ValueError("induced_effects invalid initiating actor")
+        job = envelope["writer_job"]
+        if not isinstance(job, str) or not job or len(job) > 200 or any(ord(c) < 32 for c in job):
+            raise ValueError("induced_effects needs an exact trusted writer_job name")
+        start, end = (snapshot_time(envelope[k]) for k in ("valid_from", "valid_until"))
+        if start >= end:
+            raise ValueError("induced_effects validity window must increase")
+        pins = envelope.get("referenced_workflows", [])
+        if not isinstance(pins, list) or len(pins) > 20:
+            raise ValueError("induced_effects invalid referenced_workflows")
+        for pin in pins:
+            if (not isinstance(pin, dict) or set(pin) != {"path", "sha"}
+                    or not isinstance(pin["path"], str) or not pin["path"]
+                    or not isinstance(pin["sha"], str) or not re.fullmatch(r"[0-9a-f]{40}", pin["sha"])):
+                raise ValueError("induced_effects needs exact reusable workflow source pins")
+        destinations = envelope["destinations"]
+        if not isinstance(destinations, list) or not 1 <= len(destinations) <= 100:
+            raise ValueError("induced_effects needs a finite destination inventory")
+        seen = set()
+        for dest in destinations:
+            if (not isinstance(dest, dict) or set(dest) != {"ref", "old", "allow_non_fast_forward"}
+                    or not isinstance(dest["ref"], str) or not dest["ref"].startswith("refs/heads/")
+                    or dest["ref"] in seen or not isinstance(dest["old"], str)
+                    or not re.fullmatch(r"[0-9a-f]{40}", dest["old"]) or dest["old"] == "0" * 40
+                    or type(dest["allow_non_fast_forward"]) is not bool
+                    or run(["git", "check-ref-format", dest["ref"]]).returncode != 0):
+                raise ValueError("induced_effects needs unique exact moved-branch destinations and old SHAs")
+            seen.add(dest["ref"])
+
+
+INDUCED_BYTES = 2 * 1024 * 1024
+
+
+def induced_api(host: str, endpoint: str, text: bool = False, timeout: float = 60):
+    """Read-only provider entry point, bounded even when a log/JSON body is oversized.
+
+    gh follows the provider's log-download redirect; no caller URL or credential is
+    persisted. POSIX file limits bound subprocess output, not just later parsing.
+    """
+    def limit_output():
+        resource.setrlimit(resource.RLIMIT_FSIZE, (INDUCED_BYTES, INDUCED_BYTES))
+
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        result = subprocess.run(["gh", "api", "--hostname", host, "--method", "GET", endpoint],
+                                stdout=out, stderr=err, timeout=timeout, preexec_fn=limit_output)
+        if result.returncode or out.tell() >= INDUCED_BYTES:
+            raise ValueError("provider response unavailable or oversized")
+        out.seek(0)
+        body = out.read(INDUCED_BYTES).decode("utf-8")
+    return body if text else json.loads(body)
+
+
+def induced_receipts(repo: str, envelope: dict, before: dict, after: dict,
+                     times: tuple[str, str]) -> tuple[dict, str]:
+    """Provider-attested execution provenance plus trusted pinned writer's exact write output.
+
+    A dedicated trusted job, not arbitrary logged claims, is the authority's output
+    channel. Only a single complete transition per destination is supported. No
+    source HEAD, current ref or green job can substitute for absent old/new output.
+    """
+    deadline = time.monotonic() + 120
+    calls = 0
+
+    def provider_get(endpoint: str, text: bool = False):
+        nonlocal calls
+        calls += 1
+        remaining = deadline - time.monotonic()
+        if calls > 105 or remaining <= 0:
+            raise ValueError("provider evidence budget exhausted")
+        return induced_api(host, endpoint, text, timeout=min(60, remaining))
+
+    try:
+        remote = envelope["remote"]
+        b, a = before.get("remotes", {}).get(remote, {}), after.get("remotes", {}).get(remote, {})
+        if (not b.get("available") or not a.get("available")
+                or b.get("url") != envelope["remote_url"] or a.get("url") != envelope["remote_url"]):
+            return {}, "remote identity mismatch"
+        defaults = {head_target(b, a), head_target(a, b), "refs/heads/main"}
+        if any(dest["ref"] in defaults for dest in envelope["destinations"]):
+            return {}, "default branch cannot be an induced destination"
+        host, path = github_repository(repo, remote, envelope["remote_url"])
+        api = f"repos/{path}"
+        sha = envelope["publication_sha"]
+        listing = provider_get(f"{api}/actions/runs?head_sha={sha}&per_page=100")
+        records = listing["workflow_runs"]
+        if (not isinstance(records, list) or type(listing["total_count"]) is not int
+                or listing["total_count"] != len(records) or len(records) > 100):
+            return {}, "incomplete run inventory"
+        candidates = [r for r in records if r.get("workflow_id") == envelope["workflow_id"]]
+        if len(candidates) != 1 or type(candidates[0].get("id")) is not int or candidates[0]["id"] < 1:
+            return {}, "missing or ambiguous approved execution"
+        run_id = candidates[0]["id"]
+        attempt = envelope["run_attempt"]
+        record = provider_get(f"{api}/actions/runs/{run_id}/attempts/{attempt}")
+        for observed in (candidates[0], record):
+            for key in ("head_sha", "run_attempt", "workflow_id", "event"):
+                expected = sha if key == "head_sha" else envelope[key]
+                if observed.get(key) != expected or type(observed.get(key)) is not type(expected):
+                    return {}, f"run {key} mismatch"
+            if observed.get("id") != run_id:
+                return {}, "run ID mismatch"
+            for key in ("actor", "triggering_actor"):
+                if any(observed.get(key, {}).get(k) != v for k, v in envelope["actor"].items()):
+                    return {}, f"run {key} mismatch"
+            identity = observed["repository"]
+            if identity.get("id") != envelope["repository_id"] or identity.get("full_name") != path:
+                return {}, "repository identity mismatch"
+            if observed.get("path", "").split("@", 1)[0] != envelope["workflow_path"]:
+                return {}, "workflow path mismatch"
+            if observed.get("status") != "completed" or observed.get("conclusion") != "success":
+                return {}, "execution not successfully completed"
+        start, end = map(snapshot_time, (envelope["valid_from"], envelope["valid_until"]))
+        run_start, run_end = map(snapshot_time, (record["run_started_at"], record["updated_at"]))
+        if not start <= run_start <= run_end <= end:
+            return {}, "execution outside approved window"
+        snapshot_start, snapshot_end = map(snapshot_time, times)
+        if not snapshot_start < snapshot_end or not snapshot_start <= run_start <= run_end <= snapshot_end:
+            return {}, "execution outside snapshot window"
+        expected_pins = sorted((p["path"], p["sha"]) for p in envelope.get("referenced_workflows", []))
+        actual_pins = sorted((p["path"], p["sha"]) for p in record.get("referenced_workflows", []))
+        if actual_pins != expected_pins:
+            return {}, "reusable workflow source pin mismatch"
+        source = provider_get(f"{api}/contents/{envelope['workflow_path']}?ref={sha}")
+        if source["type"] != "file" or source["encoding"] != "base64":
+            return {}, "workflow source unavailable"
+        raw = base64.b64decode("".join(source["content"].split()), validate=True)
+        if hashlib.sha256(raw).hexdigest() != envelope["workflow_sha256"]:
+            return {}, "workflow source pin mismatch"
+        listing = provider_get(f"{api}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100")
+        jobs = listing["jobs"]
+        if (not isinstance(jobs, list) or type(listing["total_count"]) is not int
+                or listing["total_count"] != len(jobs) or len(jobs) > 100):
+            return {}, "incomplete job inventory"
+        writers = [j for j in jobs if j.get("name") == envelope["writer_job"]]
+        if len(writers) != 1:
+            return {}, "missing or ambiguous trusted writer job"
+        writer = writers[0]
+        if (type(writer.get("id")) is not int or writer["id"] < 1 or writer.get("run_id") != run_id
+                or writer.get("head_sha") != sha or writer.get("status") != "completed"
+                or writer.get("conclusion") != "success"):
+            return {}, "writer job identity or outcome mismatch"
+        log = provider_get(f"{api}/actions/jobs/{writer['id']}/logs", text=True)
+        approved = {d["ref"]: d for d in envelope["destinations"]}
+        receipts = {}
+        group_open = False
+        frame_open = False
+        frame_writes = 0
+        for line in log.splitlines():
+            # Raw job logs may have GitHub's timestamp prefix, never gh's guessed step labels.
+            line = re.sub(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,9})?Z ", "", line)
+            # Provider authentication does not make echoed script text write output.
+            # Conservatively exclude ALL groups, not only a guessed Run title. Nested,
+            # unmatched or interrupted framing is ambiguous and invalidates the log.
+            if line.startswith("##[group]"):
+                if group_open or frame_open:
+                    return {}, "ambiguous log group framing"
+                group_open = True
+                continue
+            if line.startswith("##[endgroup]"):
+                if line != "##[endgroup]" or not group_open:
+                    return {}, "ambiguous log group framing"
+                group_open = False
+                continue
+            if group_open:
+                continue
+            if line.startswith("To "):
+                if frame_open:
+                    return {}, "incomplete successful write output"
+                if line[3:] != envelope["remote_url"]:
+                    return {}, "write remote identity mismatch"
+                frame_open = True
+                frame_writes = 0
+                continue
+            if line == "Done":
+                if not frame_open or not frame_writes:
+                    return {}, "incomplete successful write output"
+                frame_open = False
+                continue
+            fields = line.split("\t")
+            if len(fields) < 2 or fields[0] not in {" ", "+", "*", "-", "!", "="}:
+                if frame_open:
+                    return {}, "incomplete successful write output"
+                continue
+            if len(fields) != 3 or fields[1].count(":") != 1:
+                return {}, "malformed write ref fields"
+            source_ref, ref = fields[1].split(":")
+            if (not source_ref or run(["git", "check-ref-format", "--allow-onelevel", source_ref]).returncode != 0):
+                return {}, "malformed write ref fields"
+            if ref not in approved:
+                return {}, "unapproved destination"
+            match = re.fullmatch(r"([0-9a-f]{40})(\.\.?\.)([0-9a-f]{40})(?: \(forced update\))?",
+                                 fields[2])
+            if not frame_open or fields[0] not in {" ", "+"} or match is None:
+                return {}, "incomplete successful write output"
+            old, separator, new = match.groups()
+            if ref in receipts or old != approved[ref]["old"] or old == new:
+                return {}, "conflicting write endpoints"
+            if ((fields[0] == "+") != (separator == "...")
+                    or (fields[0] == "+" and not approved[ref]["allow_non_fast_forward"])):
+                return {}, "non-fast-forward not approved"
+            if b.get("refs", {}).get(ref) != old or a.get("refs", {}).get(ref) != new:
+                return {}, "snapshot write endpoints mismatch"
+            endpoint = provider_get(f"{api}/git/ref/{quote(ref[5:], safe='/')}")
+            if (endpoint.get("ref") != ref or endpoint.get("object", {}).get("type") != "commit"
+                    or endpoint["object"].get("sha") != new):
+                return {}, "destination endpoint mismatch"
+            receipts[ref] = {"old": old, "new": new, "allow_non_fast_forward": approved[ref]["allow_non_fast_forward"],
+                             "run": run_id, "attempt": attempt, "job": writer["id"]}
+            frame_writes += 1
+        if group_open:
+            return {}, "ambiguous log group framing"
+        if frame_open or not receipts:
+            return {}, "incomplete successful write output"
+        return receipts, ""
+    except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError, AttributeError) as exc:
+        # Never quote provider logs, signed URLs or potentially secret stderr in a report.
+        return {}, f"provider evidence unavailable or malformed ({type(exc).__name__})"
+
+
 def snapshot_time(value: str) -> datetime:
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if parsed.tzinfo is None:
@@ -827,8 +1111,12 @@ def compare_repo(name: str, before: dict, after: dict, grants: list[str] | dict,
                  proto: dict | None = None) -> bool:
     """Returns True if changes are granted or foreign automation. `proto` (protocol 2) is
     {"push_log": [...]}: default-branch moves are then judged commit by commit."""
-    automation = grants.get("automation", []) if isinstance(grants, dict) else []
-    bot_logins = grants.get("bot_actors", []) if isinstance(grants, dict) else []
+    induced = grants.get("induced_effects") if isinstance(grants, dict) else None
+    induced_writes, induced_reason = induced_receipts(name, induced, before, after, times) if induced else ({}, "")
+    automation = grants.get("automation", []) if isinstance(grants, dict) and not induced else []
+    bot_logins = grants.get("bot_actors", []) if isinstance(grants, dict) and not induced else []
+    if induced:
+        ops_release = False
     rewrites = set(grants.get("allow_non_fast_forward", [])) if isinstance(grants, dict) else set()
     grants = grants.get("refs", []) if isinstance(grants, dict) else grants
     all_covered = True
@@ -913,6 +1201,25 @@ def compare_repo(name: str, before: dict, after: dict, grants: list[str] | dict,
         for change, ref, before_sha, after_sha in changes:
             target = ref
             notes: list[str] = []
+            if induced and (ref in {d["ref"] for d in induced["destinations"]}
+                            or (remote == induced["remote"] and ref.startswith("refs/heads/")
+                                and ref not in {head_target(b, a), head_target(a, b)})):
+                receipt = induced_writes.get(ref) if remote == induced["remote"] else None
+                if receipt and change == "moved":
+                    mark, accepted = moved_ref_mark(name, remote, ref, before_sha, after_sha, True,
+                                                   receipt["allow_non_fast_forward"])
+                    if accepted:
+                        mark = f"GRANTED induced run={receipt['run']} attempt={receipt['attempt']} job={receipt['job']}"
+                    else:
+                        notes.append("induced: ancestry unverified or non-fast-forward not approved")
+                else:
+                    mark, accepted = "UNVERIFIED induced", False
+                    notes.append(f"induced: {induced_reason or 'destination operation not approved'}")
+                all_covered = all_covered and accepted
+                report.append(f"[{name}] remote '{remote}' ref {change}: {ref} "
+                              f"({before_sha[:12] or '-'} -> {after_sha[:12] or '-'}) [{mark}]")
+                report.extend(f"[{name}] remote '{remote}' ref {change}: {ref} note: {note}" for note in notes)
+                continue
             actor = tag_actor(ref, change, remote) or automation_actor(
                 name, remote, ref, before_sha, after_sha, automation,
                 [head_target(b, a), head_target(a, b)], times)
@@ -1057,7 +1364,8 @@ def cmd_compare(args: argparse.Namespace) -> int:
 
     try:
         validate_automation(grants_by_repo)
-    except (ValueError, AttributeError) as exc:
+        validate_induced(grants_by_repo, grants_sha256)
+    except (ValueError, AttributeError, TypeError, OSError, subprocess.TimeoutExpired) as exc:
         print(f"loop-pi-audit: invalid grants: {exc}", file=sys.stderr)
         return 2
     try:

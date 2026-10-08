@@ -1556,5 +1556,292 @@ class ProtoDefaultBranchTests(unittest.TestCase):
         self.assertNotIn("ignored", result.stderr)
 
 
+class InducedEffectsTests(unittest.TestCase):
+    """Real compare CLI and local ancestry; gh is faked only at the subprocess edge."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="audit-induced-")
+        self.addCleanup(self.tmp.cleanup)
+        self.repo, self.remote = init_repo_with_remote(self.tmp.name, "repo")
+        git(self.remote, "symbolic-ref", "HEAD", "refs/heads/main")
+        self.ref = "refs/heads/automation/exact"
+        self.old = git(self.repo, "rev-parse", "HEAD").stdout.strip()
+        self.publication = self.old
+        git(self.repo, "push", "-q", "origin", f"HEAD:{self.ref}")
+        self.fake = make_bin_with_gh_stub(self.tmp.name)
+        self.env = {"PATH": self.fake}
+        self.before = os.path.join(self.tmp.name, "before.json")
+        self.after = os.path.join(self.tmp.name, "after.json")
+        snapshot(self.before, self.repo, env_overrides=self.env)
+        git(self.repo, "commit", "--allow-empty", "-q", "-m", "effect")
+        self.new = git(self.repo, "rev-parse", "HEAD").stdout.strip()
+        self.set_after()
+        self.url = "https://github.com/export/audit-fixture.git"
+        for path in (self.before, self.after):
+            with open(path) as fh:
+                data = json.load(fh)
+            data["repos"][self.repo]["remotes"]["origin"]["url"] = self.url
+            with open(path, "w") as fh:
+                json.dump(data, fh)
+        self.envelope = {
+            "v": 1, "repository_id": 101, "repository": "export/audit-fixture",
+            "remote": "origin", "remote_url": self.url, "publication_sha": self.publication,
+            "workflow_id": 7, "workflow_path": ".github/workflows/writer.yml",
+            "workflow_sha256": hashlib.sha256(b"approved pinned dedicated writer\n").hexdigest(),
+            "actor": {"id": 9, "login": "approved-initiator"}, "event": "push",
+            "run_attempt": 1, "writer_job": "approved dedicated writer",
+            "valid_from": "2000-01-01T00:00:00Z", "valid_until": "2100-01-01T00:00:00Z",
+            "destinations": [{"ref": self.ref, "old": self.old, "allow_non_fast_forward": False}],
+        }
+        self.run_record = {
+            "id": 11, "workflow_id": 7, "path": self.envelope["workflow_path"],
+            "repository": {"id": 101, "full_name": "export/audit-fixture"},
+            "head_sha": self.publication, "run_attempt": 1, "event": "push",
+            "actor": self.envelope["actor"], "triggering_actor": self.envelope["actor"],
+            "status": "completed", "conclusion": "success",
+            "run_started_at": "2026-10-02T15:00:00Z", "updated_at": "2026-10-02T15:01:00Z",
+        }
+        self.job = {"id": 13, "run_id": 11, "head_sha": self.publication,
+                    "name": self.envelope["writer_job"], "status": "completed", "conclusion": "success"}
+        self.log = f"To {self.url}\n \trefs/heads/source:{self.ref}\t{self.old}..{self.new}\nDone\n"
+        self.calls = os.path.join(self.tmp.name, "calls.jsonl")
+        self.extra_grants = {}
+        self.response_overrides = {}
+        for path, timestamp in ((self.before, "2026-10-02T14:00:00Z"), (self.after, "2026-10-02T16:00:00Z")):
+            with open(path) as fh:
+                data = json.load(fh)
+            data["taken_at"] = timestamp
+            with open(path, "w") as fh:
+                json.dump(data, fh)
+
+    def set_after(self):
+        git(self.repo, "push", "-q", "--force", "origin", f"HEAD:{self.ref}")
+        snapshot(self.after, self.repo, env_overrides=self.env)
+
+    def compare(self, frozen=True):
+        responses = {
+            f"repos/export/audit-fixture/actions/runs?head_sha={self.publication}&per_page=100":
+                {"total_count": 1, "workflow_runs": [self.run_record]},
+            "repos/export/audit-fixture/actions/runs/11/attempts/1": self.run_record,
+            "repos/export/audit-fixture/actions/runs/11/attempts/1/jobs?per_page=100":
+                {"total_count": 1, "jobs": [self.job]},
+            "repos/export/audit-fixture/actions/jobs/13/logs": self.log,
+            f"repos/export/audit-fixture/contents/{self.envelope['workflow_path']}?ref={self.publication}":
+                {"type": "file", "encoding": "base64", "content": "YXBwcm92ZWQgcGlubmVkIGRlZGljYXRlZCB3cml0ZXIK"},
+            "repos/export/audit-fixture/git/ref/heads/automation/exact":
+                {"ref": self.ref, "object": {"type": "commit", "sha": self.new}},
+        }
+        responses.update(self.response_overrides)
+        feed = os.path.join(self.tmp.name, "provider.json")
+        with open(feed, "w") as fh:
+            json.dump(responses, fh)
+        stub = os.path.join(self.fake, "gh")
+        with open(stub, "w") as fh:
+            fh.write(f'#!{sys.executable}\nimport json,sys\n'
+                     f'with open({self.calls!r},"a") as f: f.write(json.dumps(sys.argv[1:])+"\\n")\n'
+                     f'feed=json.load(open({feed!r}))\n'
+                     'value=feed.get(sys.argv[-1])\n'
+                     'if value is None: sys.exit(1)\n'
+                     'print(value if isinstance(value,str) else json.dumps(value))\n')
+        os.chmod(stub, 0o755)
+        grants = os.path.join(self.tmp.name, "grants.json")
+        with open(grants, "w") as fh:
+            json.dump({self.repo: {"induced_effects": self.envelope, **self.extra_grants}}, fh)
+        with open(grants, "rb") as fh:
+            digest = hashlib.sha256(fh.read()).hexdigest()
+        result = run_audit("compare", self.before, self.after, "--grants", grants,
+                           *(["--grants-sha256", digest] if frozen else []), env_overrides=self.env)
+        with open(grants, "rb") as fh:
+            self.assertEqual(hashlib.sha256(fh.read()).hexdigest(), digest)
+        return result
+
+    def test_approved_exact_sha_effect_passes(self):
+        result = self.compare()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("GRANTED induced", result.stdout)
+        with open(self.calls) as fh:
+            calls = [json.loads(line) for line in fh]
+        self.assertTrue(any(call[-1].endswith("/actions/jobs/13/logs") for call in calls))
+        self.assertTrue(all(call[:5] == ["api", "--hostname", "github.com", "--method", "GET"] for call in calls))
+
+    def test_command_echo_cannot_attest_write(self):
+        complete = self.log
+        for timestamp in ("", "2026-10-02T15:00:01.1234567Z "):
+            with self.subTest(timestamp=timestamp):
+                echo = "##[group]Run : <<'EXPECTED'\n" + complete + "EXPECTED\n##[endgroup]\n"
+                self.log = "".join(timestamp + line + "\n" for line in echo.splitlines())
+                result = self.compare()
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertNotIn("[GRANTED", result.stdout)
+
+    def test_command_echo_followed_by_real_output_passes(self):
+        complete = self.log
+        self.log = "##[group]Run git push --porcelain\nshell: /bin/sh -e\n##[endgroup]\n" + complete
+        self.log = "".join("2026-10-02T15:00:01Z " + line + "\n" for line in self.log.splitlines())
+        result = self.compare()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("GRANTED induced", result.stdout)
+
+    def test_ambiguous_group_framing_fails_closed(self):
+        complete = self.log
+        for log in ("##[endgroup]\n" + complete,
+                    complete + "##[group]Run unfinished\n",
+                    "##[group]Run outer\n##[group]Run nested\n##[endgroup]\n" + complete + "##[endgroup]\n",
+                    complete.replace("Done\n", "##[group]Run interrupted\n##[endgroup]\nDone\n")):
+            with self.subTest(log=log):
+                self.log = log
+                result = self.compare()
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertNotIn("[GRANTED", result.stdout)
+
+    def test_truncated_and_ambiguous_porcelain_fail_closed(self):
+        complete = self.log
+        for log in (complete.removesuffix("Done\n"), complete + f"To {self.url}\n",
+                    complete.replace("Done\n", f"To {self.url}\nDone\n"),
+                    "Done\n" + complete,
+                    complete.replace("Done\n", "unexpected output\nDone\n")):
+            with self.subTest(log=log):
+                self.log = log
+                result = self.compare()
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertNotIn("[GRANTED", result.stdout)
+
+    def test_malformed_porcelain_ref_fields_fail_closed(self):
+        complete = self.log
+        for refs in (self.ref, ":" + self.ref, "refs/heads/source::" + self.ref,
+                     "refs/heads/bad..source:" + self.ref, "refs/heads/source:" + self.ref + "\textra"):
+            with self.subTest(refs=refs):
+                self.log = complete.replace("refs/heads/source:" + self.ref, refs)
+                result = self.compare()
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertNotIn("[GRANTED", result.stdout)
+
+    def test_real_ancestry_rejects_lying_fast_forward_output(self):
+        git(self.repo, "checkout", "-q", "--orphan", "unrelated")
+        git(self.repo, "commit", "-q", "-m", "unrelated")
+        self.new = git(self.repo, "rev-parse", "HEAD").stdout.strip()
+        self.set_after()
+        with open(self.after) as fh:
+            data = json.load(fh)
+        data["repos"][self.repo]["remotes"]["origin"]["url"] = self.url
+        with open(self.after, "w") as fh:
+            json.dump(data, fh)
+        self.log = f"To {self.url}\n \trefs/heads/source:{self.ref}\t{self.old}..{self.new}\nDone\n"
+        result = self.compare()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("NON-FAST-FORWARD (granted, but blocked)", result.stdout)
+        self.assertIn("induced: ancestry unverified or non-fast-forward not approved", result.stdout)
+
+    def test_mismatched_run_head_sha_flagged(self):
+        self.run_record["head_sha"] = "a" * 40
+        result = self.compare()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("induced: run head_sha mismatch", result.stdout)
+
+    def test_unapproved_actor_and_destination_flagged(self):
+        for fault in ("actor", "destination"):
+            with self.subTest(fault=fault):
+                original = self.log
+                if fault == "actor":
+                    self.run_record["actor"] = {"id": 10, "login": "other"}
+                else:
+                    self.run_record["actor"] = self.envelope["actor"]
+                    self.log = self.log.replace(self.ref, self.ref + "-other")
+                result = self.compare()
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("induced: " + ("run actor mismatch" if fault == "actor" else "unapproved destination"), result.stdout)
+                self.log = original
+
+    def test_non_fast_forward_flagged(self):
+        git(self.repo, "checkout", "-q", "--orphan", "unrelated")
+        git(self.repo, "commit", "-q", "-m", "unrelated")
+        self.new = git(self.repo, "rev-parse", "HEAD").stdout.strip()
+        self.set_after()
+        with open(self.after) as fh:
+            data = json.load(fh)
+        data["repos"][self.repo]["remotes"]["origin"]["url"] = self.url
+        with open(self.after, "w") as fh:
+            json.dump(data, fh)
+        self.log = f"To {self.url}\n+\trefs/heads/source:{self.ref}\t{self.old}...{self.new} (forced update)\nDone\n"
+        result = self.compare()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("induced: non-fast-forward not approved", result.stdout)
+
+    def test_envelope_without_publication_sha_error(self):
+        del self.envelope["publication_sha"]
+        result = self.compare()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("induced_effects needs publication_sha", result.stderr)
+
+    def test_no_write_and_incomplete_log_fail_closed(self):
+        for log in ("all checks passed\n", f"To {self.url}\nSuccessfully updated reference {self.ref} to {self.new}\n",
+                    f"To {self.url}\n \trefs/heads/source:{self.ref}\t{self.old[:12]}..{self.new[:12]}\nDone\n"):
+            with self.subTest(log=log):
+                self.log = log
+                result = self.compare()
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("induced: incomplete successful write output", result.stdout)
+
+    def test_unfrozen_envelope_is_error(self):
+        result = self.compare(frozen=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("induced_effects requires --grants-sha256", result.stderr)
+
+    def test_legacy_grants_cannot_replace_missing_write_evidence(self):
+        self.log = "all jobs green, no write\n"
+        self.extra_grants = {"refs": [self.ref], "allow_non_fast_forward": [self.ref],
+                             "automation": [{"ref_prefix": "refs/heads/automation/", "actor": "other[bot]"}]}
+        result = self.compare()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("induced: incomplete successful write output", result.stdout)
+        self.assertNotIn("[GRANTED", result.stdout)
+
+    def test_provider_destination_and_job_membership_fail_closed(self):
+        for fault in ("destination", "job"):
+            with self.subTest(fault=fault):
+                self.response_overrides.clear()
+                self.job["run_id"] = 99 if fault == "job" else 11
+                if fault == "destination":
+                    self.response_overrides["repos/export/audit-fixture/git/ref/heads/automation/exact"] = {
+                        "ref": self.ref, "object": {"type": "commit", "sha": "a" * 40}}
+                result = self.compare()
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("induced: " + ("destination endpoint mismatch" if fault == "destination"
+                                             else "writer job identity or outcome mismatch"), result.stdout)
+
+    def test_execution_outside_snapshot_window(self):
+        self.run_record["run_started_at"] = "2026-10-01T15:00:00Z"
+        self.run_record["updated_at"] = "2026-10-01T15:01:00Z"
+        result = self.compare()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("induced: execution outside snapshot window", result.stdout)
+
+    def test_extra_unapproved_write_invalidates_all_receipts(self):
+        self.log += f" \trefs/heads/source:refs/heads/automation/other\t{self.old}..{self.new}\n"
+        result = self.compare()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("induced: unapproved destination", result.stdout)
+        self.assertNotIn("[GRANTED", result.stdout)
+
+    def test_provider_failure_and_oversized_log_are_unverified(self):
+        for fault in ("missing", "oversized"):
+            with self.subTest(fault=fault):
+                self.response_overrides["repos/export/audit-fixture/actions/jobs/13/logs"] = (
+                    None if fault == "missing" else "x" * (2 * 1024 * 1024 + 1))
+                result = self.compare()
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("induced: provider evidence unavailable", result.stdout)
+
+    def test_wrong_attempt_and_workflow_pin_fail_closed(self):
+        for fault in ("attempt", "pin"):
+            with self.subTest(fault=fault):
+                self.run_record["run_attempt"] = 2 if fault == "attempt" else 1
+                if fault == "pin":
+                    self.envelope["workflow_sha256"] = "0" * 64
+                result = self.compare()
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("induced: " + ("run run_attempt mismatch" if fault == "attempt" else "workflow source pin mismatch"), result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
