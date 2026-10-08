@@ -19,6 +19,7 @@ type Handler = (event: any, ctx: any) => any;
 function fakeApi() {
   const handlers = new Map<string, Handler[]>();
   const api = {
+    events: { on() { return () => {}; }, emit() {} },
     on(event: string, handler: Handler) {
       const list = handlers.get(event) ?? [];
       list.push(handler);
@@ -236,5 +237,9 @@ test("lane: a subagent call naming a model outside the gpt-6 family is blocked",
     fakeCtx(agentDir),
   );
   assert.equal(result?.block, true);
-  assert.ok(handlers.get("before_provider_request")?.length === 1 && handlers.get("model_select")?.length === 1);
+  let payload: any = { model: "gpt-5.6-sol" };
+  for (const listener of handlers.get("before_provider_request") ?? []) {
+    payload = (await listener({ payload }, { model: { provider: "openai", id: "gpt-5.6-sol" } })) ?? payload;
+  }
+  assert.equal(payload.model, "loop-pi-refused:gpt-5.6-sol");
 });

@@ -49,6 +49,7 @@ function lane(binding: unknown) {
   else process.env.PI_SUBAGENT_EXTENSION_BINDINGS = JSON.stringify(binding);
   const handlers = new Map<string, Handler[]>();
   const api = {
+    events: { on() { return () => {}; }, emit() {} },
     on(event: string, handler: Handler) {
       handlers.set(event, [...(handlers.get(event) ?? []), handler]);
       return () => {};

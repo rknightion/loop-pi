@@ -107,7 +107,7 @@ test("ops network forms: real bash/watch_process handlers refuse clients, preser
     const entry = { surface: `probe:synthetic-${suffix}`, kind: "probe", allow };
     process.env.PI_SUBAGENT_EXTENSION_BINDINGS = JSON.stringify({ "loop-pi.guard/1": { agent: "ops-probe", surface: entry.surface, entry } });
     handlers.clear();
-    laneExtension({ on(event: string, handler: (...args: any[]) => any) {
+    laneExtension({ events: { on() { return () => {}; }, emit() {} }, on(event: string, handler: (...args: any[]) => any) {
       handlers.set(event, [...(handlers.get(event) ?? []), handler]); return () => {};
     } } as any);
   };

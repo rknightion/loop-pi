@@ -4,14 +4,14 @@
 // pi's own agent-level retry waits `retryDelayMs(settings.retry, attempt)`: baseDelayMs * 2^(n-1),
 // capped at maxAgentDelayMs, with no jitter and no split by status. The extension cannot replace
 // that wait, so it adds an extra wait before pi's: the total is pi's delay plus the extra.
-//   - 429 (rate limit): the total is a flat `rateLimitDelayMs` (default 60 s), whatever the attempt.
+//   - 429 (rate limit): rateLimitDelayMs (default 60 s) is a floor, plus bounded jitter.
 //   - 5xx (server error): pi's delay plus a random extra of up to SERVER_JITTER_RATIO of it, so
 //     lanes that failed together do not retry together.
-//   - Anything else pi retries (network, timeout, stream drop): no extra; pi's delay unchanged.
+//   - Anything else pi retries (network, timeout, stream drop): the same bounded jitter.
 
 /** Default total wait before retrying a rate-limited (429) request. */
 export const DEFAULT_RATE_LIMIT_DELAY_MS = 60_000;
-/** The 5xx extra is drawn from [0, ratio * pi's delay). */
+/** Extra jitter is drawn from [0, ratio * the applicable delay floor). */
 export const SERVER_JITTER_RATIO = 0.5;
 /** Node fires a longer setTimeout delay after 1 ms. */
 const MAX_TIMER_MS = 2_147_483_647;
@@ -76,7 +76,6 @@ export function extraRetryDelayMs(
   config: BackoffConfig,
   random: () => number = Math.random,
 ): number {
-  if (errorClass === "rate-limit") return Math.max(0, config.rateLimitDelayMs - piDelayMs);
-  if (errorClass === "server") return Math.floor(random() * piDelayMs * SERVER_JITTER_RATIO);
-  return 0;
+  const base = errorClass === "rate-limit" ? Math.max(piDelayMs, config.rateLimitDelayMs) : piDelayMs;
+  return Math.min(MAX_TIMER_MS, Math.max(0, base - piDelayMs) + Math.floor(random() * base * SERVER_JITTER_RATIO));
 }

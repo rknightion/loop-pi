@@ -38,13 +38,14 @@ test("retryable errors are classified by status: 429 first, then 5xx, else other
   for (const [message, expected] of cases) assert.equal(classifyRetryError(message), expected, String(message));
 });
 
-test("429 waits a flat total, 5xx adds bounded jitter, anything else adds nothing", () => {
+test("all retry classes add bounded jitter without reducing rate-limit floor", () => {
   const config = { rateLimitDelayMs: DEFAULT_RATE_LIMIT_DELAY_MS };
   // pi's own delays for baseDelayMs 2000 capped at 60000: attempts 1, 3 and 7.
   for (const piDelay of [2000, 8000, 60_000]) {
-    // The total for a 429 is pi's delay plus the extra: always 60 s.
-    assert.equal(piDelay + extraRetryDelayMs("rate-limit", piDelay, config), 60_000, `429 at ${piDelay}`);
-    assert.equal(extraRetryDelayMs("other", piDelay, config, () => 0.99), 0, `other at ${piDelay}`);
+    // Zero jitter retains the minimum 60 s total for a 429.
+    assert.equal(piDelay + extraRetryDelayMs("rate-limit", piDelay, config, () => 0), 60_000, `429 at ${piDelay}`);
+    assert.ok(extraRetryDelayMs("other", piDelay, config, () => 0.99) > 0, `other at ${piDelay}`);
+    assert.ok(extraRetryDelayMs("rate-limit", piDelay, config, () => 0.99) > 60_000 - piDelay);
     const max = piDelay * SERVER_JITTER_RATIO;
     assert.equal(extraRetryDelayMs("server", piDelay, config, () => 0), 0, `5xx low at ${piDelay}`);
     const high = extraRetryDelayMs("server", piDelay, config, () => 0.999999);
@@ -53,7 +54,7 @@ test("429 waits a flat total, 5xx adds bounded jitter, anything else adds nothin
   const draws = new Set(Array.from({ length: 20 }, () => extraRetryDelayMs("server", 8000, config)));
   assert.ok(draws.size > 1, "5xx extras must vary between retries");
   // pi's delay already past the rate-limit total: no extra, never negative.
-  assert.equal(extraRetryDelayMs("rate-limit", 90_000, config), 0);
+  assert.equal(extraRetryDelayMs("rate-limit", 90_000, config, () => 0), 0);
 });
 
 test("settings: rateLimitDelayMs and pi's retry block fall back to defaults when invalid", () => {
@@ -70,7 +71,7 @@ test("settings: rateLimitDelayMs and pi's retry block fall back to defaults when
   });
 });
 
-test("a 429 from the model waits the flat rate-limit total before pi's own retry starts", async () => {
+test("a 429 from the model waits at least the rate-limit floor before pi's own retry starts", async () => {
   const home = freshDir("retry-backoff-home-");
   writeFileSync(
     join(home, "settings.json"),

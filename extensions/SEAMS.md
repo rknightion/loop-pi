@@ -132,6 +132,34 @@ set per model in the home's `models.json` `modelOverrides`.
   chain. Past the limit the message is appended without a turn and the `-exhausted` incident is
   written; the session then stops for the watchdog to see.
 
+## Retry recovery episode
+
+The request-ceiling entries install a retry episode controller. `loopPi.retryRecovery`
+accepts `episodeMs` (default 1200000) and `providerIds` (default empty). The episode and
+proxy classification are enabled only for those provider ids; other providers retain their
+existing retry policy. An episode starts at
+its first failed assistant attempt, counts that attempt's duration, and includes subsequent waits and requests. Successful
+assistant completion or genuine interactive/RPC input resets it. Compaction and extension
+follow-ups do not. Settlement disarms the active timer but retains its deadline; expiry
+aborts active work and refuses synthetic restart, without starting a replacement turn.
+A denied partial/protected attempt latches recovery off until genuine input or session/model
+reset. `loop-recovery:may-follow-up` synchronously gates the per-request ceiling's synthetic
+continuation; a timeout never authorizes replay after output or with protected context.
+Changing providers disposes the previous episode. Ordinary user abort preserves its outcome.
+The per-request ceiling emits `loop-recovery:request-timeout` before abort so its failure
+also starts the episode; ordinary user cancellation does not start one. Exhaustion posts
+a visible `loop-recovery-exhausted` message with `triggerTurn: false`.
+
+Only explicitly configured provider ids receive structured proxy classification and unique
+`x-client-request-id` headers. Stable session affinity is unchanged. Classification observes
+parsed provider errors before normalization; bounded status/code metadata is retained on the
+assistant message. Only portable originally unanchored requests with no observed output may
+receive the narrow transient allowlist. Protected requests and partial-output failures stop.
+The pi 1.0.4 retry API accepts text only: allowlisted server failures are normalized to the
+standard `server error` wording at message_end; denied failures use a nonretryable explanation.
+This is an adapter to pi's classifier, not a new retry loop. Header ids describe provider
+invocations, not hidden SDK retries; use provider maxRetries zero for attempt-level proof.
+
 ## Retry backoff
 
 `installRetryBackoff` (in `extensions/request-ceiling/`, `backoff.ts` for the pure delay function)
@@ -145,10 +173,10 @@ from an extension, so the extension adds a wait in front of it.
   The retry decision uses pi-ai's public `isRetryableAssistantError`, `isContextOverflow` and
   `retryDelayMs`. pi's attempt counter is private; the extension mirrors it (increment per retried
   error, reset on any non-error assistant `message_end` and at `agent_settled`, when pi's is zero).
-- Totals: a 429 (`429`, `rate limit`, `too many requests` in the error text) waits a flat
-  `loopPi.retryBackoff.rateLimitDelayMs` (default 60000) including pi's delay. A 5xx (a `5xx`
+- Totals: a 429 (`429`, `rate limit`, `too many requests` in the error text) waits at least
+  `loopPi.retryBackoff.rateLimitDelayMs` (default 60000) including pi's delay, plus up to 50% jitter. A 5xx (a `5xx`
   status, `overloaded`, `service unavailable`, `server error`, `internal error`, `bad gateway`)
-  waits pi's delay plus a random extra in `[0, 0.5 * pi's delay)`. Every other retryable error keeps
+  waits pi's delay plus a random extra in `[0, 0.5 * pi's delay)`. Every other retryable error also adds up to 50% jitter to
   pi's delay. Errors pi does not retry get no wait. `settings.retry` and `httpIdleTimeoutMs` stay
   pi's own; without the extension pi's backoff is unchanged.
 - pi's `auto_retry_start` event still reports only pi's own `delayMs`, and is emitted after the

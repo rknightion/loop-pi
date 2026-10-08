@@ -622,7 +622,7 @@ test("lane push log: the post-exec hook reads the run dir from the binding when 
   process.env.PI_SUBAGENT_EXTENSION_BINDINGS = JSON.stringify({ "loop-pi.guard/1": { agent: "complex-worker-push", runDir } });
   try {
     const handlers = new Map<string, ((event: any, ctx: any) => any)[]>();
-    laneExtension({ on: (event: string, h: any) => void handlers.set(event, [...(handlers.get(event) ?? []), h]) } as any);
+    laneExtension({ events: { on() { return () => {}; }, emit() {} }, on: (event: string, h: any) => void handlers.set(event, [...(handlers.get(event) ?? []), h]) } as any);
     const ctx = { cwd: repo, ui: { notify: () => {} } };
     const fire = async (event: string, payload: Record<string, unknown>) => {
       let last: any;
@@ -795,7 +795,7 @@ test("lane push log: a linked worktree push grants closeout under both snapshot 
   process.env.PI_CODING_AGENT_DIR = freshDir("push-log-audit-home-");
   try {
     const handlers = new Map<string, ((event: any, ctx: any) => any)[]>();
-    laneExtension({ on: (event: string, h: any) => void handlers.set(event, [...(handlers.get(event) ?? []), h]) } as any);
+    laneExtension({ events: { on() { return () => {}; }, emit() {} }, on: (event: string, h: any) => void handlers.set(event, [...(handlers.get(event) ?? []), h]) } as any);
     const fire = async (event: string, payload: Record<string, unknown>) => {
       let last: any;
       for (const h of handlers.get(event) ?? []) last = await h({ type: event, ...payload }, { cwd: wt });
@@ -928,7 +928,7 @@ test("lane push log: an ops release lane's gh pr merge is logged with its agent 
   });
   const handlers = new Map<string, ((event: any, ctx: any) => any)[]>();
   try {
-    laneExtension({ on: (event: string, h: any) => void handlers.set(event, [...(handlers.get(event) ?? []), h]) } as any);
+    laneExtension({ events: { on() { return () => {}; }, emit() {} }, on: (event: string, h: any) => void handlers.set(event, [...(handlers.get(event) ?? []), h]) } as any);
     const ctx = { cwd: repo, ui: { notify: () => {} } };
     const fire = async (event: string, payload: Record<string, unknown>) => {
       let last: any;

@@ -20,6 +20,7 @@ import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { isContextOverflow, isRetryableAssistantError, retryDelayMs } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { installRecovery } from "./recovery.ts";
 import { backoffConfig, classifyRetryError, extraRetryDelayMs, retryPolicy } from "./backoff.ts";
 import {
   type CeilingConfig,
@@ -79,6 +80,7 @@ export function installRequestCeiling(pi: ExtensionAPI, config: CeilingConfig = 
         elapsedMs: Date.now() - startedAt,
         wallClockMs: config.wallClockMs,
       };
+      pi.events.emit("loop-recovery:request-timeout", {});
       ctx.abort();
     }, config.wallClockMs);
     timer.unref?.();
@@ -111,7 +113,9 @@ export function installRequestCeiling(pi: ExtensionAPI, config: CeilingConfig = 
     pending = undefined;
     if (!incident) return;
     consecutive++;
-    const continuing = consecutive <= config.maxFollowUps;
+    let recoveryAllowsFollowUp = true;
+    pi.events.emit("loop-recovery:may-follow-up", { reply: (allowed: boolean) => { recoveryAllowsFollowUp = allowed; } });
+    const continuing = recoveryAllowsFollowUp && consecutive <= config.maxFollowUps;
     const attempt = continuing ? consecutive : config.maxFollowUps;
     writeRequestIncident(getAgentDir(), sessionId, ctx.cwd, incident, consecutive, !continuing);
     pi.sendMessage(
@@ -131,7 +135,7 @@ export function installRequestCeiling(pi: ExtensionAPI, config: CeilingConfig = 
 }
 
 /**
- * Retry backoff (SEAMS.md "Retry backoff"): jitter on 5xx retries and a flat wait on 429, added in
+ * Retry backoff (SEAMS.md "Retry backoff"): jitter on all retries and a minimum wait on 429, added in
  * front of pi's own agent-level retry wait. pi awaits `agent_end` handlers before it decides to
  * retry and sleeps its own `retryDelayMs`, so a wait here delays the retry without touching pi's
  * policy. Without this extension pi's backoff is unchanged.
@@ -141,6 +145,7 @@ export function installRequestCeiling(pi: ExtensionAPI, config: CeilingConfig = 
  * assistant message, and is always back at zero once the run settles.
  */
 export function installRetryBackoff(pi: ExtensionAPI, loadSettings: () => unknown = readSettings): void {
+  installRecovery(pi, loadSettings);
   let attempt = 0;
 
   pi.on("session_start", () => {
