@@ -53,6 +53,7 @@ export default function (pi: ExtensionAPI): void {
   const liveRuns = new Set<string>();
   let nudges: number | null = null;
   let logPath: string | null = null;
+  let laneCap: number | null = null;
   let heartbeat: { stamp: string; at: number | null } | null = null;
   let lastText: string | undefined;
   let pending = false;
@@ -80,15 +81,19 @@ export default function (pi: ExtensionAPI): void {
   function heartbeatAt(): number | null {
     if (!logPath) {
       let reportPath: unknown;
+      let concurrency: unknown;
       pi.events.emit("loop-continuation:query-launch", {
         cwd: ctx?.cwd,
-        reply: (r: { reportPath?: unknown } | null | undefined) => {
+        reply: (r: { reportPath?: unknown; concurrency?: unknown } | null | undefined) => {
           reportPath = r?.reportPath;
+          concurrency = r?.concurrency;
         },
       });
       if (typeof reportPath !== "string" || reportPath === "") return null;
       logPath = deriveLogPath(isAbsolute(reportPath) ? reportPath : resolve(ctx?.cwd ?? ".", reportPath));
       if (!logPath) return null;
+      // Frozen at arm, so it is read once with the launch, alongside the log path.
+      laneCap = typeof concurrency === "number" && Number.isInteger(concurrency) && concurrency >= 1 ? concurrency : null;
     }
     try {
       const st = statSync(logPath);
@@ -112,13 +117,15 @@ export default function (pi: ExtensionAPI): void {
 
   function render(): void {
     if (!ctx?.hasUI) return;
+    const heartbeatMs = heartbeatAt();
     const text = formatStatus({
       lanes: liveRuns.size,
+      laneCap,
       timers: query<{ at: string }>("loop-wait:query-timers"),
       watchers: query<{ deadline?: string }>("loop-wait:query-watchers"),
       nudges,
       maxNudges: MAX_NUDGES,
-      heartbeatAt: heartbeatAt(),
+      heartbeatAt: heartbeatMs,
       now: Date.now(),
     });
     if (text === lastText) return;
@@ -147,6 +154,7 @@ export default function (pi: ExtensionAPI): void {
     sessionKey = c.sessionManager.getSessionFile?.() ?? c.sessionManager.getSessionId();
     liveRuns.clear();
     logPath = null;
+    laneCap = null;
     heartbeat = null;
     lastText = undefined;
     readNudges();

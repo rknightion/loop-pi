@@ -35,6 +35,7 @@ import {
   PROTO_FILE,
   PROTO_VERSION,
   retainSnapshotProtocol,
+  runConcurrency,
   snapshotProtocolRetained,
 } from "./arm.ts";
 import { AUDIT_GRANTS_REJECTED_CLASS, freezeAuditGrants } from "./audit-grants.ts";
@@ -206,6 +207,7 @@ export default function (pi: ExtensionAPI) {
       auditGrantsSha256: audit.sha256,
       standingPath: standing.path,
       standingSha256: standing.sha256,
+      concurrency: runConcurrency(check.goalText),
     };
     persist();
     if (frozen.rejected !== null) {
@@ -279,7 +281,7 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  // Answers other extensions: the launch's report path and its frozen ops grants. A reply with
+  // Answers other extensions: the launch's report path, its frozen ops grants and the goal's slot cap. A reply with
   // nulls means this extension is loaded but no launch has been recognised (or it had no ops line).
   pi.events.on("loop-continuation:query-launch", (data) => {
     const req = data as {
@@ -292,6 +294,7 @@ export default function (pi: ExtensionAPI) {
         auditGrantsSha256: string | null;
         standingPath: string | null;
         standingSha256: string | null;
+        concurrency?: number;
       }) => void;
     };
     const reportPath =
@@ -304,6 +307,8 @@ export default function (pi: ExtensionAPI) {
       auditGrantsSha256: state.auditGrantsSha256 ?? null,
       standingPath: state.standingPath ?? null,
       standingSha256: state.standingSha256 ?? null,
+      // Additive and optional: absent without a launch, or when the goal has no valid concurrency.
+      ...(state.armed && typeof state.concurrency === "number" && state.concurrency >= 1 ? { concurrency: state.concurrency } : {}),
     });
   });
 

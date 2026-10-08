@@ -110,6 +110,14 @@ export function sectionKeys(goal: string, name: string): Record<string, string> 
   return out;
 }
 
+/** The goal's `## Run` `concurrency:` as a positive integer, or null when absent or not exactly one. */
+export function runConcurrency(goal: string): number | null {
+  const raw = sectionKeys(goal, "Run").concurrency;
+  if (raw === undefined || !/^\d+$/.test(raw)) return null;
+  const n = Number(raw);
+  return Number.isSafeInteger(n) && n >= 1 ? n : null;
+}
+
 /** The task ids in the `## Envelope` table's task cells, in order (`<id>` or `<id> (<title>)`). */
 export function envelopeTaskIds(goal: string): string[] {
   const ids: string[] = [];

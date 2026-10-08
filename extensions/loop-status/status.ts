@@ -3,6 +3,8 @@
 export interface StatusInput {
   /** Async lanes this session launched that have not completed. */
   lanes: number;
+  /** The goal's slot cap (`concurrency:`), or null/absent when unknown: shows as `N/cap lanes`. */
+  laneCap?: number | null;
   /** Armed loop-wait timers, or null when loop-wait did not reply. */
   timers: { at: string }[] | null;
   /** Active loop-wait watchers, or null when loop-wait did not reply. */
@@ -44,7 +46,8 @@ export function nextDeadline(timers: { at: string }[] | null, watchers: { deadli
 }
 
 export function formatStatus(input: StatusInput): string {
-  const parts = [plural(input.lanes, "lane")];
+  const cap = input.laneCap;
+  const parts = [typeof cap === "number" && Number.isInteger(cap) && cap >= 1 ? `${input.lanes}/${cap} lanes` : plural(input.lanes, "lane")];
   parts.push(input.timers === null ? "timers ?" : plural(input.timers.length, "timer"));
   parts.push(input.watchers === null ? "watchers ?" : plural(input.watchers.length, "watcher"));
   const next = nextDeadline(input.timers, input.watchers);

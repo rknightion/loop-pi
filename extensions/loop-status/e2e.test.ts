@@ -70,3 +70,20 @@ test("timers, watchers' next deadline, the nudge chain and the heartbeat age sho
     await pi.close();
   }
 });
+
+test("a goal's slot cap shows as lanes over cap once the launch carries one", async () => {
+  const pi = start();
+  try {
+    await pi.waitFor(isStatus);
+    for (const [i, message] of ["launch /tmp/none/codex/report-demo-loop1.md", "cap 4"].entries()) {
+      pi.send({ id: `k${i}`, type: "prompt", message });
+      await pi.waitForResponse(`k${i}`);
+    }
+    const seen = pi.events.length;
+    pi.send({ id: "k2", type: "prompt", message: "lane-start run-a" });
+    const started = await pi.waitFor((e) => isStatus(e) && /1\/4 lanes ·/.test(text(e)) && pi.events.indexOf(e) >= seen);
+    assert.match(text(started), /^loop: 1\/4 lanes · /);
+  } finally {
+    await pi.close();
+  }
+});

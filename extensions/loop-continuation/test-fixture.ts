@@ -27,14 +27,14 @@ export function cleanupFixtures(): void {
   while (made.length) rmSync(made.pop()!, { recursive: true, force: true });
 }
 
-export function goalText(opts: { host?: string; tier?: string; rootModel?: string | null } = {}): string {
+export function goalText(opts: { host?: string; tier?: string; rootModel?: string | null; concurrency?: string | null } = {}): string {
   return [
     "# Goal: x loop3",
     "## Run",
     `tier: ${opts.tier ?? "guarded"}`,
     "root: llm - fixture",
     ...(opts.rootModel === null ? [] : [`root-model: ${opts.rootModel ?? "provider/model-a"}`]),
-    "concurrency: 2",
+    ...(opts.concurrency === null ? [] : [`concurrency: ${opts.concurrency ?? "2"}`]),
     ...(opts.host ? [`host: ${opts.host}`] : []),
     "## Envelope",
     "| task | acceptance check | owned files | gate | landing | agent | tier |",
@@ -71,7 +71,7 @@ export function initRepo(repo: string): void {
   git(repo, "commit", "-qm", "init");
 }
 
-export function loopFixture(opts: { host?: string; tier?: string; rootModel?: string | null; agentDir?: string } = {}): LoopFixture {
+export function loopFixture(opts: { host?: string; tier?: string; rootModel?: string | null; concurrency?: string | null; agentDir?: string } = {}): LoopFixture {
   const repo = fresh("loop-cont-repo-");
   initRepo(repo);
   mkdirSync(join(repo, "codex"));

@@ -37,3 +37,12 @@ test("a busy root shows lanes, counts, the next deadline, the nudge chain and he
   });
   assert.match(text, /^loop: 1 lane · 1 timer · 0 watchers · next \d\d:\d\d · nudge 2\/3 · hb 3m ago$/);
 });
+
+test("a known slot cap shows as lanes over cap; an unknown or invalid cap keeps the bare count", () => {
+  const base = { timers: [], watchers: [], nudges: 0, maxNudges: 3, heartbeatAt: null, now: NOW };
+  assert.match(formatStatus({ ...base, lanes: 1, laneCap: 4 }), /^loop: 1\/4 lanes · /);
+  assert.match(formatStatus({ ...base, lanes: 0, laneCap: 1 }), /^loop: 0\/1 lanes · /);
+  assert.match(formatStatus({ ...base, lanes: 1, laneCap: null }), /^loop: 1 lane · /);
+  assert.match(formatStatus({ ...base, lanes: 1 }), /^loop: 1 lane · /);
+  assert.match(formatStatus({ ...base, lanes: 1, laneCap: 0 }), /^loop: 1 lane · /);
+});

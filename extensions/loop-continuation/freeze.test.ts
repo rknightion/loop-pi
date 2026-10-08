@@ -110,6 +110,42 @@ test("a launch with no Ops grants line stores no grants and writes no incident",
   }
 });
 
+test("query-launch carries the goal's ## Run concurrency, omits it when missing or malformed, and a resumed session keeps it", async () => {
+  const cases: [string, string | null, number | undefined][] = [
+    ["a plain value", "4", 4],
+    ["a value with surrounding spaces", " 3 ", 3],
+    ["no concurrency line", null, undefined],
+    ["a non-numeric value", "many", undefined],
+    ["zero", "0", undefined],
+    ["a negative value", "-2", undefined],
+    ["a fraction", "2.5", undefined],
+    ["a number followed by prose", "4 lanes", undefined],
+  ];
+  for (const [label, value, want] of cases) {
+    const f = loopFixture({ concurrency: value });
+    const pi = await fakePi({ agentDir: f.agentDir, cwd: f.repo, runDir: f.runDir });
+    try {
+      assert.equal("concurrency" in pi.query(), false, `${label}: nothing is armed yet, so no concurrency`);
+      await pi.input(f.launch);
+      const answer = pi.query();
+      assert.equal(answer.reportPath, f.report, `${label}: the launch armed`);
+      assert.equal(answer.concurrency, want, label);
+      assert.equal("concurrency" in answer, want !== undefined, `${label}: the field is absent, not undefined or null`);
+      if (want === undefined) continue;
+      const stored = pi.entries.at(-1)!;
+      const resumed = await fakePi({ agentDir: f.agentDir, cwd: f.repo, runDir: f.runDir });
+      try {
+        resumed.handlers.get("session_start")!({}, resumed.ctx([{ type: "custom", customType: "loop-continuation-state", data: stored.data }]));
+        assert.equal(resumed.query().concurrency, want, `${label}: restored from the state entry`);
+      } finally {
+        resumed.restore();
+      }
+    } finally {
+      pi.restore();
+    }
+  }
+});
+
 /** Replace the fixture home's loop-state with one that prints `digest` for any call (open included). */
 function fakeLoopState(agentDir: string, digest: string): void {
   const fake = join(agentDir, "bin", "loop-state");

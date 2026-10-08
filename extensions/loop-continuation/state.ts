@@ -65,6 +65,8 @@ export interface ContinuationState {
   standingPath?: string | null;
   /** The sha256 the launch's `Standing:` line stated and the frozen copy matched, or null. */
   standingSha256?: string | null;
+  /** The goal's `## Run` `concurrency:` read at arm: a positive integer, or absent. */
+  concurrency?: number | null;
 }
 
 export const INITIAL_STATE: ContinuationState = {
