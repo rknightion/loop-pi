@@ -27,6 +27,8 @@ export interface FauxRule {
   stopReason?: "stop" | "toolUse" | "error";
   errorMessage?: string;
   delayMs?: number;
+  /** Never answer: the request stays open until it is aborted. */
+  hang?: boolean;
 }
 
 export interface RpcEvent {

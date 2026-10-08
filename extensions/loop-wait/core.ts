@@ -764,14 +764,24 @@ export class DeliveryQueue<T> {
   private pending: T[] = [];
   private readonly isIdle: () => boolean;
   private readonly deliver: (message: T, opts: { triggerTurn: boolean }) => void;
+  private readonly isHeld: () => boolean;
 
-  constructor(opts: { isIdle: () => boolean; deliver: (message: T, opts: { triggerTurn: boolean }) => void }) {
+  /**
+   * `isHeld` keeps messages queued even while idle (the owner pressed Esc and has not typed
+   * again): `send()` queues and `flush()` delivers nothing until it returns false.
+   */
+  constructor(opts: {
+    isIdle: () => boolean;
+    deliver: (message: T, opts: { triggerTurn: boolean }) => void;
+    isHeld?: () => boolean;
+  }) {
     this.isIdle = opts.isIdle;
     this.deliver = opts.deliver;
+    this.isHeld = opts.isHeld ?? (() => false);
   }
 
   send(message: T): void {
-    if (this.isIdle() && this.pending.length === 0) {
+    if (this.isIdle() && !this.isHeld() && this.pending.length === 0) {
       this.deliver(message, { triggerTurn: true });
       return;
     }
@@ -789,7 +799,7 @@ export class DeliveryQueue<T> {
    * batch is already in context for it to see. Delivery order matches arrival order.
    */
   flush(): void {
-    if (!this.isIdle() || this.pending.length === 0) return;
+    if (!this.isIdle() || this.isHeld() || this.pending.length === 0) return;
     const batch = this.pending;
     this.pending = [];
     batch.forEach((message, index) => {
@@ -810,6 +820,11 @@ export class DeliveryQueue<T> {
       return false;
     });
     return removed;
+  }
+
+  /** Put messages back at the front of the queue (a restart restoring held wakes), in order. */
+  restore(messages: T[]): void {
+    this.pending = [...messages, ...this.pending];
   }
 
   /** The not-yet-delivered messages matching `predicate`, without removing them. */

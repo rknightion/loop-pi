@@ -19,6 +19,7 @@ import {
 
 import { AUTO_ARM_REASON, TIME_PARK_ARM_REASON } from "../loop-continuation/state.ts";
 
+const CEILING_EXTENSION = join(import.meta.dirname, "..", "request-ceiling", "index.ts");
 const RACE_TRIGGER_EXTENSION = join(import.meta.dirname, "test-support-race-trigger.ts");
 
 // Only the direct-unit-call test below needs this: see test-support-resolve-nested-deps.mjs for
@@ -91,20 +92,24 @@ async function loadRootWithFakePi(): Promise<{
   lifecycle: Map<string, (event: unknown, ctx: unknown) => void>;
   sent: FakeSentMessage[];
   stateEvents: { ev: string; op: string; what: string; deadline: string }[];
+  busHandlers: Map<string, (data: unknown) => void>;
+  entries: { type: "custom"; customType: string; data: unknown }[];
 }> {
   const rootModule = await import("./root.ts");
   const tools = new Map<string, FakeToolDef>();
   const lifecycle = new Map<string, (event: unknown, ctx: unknown) => void>();
   const sent: FakeSentMessage[] = [];
   const stateEvents: { ev: string; op: string; what: string; deadline: string }[] = [];
+  const busHandlers = new Map<string, (data: unknown) => void>();
+  const entries: { type: "custom"; customType: string; data: unknown }[] = [];
   const fakePi = {
     registerTool: (tool: FakeToolDef & { name: string }) => tools.set(tool.name, tool),
     registerCommand: () => {},
-    appendEntry: () => {},
+    appendEntry: (customType: string, data: unknown) => entries.push({ type: "custom", customType, data }),
     sendMessage: (message: unknown, options: unknown) =>
       sent.push({ message: message as FakeSentMessage["message"], options: options as FakeSentMessage["options"] }),
     events: {
-      on: () => {},
+      on: (name: string, handler: (data: unknown) => void) => busHandlers.set(name, handler),
       emit: (name: string, request: { event: typeof stateEvents[number]; reply: (r: Promise<boolean>) => void }) => {
         if (name !== "loop-wait:state-event") return;
         stateEvents.push(request.event);
@@ -114,12 +119,12 @@ async function loadRootWithFakePi(): Promise<{
     on: (name: string, handler: (event: unknown, ctx: unknown) => void) => lifecycle.set(name, handler),
   };
   rootModule.default(fakePi as never);
-  return { tools, lifecycle, sent, stateEvents };
+  return { tools, lifecycle, sent, stateEvents, busHandlers, entries };
 }
 
-function fakeCtx(agentDir: string, idleBox: { idle: boolean }) {
+function fakeCtx(agentDir: string, idleBox: { idle: boolean }, branch: unknown[] = []) {
   return {
-    sessionManager: { getSessionId: () => "fake-session", getBranch: () => [] },
+    sessionManager: { getSessionId: () => "fake-session", getBranch: () => branch },
     isIdle: () => idleBox.idle,
     cwd: agentDir,
     ui: { notify: () => {} },
@@ -509,5 +514,200 @@ test("root.ts: wake_cancel by a unique prefix also drops a fired wake still queu
     lifecycle.get("agent_settled")!(undefined, ctx);
     await delay(400);
     assert.deepEqual(sent, []);
+  });
+});
+
+// Operator Esc: agent_settled carries aborted:true, and
+// wakes that already fired stay queued until the owner's next input instead of restarting the root.
+test("root.ts: wakes that fired before an operator abort stay queued until the owner's next input", async () => {
+  await withFakeAgentDir(async (agentDir) => {
+    const { tools, lifecycle, sent } = await loadRootWithFakePi();
+    const idleBox = { idle: false };
+    const ctx = fakeCtx(agentDir, idleBox);
+    lifecycle.get("session_start")!(undefined, ctx);
+
+    const wakeAt = tools.get("wake_at")!;
+    await wakeAt.execute("t1", { at: new Date(Date.now() + 30).toISOString(), reason: "fired-before-esc" }, undefined, undefined, ctx);
+    await tools.get("watch_start")!.execute(
+      "w1", { command: "exit 0", deadline_s: 30, interval_s: 1, label: "watch-before-esc" }, undefined, undefined, ctx);
+    await delay(300);
+    assert.equal(sent.length, 0, "root is busy: nothing delivered yet");
+
+    idleBox.idle = true;
+    lifecycle.get("agent_settled")!({ type: "agent_settled", aborted: true }, ctx);
+    await delay(400);
+    assert.equal(sent.length, 0, "an operator abort must not flush fired wakes");
+
+    // A wake that fires after the Esc, while idle, is held too rather than restarting the root.
+    await wakeAt.execute("t2", { at: new Date(Date.now() + 30).toISOString(), reason: "fired-after-esc" }, undefined, undefined, ctx);
+    await delay(200);
+    assert.equal(sent.length, 0, "an idle root after Esc must not be restarted by a new wake");
+
+    // Owner input releases the hold; delivery then happens at the settle that input produces.
+    lifecycle.get("input")!({ type: "input", text: "continue", source: "interactive" }, ctx);
+    await wakeAt.execute("t3", { at: new Date(Date.now() + 30).toISOString(), reason: "fired-after-input" }, undefined, undefined, ctx);
+    await delay(150);
+    assert.equal(sent.length, 0, "until the input's own turn settles, nothing may open a concurrent turn");
+    lifecycle.get("agent_settled")!({ type: "agent_settled", aborted: false }, ctx);
+    await delay(400);
+    assert.deepEqual(
+      sent.map((s) => s.message.customType).sort(),
+      ["loop-wake", "loop-wake", "loop-wake", "loop-watch"],
+      "every held wake is delivered once, after the owner's input",
+    );
+    assert.deepEqual(sent.map((s) => s.options.triggerTurn), [false, false, false, true], "held wakes still batch into one turn");
+    await lifecycle.get("session_shutdown")!(undefined, ctx);
+  });
+});
+
+test("root.ts: input from an extension does not release held wakes; a non-aborted settle still flushes", async () => {
+  await withFakeAgentDir(async (agentDir) => {
+    const { tools, lifecycle, sent } = await loadRootWithFakePi();
+    const idleBox = { idle: false };
+    const ctx = fakeCtx(agentDir, idleBox);
+    lifecycle.get("session_start")!(undefined, ctx);
+    await tools.get("wake_at")!.execute("t1", { at: new Date(Date.now() + 30).toISOString(), reason: "held" }, undefined, undefined, ctx);
+    await delay(150);
+    idleBox.idle = true;
+    lifecycle.get("agent_settled")!({ type: "agent_settled", aborted: true }, ctx);
+    lifecycle.get("input")!({ type: "input", text: "synthetic", source: "extension" }, ctx);
+    lifecycle.get("agent_settled")!({ type: "agent_settled", aborted: false }, ctx);
+    await delay(400);
+    assert.equal(sent.length, 0, "an extension-sourced input is not the owner");
+
+    lifecycle.get("input")!({ type: "input", text: "owner", source: "rpc" }, ctx);
+    lifecycle.get("agent_settled")!({ type: "agent_settled", aborted: false }, ctx);
+    await delay(400);
+    assert.equal(sent.length, 1);
+    await lifecycle.get("session_shutdown")!(undefined, ctx);
+  });
+});
+
+test("root.ts: an abort the request ceiling caused still flushes, and the next plain abort holds again", async () => {
+  await withFakeAgentDir(async (agentDir) => {
+    const { tools, lifecycle, sent, busHandlers } = await loadRootWithFakePi();
+    const idleBox = { idle: false };
+    const ctx = fakeCtx(agentDir, idleBox);
+    lifecycle.get("session_start")!(undefined, ctx);
+    const wakeAt = tools.get("wake_at")!;
+    await wakeAt.execute("t1", { at: new Date(Date.now() + 30).toISOString(), reason: "ceiling-case" }, undefined, undefined, ctx);
+    await delay(150);
+
+    // request-ceiling emits this just before ctx.abort() (SEAMS.md "Request ceiling").
+    busHandlers.get("loop-recovery:request-timeout")!({});
+    idleBox.idle = true;
+    lifecycle.get("agent_settled")!({ type: "agent_settled", aborted: true }, ctx);
+    await delay(400);
+    assert.equal(sent.length, 1, "a ceiling-caused abort is not the operator: delivery is unchanged");
+
+    sent.length = 0;
+    idleBox.idle = false;
+    await wakeAt.execute("t2", { at: new Date(Date.now() + 30).toISOString(), reason: "later-esc" }, undefined, undefined, ctx);
+    await delay(150);
+    idleBox.idle = true;
+    lifecycle.get("agent_settled")!({ type: "agent_settled", aborted: true }, ctx);
+    await delay(400);
+    assert.equal(sent.length, 0, "the ceiling exception covers one abort only");
+    await lifecycle.get("session_shutdown")!(undefined, ctx);
+  });
+});
+
+test("RPC: a real operator abort holds a fired wake until the next prompt", async () => {
+  const script = writeFauxScript([
+    { match: "ARM_THEN_HANG", once: true, toolCalls: [{ name: "wake_at", args: { at: new Date(Date.now() + 400).toISOString(), reason: "esc-held-wake" } }] },
+    { match: "timer-id=", once: true, hang: true },
+    { match: ".*", text: "ack" },
+  ]);
+  const session = startPiRpc({ extensions: [FAUX_EXTENSION, ROOT_EXTENSION], fauxScriptPath: script });
+  try {
+    session.send({ id: "p1", type: "prompt", message: "ARM_THEN_HANG" });
+    await session.waitForResponse("p1");
+    await delay(1_200); // the wake fires at ~400ms while the root hangs on its next request
+    session.send({ id: "a1", type: "abort" });
+    await session.waitFor((e) => e.type === "agent_settled" && e.aborted === true);
+    await delay(1_000);
+    const isWake = (e: { type: string; message?: unknown }) =>
+      e.type === "message_start" && (e.message as { customType?: string })?.customType === "loop-wake";
+    assert.equal(session.events.filter(isWake).length, 0, "Esc must not release the fired wake");
+
+    session.send({ id: "p2", type: "prompt", message: "OWNER_NEXT" });
+    const wake = await session.waitFor(isWake, 15_000);
+    assert.match((wake.message as { content?: string }).content ?? "", /esc-held-wake/);
+    const ownerInput = session.events.findIndex(
+      (e) => e.type === "message_start" && (e.message as { role?: string })?.role === "user" && JSON.stringify(e.message).includes("OWNER_NEXT"),
+    );
+    assert.ok(ownerInput !== -1 && ownerInput < session.events.indexOf(wake), "the wake follows the owner's input");
+  } finally {
+    await session.close();
+  }
+});
+
+test("RPC: a request-ceiling abort still delivers the incident follow-up and the fired wake", async () => {
+  const script = writeFauxScript([
+    { match: "ARM_CEILING", once: true, toolCalls: [{ name: "wake_at", args: { at: new Date(Date.now() + 400).toISOString(), reason: "ceiling-queued-wake" } }] },
+    { match: "timer-id=", once: true, hang: true },
+    { match: ".*", text: "recovered" },
+  ]);
+  const session = startPiRpc({
+    extensions: [FAUX_EXTENSION, ROOT_EXTENSION, CEILING_EXTENSION],
+    fauxScriptPath: script,
+    settings: { loopPi: { requestCeiling: { wallClockMs: 1_500, maxFollowUps: 2 } } },
+  });
+  try {
+    session.send({ id: "p1", type: "prompt", message: "ARM_CEILING" });
+    const isCustom = (type: string) => (e: { type: string; message?: unknown }) =>
+      e.type === "message_start" && (e.message as { customType?: string })?.customType === type;
+    const incident = await session.waitFor(isCustom("loop-request-incident"), 20_000);
+    const wake = await session.waitFor(isCustom("loop-wake"), 20_000);
+    assert.match((wake.message as { content?: string }).content ?? "", /ceiling-queued-wake/);
+    assert.ok(session.events.indexOf(incident) !== -1);
+  } finally {
+    await session.close();
+  }
+});
+
+test("root.ts: a wake held after Esc survives a session restart and is delivered after the owner's next input", async () => {
+  await withFakeAgentDir(async (agentDir) => {
+    const first = await loadRootWithFakePi();
+    const idleBox = { idle: false };
+    const ctx = fakeCtx(agentDir, idleBox);
+    first.lifecycle.get("session_start")!(undefined, ctx);
+    await first.tools.get("wake_at")!.execute("t1", { at: new Date(Date.now() + 30).toISOString(), reason: "queued-before-esc" }, undefined, undefined, ctx);
+    await delay(150); // fires while busy: queued
+    idleBox.idle = true;
+    first.lifecycle.get("agent_settled")!({ type: "agent_settled", aborted: true }, ctx);
+    await first.tools.get("wake_at")!.execute("t2", { at: new Date(Date.now() + 30).toISOString(), reason: "fired-while-held" }, undefined, undefined, ctx);
+    await delay(200);
+    assert.equal(first.sent.length, 0);
+
+    // /reload or quit-and-resume: shutdown must neither deliver nor lose the held messages.
+    await first.lifecycle.get("session_shutdown")!(undefined, ctx);
+    assert.equal(first.sent.length, 0, "teardown must not deliver held wakes");
+
+    const second = await loadRootWithFakePi();
+    const ctx2 = fakeCtx(agentDir, { idle: true }, first.entries);
+    second.lifecycle.get("session_start")!(undefined, ctx2);
+    await delay(400);
+    assert.equal(second.sent.length, 0, "restored wakes stay held until the owner types");
+    second.lifecycle.get("input")!({ type: "input", text: "continue", source: "interactive" }, ctx2);
+    second.lifecycle.get("agent_settled")!({ type: "agent_settled", aborted: false }, ctx2);
+    await delay(400);
+    assert.deepEqual(
+      second.sent.map((s) => (s.message.details as { reason: string }).reason).sort(),
+      ["fired-while-held", "queued-before-esc"],
+      "both held wakes are delivered once",
+    );
+    assert.deepEqual(second.sent.map((s) => s.options.triggerTurn), [false, true]);
+
+    // Delivered wakes are cleared from the snapshot: a later restart does not replay them.
+    const third = await loadRootWithFakePi();
+    const ctx3 = fakeCtx(agentDir, { idle: true }, second.entries);
+    third.lifecycle.get("session_start")!(undefined, ctx3);
+    third.lifecycle.get("input")!({ type: "input", text: "again", source: "interactive" }, ctx3);
+    third.lifecycle.get("agent_settled")!({ type: "agent_settled", aborted: false }, ctx3);
+    await delay(400);
+    assert.equal(third.sent.length, 0, "delivered wakes are not replayed");
+    await second.lifecycle.get("session_shutdown")!(undefined, ctx2);
+    await third.lifecycle.get("session_shutdown")!(undefined, ctx3);
   });
 });

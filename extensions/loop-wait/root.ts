@@ -40,6 +40,9 @@ interface LoopWaitStateSnapshot {
   watchers: WatcherSnapshot[];
   // Optional for compatibility with session entries written before lifecycle logging.
   pendingEvents?: WatchEvent[];
+  // Wake messages held after an operator abort. The timer or watch that produced each is already
+  // gone from this snapshot, so a restart would otherwise lose them.
+  heldMessages?: LoopWaitMessage[];
 }
 
 interface LoopWaitMessage {
@@ -88,6 +91,14 @@ export default function (pi: ExtensionAPI): void {
   let liveCtx: ExtensionContext | undefined;
   let suppressDelivery = false;
   let clockAbortSignal: AbortSignal | undefined;
+  // Set when the operator aborted a run (Esc): fired wakes stay queued until the owner's next input.
+  let holdWakes = false;
+  // Set by an owner input that arrived while wakes were held; the hold ends at the settle it produces.
+  let ownerInputPending = false;
+  // True from the start of a hold until its messages are delivered: the queue is then persisted.
+  let persistHeld = false;
+  // Set when request-ceiling is about to abort a run, so that abort is not read as the operator's.
+  let ceilingAbort = false;
   // Session identities pi-subagents may stamp on this session's async-started events.
   let sessionIdentities = new Set<string>();
   // Deadline from a launching call's brief, by toolCallId, until that call's result names the run.
@@ -104,7 +115,12 @@ export default function (pi: ExtensionAPI): void {
       timers: [...restoringTimers.values(), ...(timerManager?.list() ?? [])],
       watchers: [...restoringWatchers.values(), ...(watchManager?.list() ?? [])],
       pendingEvents: [...pendingEvents],
+      heldMessages: persistHeld ? (deliveryQueue?.pendingMatching(() => true) ?? []) : undefined,
     });
+  };
+  const queueWake = (message: LoopWaitMessage) => {
+    deliveryQueue?.send(message);
+    if (persistHeld) persist();
   };
 
   const deliverEvent = (event: WatchEvent) => {
@@ -146,9 +162,13 @@ export default function (pi: ExtensionAPI): void {
     clockAbortSignal?.removeEventListener("abort", cancelContinuationClocks);
     clockAbortSignal = undefined;
     suppressDelivery = true;
+    holdWakes = false;
+    ownerInputPending = false;
     watchManager?.shutdownAll(note);
     timerManager?.shutdownAll();
+    // persistHeld stays set so this last snapshot keeps the held messages; session_start recomputes it.
     persist();
+    persistHeld = false;
     watchManager = undefined;
     timerManager = undefined;
     deliveryQueue = undefined;
@@ -312,6 +332,11 @@ export default function (pi: ExtensionAPI): void {
     },
   });
 
+  // request-ceiling emits this just before it aborts a stuck request (SEAMS.md "Request ceiling").
+  // That abort is not the operator's: its incident follow-up and any fired wakes go out as before.
+  pi.events.on("loop-recovery:request-timeout", () => {
+    ceilingAbort = true;
+  });
   pi.events.on("loop-wait:query-timers", (data) => {
     (data as { reply: (timers: TimerSnapshot[]) => void }).reply(timerManager?.list() ?? []);
   });
@@ -400,6 +425,7 @@ export default function (pi: ExtensionAPI): void {
   // is available at agent_start: revoke the clock synchronously on abort, even during a tool.
   pi.on("agent_start", (_event, ctx) => {
     liveCtx = ctx;
+    ceilingAbort = false;
     clockAbortSignal?.removeEventListener("abort", cancelContinuationClocks);
     clockAbortSignal = ctx.signal;
     if (clockAbortSignal?.aborted) cancelContinuationClocks();
@@ -431,7 +457,14 @@ export default function (pi: ExtensionAPI): void {
   const FLUSH_RETRY_DELAYS_MS = [0, 20, 50, 100, 250];
   const scheduleFlush = () => {
     for (const delayMs of FLUSH_RETRY_DELAYS_MS) {
-      setTimeout(() => deliveryQueue?.flush(), delayMs).unref();
+      setTimeout(() => {
+        deliveryQueue?.flush();
+        // Delivered: the held copies in the snapshot are no longer needed.
+        if (persistHeld && !holdWakes && deliveryQueue?.length === 0) {
+          persistHeld = false;
+          persist();
+        }
+      }, delayMs).unref();
     }
   };
 
@@ -446,11 +479,28 @@ export default function (pi: ExtensionAPI): void {
     liveCtx = ctx;
     scheduleFlush();
   });
-  pi.on("agent_settled", (_event, ctx) => {
+  // An operator abort (agent_settled.aborted) must not restart the root with a fired wake the
+  // operator just stopped: hold every wake, fired or yet to fire, until the owner's next input.
+  pi.on("agent_settled", (event, ctx) => {
     liveCtx = ctx;
     clockAbortSignal?.removeEventListener("abort", cancelContinuationClocks);
     clockAbortSignal = undefined;
-    scheduleFlush();
+    if ((event as { aborted?: boolean } | undefined)?.aborted === true && !ceilingAbort) {
+      holdWakes = true;
+      ownerInputPending = false;
+      persistHeld = true;
+      persist();
+    } else if (ownerInputPending) {
+      holdWakes = false;
+      ownerInputPending = false;
+    }
+    ceilingAbort = false;
+    if (!holdWakes) scheduleFlush();
+  });
+  // The owner's next input ends the hold, but only at the settle that input produces: releasing
+  // here would let a wake firing before the input's turn starts open a concurrent turn.
+  pi.on("input", (event) => {
+    if (holdWakes && event.source !== "extension") ownerInputPending = true;
   });
 
   pi.on("session_shutdown", async () => {
@@ -461,6 +511,10 @@ export default function (pi: ExtensionAPI): void {
   pi.on("session_start", (_event, ctx) => {
     liveCtx = ctx;
     suppressDelivery = false;
+    holdWakes = false;
+    ownerInputPending = false;
+    persistHeld = false;
+    ceilingAbort = false;
     const agentDir = getAgentDir();
     const sessionId = ctx.sessionManager.getSessionId();
     sessionIdentities = new Set(
@@ -471,6 +525,7 @@ export default function (pi: ExtensionAPI): void {
 
     deliveryQueue = new DeliveryQueue<LoopWaitMessage>({
       isIdle: () => liveCtx?.isIdle() ?? true,
+      isHeld: () => holdWakes,
       // flush() calls this for every pending message in one batch, passing triggerTurn:false for
       // every message but the last (see core.ts DeliveryQueue.flush): pi's sendMessage appends a
       // triggerTurn:false message to context immediately while idle, and the final triggerTurn:true
@@ -487,6 +542,13 @@ export default function (pi: ExtensionAPI): void {
       }
     }
     pendingEvents = [...(previous.pendingEvents ?? [])];
+    // Wakes held after an operator abort outlive a reload or resume: re-queue them still held, so
+    // they are delivered at the settle after the owner's next input, never at startup.
+    if (previous.heldMessages?.length) {
+      holdWakes = true;
+      persistHeld = true;
+      deliveryQueue.restore(previous.heldMessages);
+    }
     recording.clear();
     restoringWatchers.clear();
     restoringTimers.clear();
@@ -500,7 +562,7 @@ export default function (pi: ExtensionAPI): void {
       onFinal: (id, receipt) => {
         recordEvent("stop", `watch ${id}: ${receipt.label ?? "unlabeled"}`, receipt.deadline);
         if (suppressDelivery) return;
-        deliveryQueue?.send(loopWatchMessage(id, receipt));
+        queueWake(loopWatchMessage(id, receipt));
       },
     });
     timerManager = new TimerManager({
@@ -509,7 +571,7 @@ export default function (pi: ExtensionAPI): void {
       onEnd: t => timerEvent("stop", t),
       onFire: (id, reason) => {
         if (suppressDelivery) return;
-        deliveryQueue?.send(loopWakeMessage(id, reason));
+        queueWake(loopWakeMessage(id, reason));
       },
     });
 
