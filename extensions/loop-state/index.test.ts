@@ -12,7 +12,7 @@ type Handler = (event: any, ctx: any) => any;
 const BIN = fileURLToPath(new URL("../../bin/loop-state", import.meta.url));
 const dirs: string[] = [];
 let agentDir: string;
-let savedPath: string | undefined;
+const savedRunDir = process.env.LOOP_PI_RUN_DIR;
 
 before(() => {
   agentDir = mkdtempSync(join(tmpdir(), "loop-state-agent-"));
@@ -24,6 +24,8 @@ before(() => {
 
 after(() => {
   delete process.env.PI_CODING_AGENT_DIR;
+  if (savedRunDir === undefined) delete process.env.LOOP_PI_RUN_DIR;
+  else process.env.LOOP_PI_RUN_DIR = savedRunDir;
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
 });
 
@@ -44,7 +46,15 @@ function makeRepo(): { repo: string; head: string; log: string; report: string }
   };
 }
 
-function harness(opts: { reportPath?: string | null; cwd: string; sessionId?: string; entries?: any[]; schedule?: (job: () => void) => ReturnType<typeof setTimeout> }) {
+function harness(opts: { reportPath?: string | null; cwd: string; sessionId?: string; entries?: any[]; schedule?: (job: () => void) => ReturnType<typeof setTimeout>; runDir?: string | null }) {
+  // The launcher's run dir, where a block repair's separate output is allocated. Each harness
+  // (a root start) gets a fresh one, as each launcher start does.
+  if (opts.runDir === null) delete process.env.LOOP_PI_RUN_DIR;
+  else {
+    const runDir = opts.runDir ?? mkdtempSync(join(tmpdir(), "loop-state-run-"));
+    if (!opts.runDir) dirs.push(runDir);
+    process.env.LOOP_PI_RUN_DIR = runDir;
+  }
   const handlers = new Map<string, Handler>();
   const bus = new Map<string, ((d: unknown) => void)[]>();
   const sent: { message: any; options: any }[] = [];
@@ -201,9 +211,13 @@ test("a failed original run stays failed after recovering a valid block", async 
   h.start();
   h.on("subagents:rpc:v1:request", (raw) => {
     const request = raw as any;
+    assert.equal(request.params.outputMode, "file-only");
+    assert.equal(h.entries.at(-1).data.repair.binding.output, request.params.output, "binding persisted before the resume");
     h.emit(`subagents:rpc:v1:reply:${request.requestId}`, { version: 1, requestId: request.requestId, success: true, data: { details: { runId: "revived" } } });
+    // The package saves the repair at the binding; its completion carries only a reference.
+    writeFileSync(request.params.output, LANE_RETURN("complete"));
     // Completion can even arrive before the queued RPC caller has correlated its reply.
-    h.emit("subagent:async-complete", { runId: "revived", sessionId: SESS, success: true, results: [{ summary: LANE_RETURN("complete") }] });
+    h.emit("subagent:async-complete", { runId: "revived", sessionId: SESS, success: true, results: [{ summary: `Output saved to: ${request.params.output}`, savedOutputPath: request.params.output }] });
   });
   h.call("tc1", { agent: "lane-worker", task: BRIEF });
   h.result("tc1", "", { runId: "run1" });
@@ -274,7 +288,10 @@ test(`restart preserves ${lifecycle} recovery and accepts later completion exact
   jobs.shift()!();
   await until(() => jobs.length === 1, 1000);
   assert.equal(events(r.log).length, 2, "running or unknown lifecycle remains pending after checking");
-  const completion = { runId: "lost", sessionId: SESS, results: [{ summary: LANE_RETURN("complete") }] };
+  const output = h.entries.find(e => e.data.repair)!.data.repair.binding.output;
+  assert.equal(restarted.entries.find(e => e.data.revived)?.data.repair.binding.output, output, "the binding survives the restart");
+  writeFileSync(output, LANE_RETURN("complete"));
+  const completion = { runId: "lost", sessionId: SESS, results: [{ summary: "reference only", savedOutputPath: output }] };
   restarted.emit("subagent:async-complete", completion);
   restarted.emit("subagent:async-complete", completion);
   await until(() => events(r.log).length === 4);
@@ -334,13 +351,56 @@ test("15 unknown lifecycle checks warn but preserve pending ownership and later 
   await until(() => h.notes.some(n => n.message.includes("still lacks terminal proof")), 1000);
   assert.equal(jobs.length, 0, "exactly fifteen checks, no unbounded poll");
   assert.equal(events(r.log).length, 2);
-  h.emit("subagent:async-complete", { runId: "lost", sessionId: SESS, results: [{ summary: LANE_RETURN("complete") }] });
+  const output = h.entries.find(e => e.data.repair)!.data.repair.binding.output;
+  writeFileSync(output, LANE_RETURN("complete"));
+  h.emit("subagent:async-complete", { runId: "lost", sessionId: SESS, results: [{ summary: "reference only", savedOutputPath: output }] });
   await until(() => events(r.log).length === 4);
   assert.equal(attempts, 1);
   assert.equal(events(r.log)[2].run, "lost");
   assert.equal(events(r.log)[3].status, "complete");
   assert.equal(events(r.log)[3].run, "run1");
 });
+
+test("without a run dir the repair is refused, never launched with the lane's own output binding", async () => {
+  const r = makeRepo();
+  const h = harness({ reportPath: r.report, cwd: r.repo, runDir: null });
+  h.start();
+  let attempts = 0;
+  h.on("subagents:rpc:v1:request", () => { attempts++; });
+  h.call("tc1", { agent: "lane-worker", task: BRIEF });
+  h.result("tc1", "", { runId: "run1" });
+  h.emit("subagent:async-complete", { runId: "run1", sessionId: SESS, success: true, results: [{ summary: "missing" }] });
+  await until(() => events(r.log).length === 2);
+  await h.shutdown();
+  assert.equal(attempts, 0);
+  assert.equal(events(r.log)[1].status, "failed");
+  assert.ok(h.notes.some(n => n.message.includes("refused")));
+});
+
+for (const artifact of ["foreign-reference", "symlink"] as const) {
+test(`a bound repair is not admitted from ${artifact === "symlink" ? "a linked file" : "a completion naming another output"}`, async () => {
+  const r = makeRepo();
+  const h = harness({ reportPath: r.report, cwd: r.repo });
+  h.start();
+  h.on("subagents:rpc:v1:request", (raw) => {
+    const request = raw as any;
+    const foreign = join(r.repo, "foreign.md");
+    writeFileSync(foreign, LANE_RETURN("complete"));
+    if (artifact === "symlink") symlinkSync(foreign, request.params.output);
+    else writeFileSync(request.params.output, LANE_RETURN("complete"));
+    h.emit(`subagents:rpc:v1:reply:${request.requestId}`, { version: 1, requestId: request.requestId, success: true, data: { details: { runId: "revived" } } });
+    // Neither an inline block nor a body path is authority for a bound repair.
+    h.emit("subagent:async-complete", { runId: "revived", sessionId: SESS, success: true,
+      results: [{ summary: `${LANE_RETURN("complete")}\nOutput saved to: ${foreign}`, savedOutputPath: artifact === "symlink" ? request.params.output : foreign }] });
+  });
+  h.call("tc1", { agent: "lane-worker", task: BRIEF });
+  h.result("tc1", "", { runId: "run1" });
+  h.emit("subagent:async-complete", { runId: "run1", sessionId: SESS, success: true, results: [{ summary: "missing" }] });
+  await until(() => events(r.log).length === 4);
+  await h.shutdown();
+  assert.deepEqual(events(r.log).filter(e => e.ev === "return").map(e => e.status), ["failed", "failed"]);
+});
+}
 
 test("the run id is read from the launch text when details carry none, and Deadline comes from the brief", async () => {
   const r = makeRepo();

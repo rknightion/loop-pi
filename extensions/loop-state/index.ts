@@ -18,6 +18,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { type Brief, deriveLogPath, failedRunBlock, parseBrief, parseLaneReturn, returnEvent, runFailed, runIdFromText } from "./core.ts";
+import { allocateRepair, type ArtifactIdentity, artifactIdentity, identityOf, readRepair, type RepairBinding, validBinding, validIdentity } from "./repair.ts";
 import { capNotifyMessage, type CompletionInfo, completionInfo, contentText, NOTIFY_CUSTOM_TYPE, RETURN_CAP_BYTES } from "./return-cap.ts";
 
 export const DIGEST_CUSTOM_TYPE = "loop-state-digest";
@@ -64,6 +65,7 @@ function textOf(content: unknown): string {
 
 export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) => ReturnType<typeof setTimeout> = (job) => setTimeout(job, 60_000)) {
   let sessionId = "";
+  let shuttingDown = false;
   let cwd = process.cwd();
   let lastCtx: ExtensionContext | null = null;
   let logPath: string | null = null;
@@ -74,10 +76,16 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
   const started = new Map<string, { deadlineAt?: string }>();
   const dispatched = new Map<string, LaneBrief>();
   const returned = new Set<string>();
-  const pendingComplete = new Map<string, Record<string, unknown>>();
+  // `scoped`: the completion carried this session's identity. A bound repair needs it.
+  const pendingComplete = new Map<string, { data: Record<string, unknown>; scoped: boolean }>();
   const handled = new Set<string>();
-  const resumedFrom = new Map<string, { run: string; failed: boolean; log: string; info: { lane: string } }>();
+  // `repair` is the separate output a block-only repair writes (repair.ts); absent only for a
+  // recovery an older build launched, which wrote no separate output.
+  type Repair = { binding: RepairBinding; original?: ArtifactIdentity };
+  const resumedFrom = new Map<string, { run: string; failed: boolean; log: string; info: { lane: string }; repair?: Repair }>();
   const resumeAttempted = new Set<string>();
+  // Facts the original run's `done` recovery entry records once its return is appended.
+  const doneFacts = new Map<string, Record<string, unknown>>();
   const recoveryTimers = new Set<ReturnType<typeof setTimeout>>();
   // Structured async-complete facts by run id, for the return cap's saved-output path (S6).
   const completions = new Map<string, CompletionInfo>();
@@ -225,7 +233,9 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
 
   // pi-subagents 0.76.1 docs/extension-api.md and src/extension/rpc.js:
   // resume uses the persisted child and returns data.details with a NEW async run id.
-  async function resumeForBlock(runId: string, lane: string): Promise<{ id: string; asyncDir?: string } | null> {
+  // `output` names the separate repair file (file-only mode): without it the package resumes with
+  // the original run's output binding and overwrites the lane's report with the block.
+  async function resumeForBlock(runId: string, lane: string, binding: RepairBinding): Promise<{ id: string; asyncDir?: string } | null> {
     const requestId = randomUUID();
     return new Promise((done) => {
       const channel = `subagents:rpc:v1:reply:${requestId}`;
@@ -250,7 +260,10 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
       try {
         pi.events.emit("subagents:rpc:v1:request", {
           version: 1, requestId, method: "resume",
-          params: { id: runId, message: `Return only the missing fenced lane-return v2 JSON block for lane ${lane}, using the original brief and the work already performed. Do not repeat work, gate, review, commit or push. Preserve the original lane identity and report the original outcome honestly.` },
+          params: {
+            id: runId, output: binding.output, outputMode: "file-only",
+            message: `Return only the missing fenced lane-return v2 JSON block for lane ${lane}, using the original brief and the work already performed. Do not repeat work, gate, review, commit or push. Do not write or modify the original report or any other file: reply with the block only, and the runtime saves that reply to a separate repair file. Preserve the original lane identity and report the original outcome honestly.`,
+          },
         });
       } catch (error) {
         warn(`resume for run ${runId}: ${String(error)}`);
@@ -259,16 +272,17 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
     });
   }
 
-  async function restoreRecovery(runId: string, revived: string, asyncDir: string | undefined, data: Record<string, unknown>, log: string, info: { lane: string }) {
-    resumedFrom.set(revived, { run: runId, failed: runFailed(data), log, info });
+  async function restoreRecovery(runId: string, revived: string, asyncDir: string | undefined, data: Record<string, unknown>, log: string, info: { lane: string }, repair?: Repair) {
+    resumedFrom.set(revived, { run: runId, failed: runFailed(data), log, info, ...(repair ? { repair } : {}) });
     restoreIdentities(log);
     const brief = dispatched.get(runId);
     if (brief) await recordDispatch(revived, brief, runId);
     else warn(`recovery for run ${runId} has no recorded dispatch identity`);
     // Restart and exhausted checks are not terminal proof. Only package-owned
     // lifecycle artifacts can authorize a fallback when completion is lost.
-    if (!asyncDir) return;
+    if (!asyncDir || shuttingDown) return;
     const poll = (remaining: number) => {
+      if (shuttingDown) return;
       const timer = scheduleRecovery(() => {
         recoveryTimers.delete(timer);
         enqueue(async () => {
@@ -277,9 +291,15 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
             const status = JSON.parse(readFileSync(join(asyncDir, "status.json"), "utf8"));
             if (status.runId === revived && status.sessionId === sessionId &&
                 ["complete", "failed", "partial", "paused", "stopped", "rejected"].includes(status.state)) {
-              handled.add(revived);
-              await recordReturn(revived, { success: false }, log, info, true);
-              await recordReturn(runId, data, log, info, true);
+              if (repair) {
+                // The status names this session, so it is matching-session proof for the bound read.
+                await handleComplete(revived, { success: status.state === "complete" }, true);
+              } else {
+                // A recovery from an older build has no separate output to read.
+                handled.add(revived);
+                await recordReturn(revived, { success: false }, log, info, true);
+                await recordReturn(runId, data, log, info, true);
+              }
               return;
             }
           } catch { /* Unknown is pending, never failed. */ }
@@ -302,14 +322,26 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
     const block = parseLaneReturn(text);
     if (!block && !final && !resumeAttempted.has(runId)) {
       resumeAttempted.add(runId);
-      const pending = { runId, data, log, info, sessionId, phase: "pending" };
-      // Persist BEFORE launch: a restart must never issue a second resume.
-      pi.appendEntry(RECOVERY_STATE, pending);
-      const revived = await resumeForBlock(runId, info.lane);
-      if (revived) {
-        pi.appendEntry(RECOVERY_STATE, { ...pending, revived: revived.id, asyncDir: revived.asyncDir });
-        await restoreRecovery(runId, revived.id, revived.asyncDir, data, log, info);
-        return;
+      let binding: RepairBinding | null = null;
+      try {
+        binding = allocateRepair(process.env.LOOP_PI_RUN_DIR);
+      } catch (error) {
+        // No separate output means no repair: never one that could overwrite the lane's report.
+        warn(`resume for run ${runId} refused: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      if (binding) {
+        const originalPath = completionInfo({ ...data, runId })?.savedOutputPath;
+        const original = originalPath ? artifactIdentity(originalPath) : null;
+        const repair: Repair = { binding, ...(original ? { original } : {}) };
+        const pending = { runId, data, log, info, sessionId, phase: "pending", repair };
+        // Persist BEFORE launch: a restart must never issue a second resume, and must know the binding.
+        pi.appendEntry(RECOVERY_STATE, pending);
+        const revived = await resumeForBlock(runId, info.lane, binding);
+        if (revived) {
+          pi.appendEntry(RECOVERY_STATE, { ...pending, revived: revived.id, asyncDir: revived.asyncDir });
+          await restoreRecovery(runId, revived.id, revived.asyncDir, data, log, info, repair);
+          return;
+        }
       }
     }
     const event = returnEvent(info.lane, runId, runFailed(data) ? failedRunBlock(block) : block);
@@ -322,7 +354,10 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
     if (result.code !== 0) warn(`return for run ${runId} not recorded: ${result.stderr.trim()}`);
     else {
       returned.add(runId);
-      if (resumeAttempted.has(runId)) pi.appendEntry(RECOVERY_STATE, { runId, phase: "done" });
+      if (resumeAttempted.has(runId)) {
+        pi.appendEntry(RECOVERY_STATE, { runId, phase: "done", ...doneFacts.get(runId) });
+        doneFacts.delete(runId);
+      }
     }
   }
 
@@ -338,7 +373,7 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
         const pending = pendingComplete.get(runId);
         if (pending) {
           pendingComplete.delete(runId);
-          await handleComplete(runId, pending);
+          await handleComplete(runId, pending.data, pending.scoped);
         }
         return;
       }
@@ -392,7 +427,7 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
       const pending = pendingComplete.get(runId);
       if (pending) {
         pendingComplete.delete(runId);
-        await handleComplete(runId, pending);
+        await handleComplete(runId, pending.data, pending.scoped);
       }
     } finally {
       // An unrecorded dispatch keeps nothing for this run id: no started deadline, no early completion.
@@ -403,11 +438,45 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
     }
   }
 
-  async function handleComplete(runId: string, data: Record<string, unknown>) {
+  // The bound repair's text replaces the completion's: a file-only completion holds only a
+  // reference, and an inline block or a body path is never authority for the repair.
+  function boundRepairData(runId: string, data: Record<string, unknown>, repair: Repair, originalRun: string): Record<string, unknown> {
+    const results = Array.isArray(data.results) ? (data.results as Record<string, unknown>[]) : [];
+    const first = results[0] && typeof results[0] === "object" ? results[0] : {};
+    let text = "";
+    try {
+      if (results.length > 1) throw new Error("repair completion is not single-result");
+      const ref = first.outputReference as { path?: unknown } | string | undefined;
+      const named = [first.savedOutputPath, typeof ref === "string" ? ref : ref?.path];
+      if (named.some((path) => path !== undefined && path !== null && path !== repair.binding.output)) {
+        throw new Error("completion names an output other than the repair binding");
+      }
+      text = readRepair(repair.binding);
+    } catch (error) {
+      warn(`repair output for run ${runId}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    const facts: Record<string, unknown> = { repaired: identityOf(repair.binding.output, Buffer.from(text, "utf8")) };
+    if (repair.original) {
+      const now = artifactIdentity(repair.original.path);
+      const intact = now !== null && now.sha256 === repair.original.sha256 && now.bytes === repair.original.bytes;
+      facts.originalIntact = intact;
+      if (!intact) warn(`original output ${repair.original.path} of run ${originalRun} changed during its block repair`);
+    }
+    doneFacts.set(originalRun, facts);
+    return { ...data, summary: text, results: [{ ...first, summary: text, output: text }] };
+  }
+
+  async function handleComplete(runId: string, data: Record<string, unknown>, scoped: boolean) {
     if (handled.has(runId) || returned.has(runId)) return;
     const original = resumedFrom.get(runId);
     if (original) {
+      if (original.repair && !scoped) {
+        // Only this session's completion (or its package lifecycle proof) may admit the bound file.
+        warn(`completion for repair run ${runId} carries no matching session; ignored`);
+        return;
+      }
       handled.add(runId);
+      if (original.repair) data = boundRepairData(runId, data, original.repair, original.run);
       await recordReturn(runId, data, original.log, dispatched.get(runId) ?? original.info, true);
       await recordReturn(original.run, original.failed ? { ...data, success: false } : data, original.log, original.info, true);
       return;
@@ -416,8 +485,10 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
     if (!log) return;
     const info = dispatched.get(runId);
     if (!info) {
-      // The completion beat its launch result; the dispatch will flush it.
-      pendingComplete.set(runId, data);
+      // The completion beat its launch result; the dispatch will flush it. An unscoped
+      // completion never displaces a scoped one for the same run.
+      const earlier = pendingComplete.get(runId);
+      if (!earlier || scoped || !earlier.scoped) pendingComplete.set(runId, { data, scoped });
       return;
     }
     handled.add(runId);
@@ -438,6 +509,7 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
   pi.on("session_start", (_event, ctx) => {
     // pi-subagents tags its events with the session file when there is one, else the session id.
     sessionId = ctx.sessionManager.getSessionFile?.() ?? ctx.sessionManager.getSessionId();
+    shuttingDown = false;
     cwd = ctx.cwd;
     lastCtx = ctx;
     logPath = null;
@@ -452,7 +524,8 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
     pendingComplete.clear();
     resumedFrom.clear();
     resumeAttempted.clear();
-    type Recovery = { runId: string; phase: string; revived?: string; asyncDir?: string; sessionId?: string; data?: Record<string, unknown>; log?: string; info?: { lane: string } };
+    doneFacts.clear();
+    type Recovery = { runId: string; phase: string; revived?: string; asyncDir?: string; sessionId?: string; data?: Record<string, unknown>; log?: string; info?: { lane: string }; repair?: { binding?: unknown; original?: unknown } };
     const recovery = new Map<string, Recovery>();
     for (const entry of ctx.sessionManager.getBranch()) {
       if (entry.type !== "custom" || entry.customType !== RECOVERY_STATE) continue;
@@ -469,7 +542,12 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
         if (state.revived) handled.add(state.revived);
       } else if (state.phase === "pending" && state.revived && state.data && state.log && state.info &&
                  (!state.sessionId || state.sessionId === sessionId)) {
-        enqueue(() => restoreRecovery(state.runId, state.revived!, state.asyncDir, state.data!, state.log!, state.info!));
+        // A recorded binding is read as recorded: the restarted root's own run dir is a new one. A
+        // malformed one stays bound (and unreadable), so it can never fall back to inline text.
+        const original = validIdentity(state.repair?.original);
+        const repair: Repair | undefined = state.repair === undefined ? undefined
+          : { binding: validBinding(state.repair?.binding) ?? { root: "", output: "" }, ...(original ? { original } : {}) };
+        enqueue(() => restoreRecovery(state.runId, state.revived!, state.asyncDir, state.data!, state.log!, state.info!, repair));
       }
       // A pre-launch record lacking a revived id stays pending: neither a
       // second resume nor a false failure is authorized by incomplete metadata.
@@ -483,6 +561,7 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
   });
 
   pi.on("session_shutdown", async () => {
+    shuttingDown = true;
     for (const timer of recoveryTimers) clearTimeout(timer);
     recoveryTimers.clear();
     await chain;
@@ -574,6 +653,7 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
     const d = data as Record<string, unknown>;
     if (typeof d.runId !== "string") return;
     if (typeof d.sessionId === "string" && d.sessionId !== sessionId) return;
+    const scoped = typeof d.sessionId === "string" && d.sessionId === sessionId;
     const info = completionInfo(d);
     if (info) {
       completions.delete(info.runId);
@@ -581,6 +661,6 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
       if (completions.size > MAX_COMPLETIONS) completions.delete(completions.keys().next().value!);
     }
     const runId = d.runId;
-    enqueue(() => handleComplete(runId, d));
+    enqueue(() => handleComplete(runId, d, scoped));
   });
 }

@@ -156,6 +156,8 @@ test(`each real package recovery has its own dispatch and return: ${outcome}`, a
     cwd: s.repo,
     sessionArgs: [],
     extraArgs: ["--exclude-tools", "subagents_enable"],
+    // The launcher's run dir holds the repair's separate output.
+    env: { LOOP_PI_RUN_DIR: freshDir("loop-state-e2e-run-") },
   });
   try {
     session.send({ id: "p1", type: "prompt", message: "SPAWN_LANE please" });
@@ -194,7 +196,11 @@ test(`each real package recovery has its own dispatch and return: ${outcome}`, a
       const finished = readFileSync(completions, "utf8").trim().split("\n").map(l => JSON.parse(l));
       assert.equal(finished.length, 2);
       assert.notEqual(finished[1].runId, dispatch.run, "package resume allocates a new run identity");
-      if (outcome === "recovered") assert.match(finished[1].results[0].summary, /"v":2/);
+      // The repair is saved file-only at its own output: the completion carries a reference, the file the block.
+      assert.equal(rpc[0].params.outputMode, "file-only");
+      // A child that errors saves nothing.
+      if (outcome !== "resume-failed") assert.equal(finished[1].results[0].savedOutputPath, rpc[0].params.output);
+      if (outcome === "recovered") assert.match(readFileSync(rpc[0].params.output, "utf8"), /"v":2/);
     }
     const laneRows = readFileSync(s.log, "utf8").trim().split("\n").map(l => JSON.parse(l)).filter(r => r.ev === "dispatch" || r.ev === "return");
     assert.equal(laneRows.length, outcome === "valid" ? 2 : 4, "each distinct run is accounted exactly once despite replayed completions");
