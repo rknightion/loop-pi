@@ -3,7 +3,8 @@
 // answered by a stub extension, since the real provider is a different lane's extension.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -224,7 +225,8 @@ test(`each real package recovery has its own dispatch and return: ${outcome}`, a
 
 }
 
-test("ordinary native resumes each retain their own identity and stay live past an earlier return", { timeout: 90_000 }, async () => {
+for (const delayedStop of [false, true]) {
+test(`ordinary native resumes each retain their own identity and stay live past an earlier return${delayedStop ? " with delayed final watch stop" : ""}`, { timeout: 90_000 }, async () => {
   const s = scaffold();
   mkdirSync(join(s.agentDir, "agents"), { recursive: true });
   writeFileSync(join(s.agentDir, "settings.json"), JSON.stringify({ packages: [PI_SUBAGENTS_PACKAGE_DIR], subagents: { agentExcludeDirs: ["~/.agents"] } }));
@@ -232,11 +234,36 @@ test("ordinary native resumes each retain their own identity and stay live past 
     ["---", "name: reviewer", "description: Test reviewer", "tools: bash", "extensions: []", `subagentOnlyExtensions: ${FAUX_EXTENSION}`, "model: faux/faux-1", "---", "", "worker"].join("\n"));
   const block = (lane: string) => '```lane-return\n' + JSON.stringify({ v: 2, lane, status: "complete", sha: null, landed: false, check: "fixture", exit: 0 }) + '\n```';
   const observed = join(s.repo, "starts.jsonl");
+  const completed = join(s.repo, "completions.jsonl");
+  const delayTarget = join(s.repo, "delay-target");
+  const delayAttempts = join(s.repo, "delay-attempts.jsonl");
+  if (delayedStop) {
+    const cli = join(s.agentDir, "bin", "loop-state");
+    unlinkSync(cli); // Replace only the fixture symlink, never the real CLI.
+    writeFileSync(cli, `#!/usr/bin/env python3
+import json, os, re, subprocess, sys, time
+args = sys.argv[1:]
+if not args or args[0] != "append":
+    os.execv(${JSON.stringify(BIN)}, [${JSON.stringify(BIN)}] + args)
+payload = sys.stdin.read()
+event = json.loads(payload)
+target = open(${JSON.stringify(delayTarget)}).read() if os.path.exists(${JSON.stringify(delayTarget)}) else None
+run = re.search(r"(?:^|\\s)lane run=(\\S+)(?=\\s|$)", event.get("what", ""))
+if event.get("ev") == "watch" and event.get("op") == "stop" and target and run and run.group(1) == target:
+    started = time.monotonic()
+    time.sleep(3) # Below the recorder's 10-second CLI timeout; the real append still runs.
+    with open(${JSON.stringify(delayAttempts)}, "a") as fh:
+        fh.write(json.dumps({"run": target, "event": event, "delayMs": (time.monotonic() - started) * 1000}) + "\\n")
+result = subprocess.run([${JSON.stringify(BIN)}] + args, input=payload, text=True, timeout=5)
+sys.exit(result.returncode)
+`, { mode: 0o755 });
+  }
   writeFileSync(s.stub, readFileSync(s.stub, "utf8") + `
     import { appendFileSync } from "node:fs";
     export const install = (pi) => {
       let latest;
       pi.events.on("subagent:async-started", d => { latest = d.id; appendFileSync(${JSON.stringify(observed)}, JSON.stringify(d) + "\\n"); });
+      pi.events.on("subagent:async-complete", d => appendFileSync(${JSON.stringify(completed)}, JSON.stringify(d) + "\\n"));
       pi.on("tool_call", e => { if (e.toolName === "subagent" && e.input.id === "LATEST_TEST_RUN") e.input.id = latest; });
     };
   `);
@@ -259,6 +286,7 @@ test("ordinary native resumes each retain their own identity and stay live past 
     session.send({ id: "original", type: "prompt", message: "SPAWN_ORIGINAL" });
     await waitForCondition(() => rows().length === 2 ? true : undefined, 30_000);
     const original = rows()[0].run;
+    const nativeRuns = [original];
     let source = original;
     for (const [index, lane, task] of [[1, "L1", "T1"], [2, "L2", "T2"]] as const) {
       const marker = `FOLLOWUP_${index}`;
@@ -268,6 +296,8 @@ test("ordinary native resumes each retain their own identity and stay live past 
         return starts[index];
       }, 20_000);
       assert.notEqual(native.id, source, "native resume exposes a new run identity");
+      nativeRuns.push(native.id);
+      if (delayedStop && index === 2) writeFileSync(delayTarget, native.id);
       const revived = await waitForCondition(() => rows().find(r => r.ev === "dispatch" && r.run === native.id), 10_000)
         .catch(() => { throw new Error(`native resumed identity ${native.id} has no dispatch: ${JSON.stringify(rows())}`); });
       assert.equal(revived.lane, lane);
@@ -285,12 +315,56 @@ test("ordinary native resumes each retain their own identity and stay live past 
     assert.equal(lifecycle.length, 6);
     for (const run of new Set(lifecycle.map(r => r.run))) assert.deepEqual(lifecycle.filter(r => r.run === run).map(r => r.ev), ["dispatch", "return"]);
     assert.match(digest(), /## Live lanes \(0\)/);
-    const watches = readFileSync(s.log, "utf8").trim().split("\n").map(l => JSON.parse(l)).filter(r => r.ev === "watch");
+    assert.equal(new Set(nativeRuns).size, 3, "all three native runs have distinct identities");
+    assert.deepEqual(new Set(lifecycle.map(r => r.run)), new Set(nativeRuns));
+    const watchRows = () => readFileSync(s.log, "utf8").trim().split("\n").map(l => JSON.parse(l)).filter(r => r.ev === "watch");
+    const watchRun = (what: string) => /(?:^|\s)lane run=(\S+)(?=\s|$)/.exec(what)?.[1];
+    // A return is visible before its queued watch-stop append finishes. Observe the real log,
+    // not the return or the outbox; a persistently absent stop still fails this bounded poll.
+    const watches = await waitForCondition(() => {
+      const current = watchRows();
+      return nativeRuns.every(run => current.some(r => r.op === "stop" && watchRun(r.what) === run)) ? current : undefined;
+    }, 20_000);
     assert.equal(watches.length, 6, "one deadline watch start/stop for each native run, no replay attempts");
     assert.equal(new Set(watches.map(r => r.what)).size, 3);
+    assert.equal(new Set(watches.map(r => JSON.stringify([r.what, r.deadline]))).size, 3);
+    for (const run of nativeRuns) {
+      const pair = watches.filter(r => watchRun(r.what) === run);
+      assert.deepEqual(pair.map(r => r.op), ["start", "stop"], `exactly one causal watch pair for native run ${run}`);
+      assert.equal(pair[0].what, pair[1].what);
+      assert.equal(pair[0].deadline, pair[1].deadline);
+      assert.ok(pair[1].seq > pair[0].seq, "the stop follows its own start in the real log");
+      assert.equal(pair[0].deadline.replace(/\.\d{3}Z$/, "Z"), lifecycle.find(r => r.ev === "dispatch" && r.run === run).deadline);
+    }
+    if (delayedStop) {
+      const attempts = readFileSync(delayAttempts, "utf8").trim().split("\n").map(l => JSON.parse(l));
+      assert.equal(attempts.length, 1, "only the final native run's stop crosses the delay boundary once");
+      assert.equal(attempts[0].run, source);
+      assert.ok(attempts[0].delayMs >= 3000, "the real CLI append waited the bounded fixture delay");
+    }
     execFileSync(BIN, ["check", s.log]);
+  } catch (error) {
+    // Observe before shutdown: closing the session can cancel timers and conceal the fault.
+    const evidence = mkdtempSync(join(tmpdir(), "loop-native-resume-failure-"));
+    for (const [name, path] of [["state.jsonl", s.log], ["starts.jsonl", observed], ["completions.jsonl", completed], ["delay-attempts.jsonl", delayAttempts]]) {
+      try { writeFileSync(join(evidence, name), readFileSync(path)); }
+      catch (readError) { writeFileSync(join(evidence, name), `unavailable: ${String(readError)}\n`); }
+    }
+    writeFileSync(join(evidence, "stderr.log"), session.stderr.join(""));
+    try {
+      session.send({ id: "failure-entries", type: "get_entries" });
+      const response = await session.waitFor(e => e.type === "response" && e.id === "failure-entries", 3000);
+      writeFileSync(join(evidence, "entries.json"), JSON.stringify(response, null, 2));
+      const entries = (response.data as { entries: { type: string; customType?: string; data?: unknown }[] }).entries;
+      const snapshot = entries.filter(e => e.type === "custom" && e.customType === "loop-wait-state").at(-1);
+      writeFileSync(join(evidence, "wait-state.json"), JSON.stringify(snapshot ?? null, null, 2));
+    } catch (snapshotError) {
+      writeFileSync(join(evidence, "wait-state.json"), JSON.stringify({ unavailable: String(snapshotError) }));
+    }
+    throw new Error(`${String(error)}\nNative-resume pre-shutdown evidence: ${evidence}`, { cause: error });
   } finally { await session.close(); }
 });
+}
 
 test("S6: a 3.37 MB lane return reaches the root at 16 KB or less with its lane-return block, and the return event keeps its fields", async () => {
   const s = scaffold();
