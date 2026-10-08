@@ -17,19 +17,29 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { CustomEntry, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 import { deriveLogPath, parseBrief } from "../loop-state/core.ts";
 import { landParkEvents, laneBranch, lanePath, launchedRunId, nativeLaneKey, parseLaneBrief, safeLaneId, STATE_CUSTOM_TYPE } from "./core.ts";
 import { relativeGitdir } from "./metadata.ts";
 import { captureLanePatches, decideLanePatches, type PatchRun } from "./retention.ts";
+import { registerScratch, RECEIPT_FILE, SCRATCH_KINDS, teardown, type ReceiptEntry } from "./teardown.ts";
 
 export const PATCH_STATE_CUSTOM_TYPE = "lane-patches-state";
 export const PATCH_DECISION_EVENT = "lane-worktrees:patch-decision";
 import { allocationIdentity, confinedPath, prepareParent, registerAllocation, verifyAllocation, verifyRunCwd, type AllocationIdentity } from "./identity.ts";
 
 const PROTO_FILE = "loop-pi-proto";
+export const SCRATCH_TOOL = "scratch_register";
+const ScratchParams = Type.Object({
+  path: Type.String({ description: "The scratch directory, absolute or relative to the session cwd. It must already exist." }),
+  kind: Type.Union(SCRATCH_KINDS.map((kind) => Type.Literal(kind)), { description: "worktree, gate or cache." }),
+  keep: Type.Optional(Type.Boolean({ description: "Never remove at closeout; list it in the receipt instead." })),
+  disposable: Type.Optional(Type.Boolean({ description: "A plain (non-worktree) directory may be removed at closeout. Without it a plain directory is only listed." })),
+});
 const GIT_TIMEOUT_MS = 10 * 60_000;
 export const LOOP_CLOSEOUT_EVENT = "loop-closeout";
 
@@ -377,7 +387,9 @@ export default function (pi: ExtensionAPI) {
   }
 
   /** Explicit closeout removes only recorded allocations; never infer ownership from directory names. */
-  async function sweep(): Promise<string> {
+  async function sweep(): Promise<{ line: string; recorded: ReceiptEntry[] }> {
+    const recorded: ReceiptEntry[] = [];
+    const note = (tree: Tree, outcome: ReceiptEntry["outcome"], reason: string) => recorded.push({ path: tree.path, source: "lane-worktrees", kind: "worktree", outcome, reason });
     let removed = 0;
     let deleted = 0;
     const keptLive: string[] = [];
@@ -388,6 +400,7 @@ export default function (pi: ExtensionAPI) {
     for (const tree of [...trees.values()]) {
       if (isLive(tree) || releasing.has(tree.lane)) {
         keptLive.push(tree.lane);
+        note(tree, "kept", `lane ${tree.lane} retained allocation: a run is live or releasing`);
         continue;
       }
       releasing.add(tree.lane);
@@ -398,17 +411,22 @@ export default function (pi: ExtensionAPI) {
           retire(tree);
           if (await merged(tree.repo, tree.branch)) {
             if ((await git(tree.repo, ["branch", "-D", tree.branch])).code === 0) deleted++;
+            note(tree, "removed", `lane ${tree.lane} retained allocation released by the closeout sweep; its branch was merged`);
           } else {
             unmerged.push(tree.branch);
+            note(tree, "removed", `lane ${tree.lane} retained allocation released by the closeout sweep; unmerged branch ${tree.branch} kept`);
           }
         } else if (outcome === "dirty") {
           keptDirty.push(tree.lane);
           tree.keptDirty = true;
+          note(tree, "kept", `lane ${tree.lane} retained allocation is dirty`);
         } else if (outcome === "unknown") {
           keptUnknown.push(tree.lane);
           tree.keptUnknown = true;
+          note(tree, "kept", `lane ${tree.lane} retained allocation ownership or confinement changed`);
         } else {
           failed.push(tree.lane);
+          note(tree, "kept", `lane ${tree.lane} retained allocation could not be removed`);
         }
       } finally {
         releasing.delete(tree.lane);
@@ -421,13 +439,69 @@ export default function (pi: ExtensionAPI) {
     if (keptDirty.length) parts.push(`kept dirty: ${keptDirty.join(", ")}`);
     if (keptUnknown.length) parts.push(`kept unknown: ${keptUnknown.join(", ")}`);
     if (failed.length) parts.push(`could not remove: ${failed.join(", ")}`);
-    return parts.join("; ");
+    return { line: parts.join("; "), recorded };
+  }
+
+  /** Locations a removable scratch path may never contain. */
+  function protectedPaths(cwd: string | undefined): string[] {
+    const paths = [homedir()];
+    try {
+      paths.push(getAgentDir());
+    } catch {
+      // No agent dir resolved: the remaining fences still apply.
+    }
+    if (cwd) paths.push(cwd);
+    return paths;
+  }
+
+  /** Close-time teardown of this run's ledger; returns the summary suffix for the sweep line. */
+  async function scratchTeardown(recorded: ReceiptEntry[]): Promise<string> {
+    const dir = runDir();
+    if (!dir) return "";
+    const cwd = lastCtx?.cwd ?? process.cwd();
+    try {
+      const { receipt, file } = await teardown({
+        runDir: dir, cwd, protect: protectedPaths(cwd), git, recorded,
+        recordedPaths: [...trees.values()].map((tree) => tree.path),
+      });
+      return `teardown removed ${receipt.counts.removed}, kept ${receipt.counts.kept}, absent ${receipt.counts.absent} (receipt ${file})`;
+    } catch (error) {
+      return `teardown failed, nothing further removed: ${String(error)} (no ${RECEIPT_FILE} written)`;
+    }
   }
 
   async function toplevel(cwd: string): Promise<string | null> {
     const r = await git(cwd, ["rev-parse", "--show-toplevel"]);
     return r.code === 0 && r.stdout.trim() ? r.stdout.trim() : null;
   }
+
+  // The dispatcher composes this extension too (dispatcher/index.ts) and has no use for a root
+  // tool; a host API without tool registration still gets the retention and teardown hooks.
+  if (typeof pi.registerTool === "function") pi.registerTool({
+    name: SCRATCH_TOOL,
+    label: "Register scratch path",
+    description:
+      "Record a scratch path this loop created (a worktree, gate dir or cache dir) in the run's " +
+      "scratch ledger so closeout can tear it down. At closeout a registered linked worktree is removed " +
+      "with git worktree remove only when it is clean and its HEAD is on origin's default branch; a plain " +
+      "directory only when registered with disposable=true. keep=true always keeps it. Everything kept " +
+      "is listed with its reason in <run dir>/teardown.json. Register again to change keep or disposable.",
+    promptSnippet: "scratch_register(path, kind, keep?, disposable?) - record a scratch worktree/gate/cache dir for closeout teardown",
+    parameters: ScratchParams,
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      lastCtx = ctx;
+      const dir = runDir();
+      if (!dir) throw new Error("lane-worktrees: no loop run directory (LOOP_PI_RUN_DIR), so there is no scratch ledger");
+      const entry = await registerScratch(dir, params, { cwd: ctx.cwd, protect: protectedPaths(ctx.cwd), git });
+      const rule = entry.keep ? "kept at closeout"
+        : entry.type === "worktree" ? "removed at closeout only if clean and landed on origin's default branch"
+          : entry.disposable ? "removed at closeout as a disposable directory" : "listed, not removed, at closeout (not disposable)";
+      return {
+        content: [{ type: "text", text: `registered ${entry.type} ${entry.path} (${entry.kind}): ${rule}` }],
+        details: entry,
+      };
+    },
+  });
 
   pi.on("session_start", (_event, ctx) => {
     lastCtx = ctx;
@@ -696,6 +770,10 @@ export default function (pi: ExtensionAPI) {
     if (!markerPresent()) return;
     const d = data as { lines?: unknown; pending?: unknown } | null;
     const work = sweep()
+      .then(async ({ line, recorded }) => {
+        const suffix = await scratchTeardown(recorded);
+        return suffix ? `${line}; ${suffix}` : line;
+      })
       .then((line) => {
         if (line && Array.isArray(d?.lines)) (d.lines as string[]).push(line);
         try {
