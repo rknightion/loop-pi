@@ -794,6 +794,10 @@ test("C3_AGENTS matches SEAMS.md exactly", () => {
     [
       "complex-worker",
       "complex-worker-push",
+      "super-worker",
+      "super-worker-push",
+      "megasuper-worker",
+      "megasuper-worker-push",
       "gate-runner",
       "lane-worker",
       "lane-worker-push",

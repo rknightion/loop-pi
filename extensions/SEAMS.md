@@ -62,14 +62,15 @@ public statement of those contracts.
   `extensionBindings` tool input with `{"loop-pi.guard/1":{"agent":<selected agent>}}` after
   validating the launch. pi-subagents 0.76.1 delivers it in `PI_SUBAGENT_EXTENSION_BINDINGS`
   to the detached child. For directly bound detached children, only `lane-worker-push`,
-  `lane-worker-retry-push` and `complex-worker-push` may make plain `git push`;
+  `lane-worker-low-push`, `lane-worker-retry-push`, `complex-worker-push`, `super-worker-push`
+  and `megasuper-worker-push` may make plain `git push`;
   a missing, malformed or unknown identity
   denies pushes. The lane guard applies this to `bash` and `watch_process`, including the
   existing parser's wrappers, aliases and fallback scan. Force pushes remain blocked for all.
   The real-CLI faux-provider test proves denial, a push to a disposable local bare remote,
   and replacement of model-supplied bindings. This remains an honest-mistake fence, not an
   OS security boundary. **Foreground nested children inherit the detached parent's push
-  grant, even when the nested agent is not one of the three push agents.** pi-subagents
+  grant, even when the nested agent is not one of the push agents.** pi-subagents
   0.76.1 creates foreground children in the parent's process and does not apply per-child
   `processEnv` there; the lane extension therefore reads the parent's binding. Denying
   that inheritance requires a supported per-session identity transport, not parsing prompt
@@ -252,8 +253,12 @@ before any `await`. A missing reply means the provider extension is not loaded; 
   Ignore failures. The installer lays the script out only when an overlay provides it.
 - The agent set (the only names the root may spawn): `mapper`, `mapper-deep`, `gate-runner`,
   `lane-worker`, `lane-worker-push`, `lane-worker-low`, `lane-worker-low-push`, `lane-worker-retry`,
-  `lane-worker-retry-push`, `complex-worker`, `complex-worker-push`, `reviewer`, `reviewer-high`,
+  `lane-worker-retry-push`, `complex-worker`, `complex-worker-push`, `super-worker`,
+  `super-worker-push`, `megasuper-worker`, `megasuper-worker-push`, `reviewer`, `reviewer-high`,
   `security-reviewer`, `rescue-sol`, `rescue-astra`, `ops`, `ops-probe`, `triager`.
+- Escalation tiers: SUPER = {`super-worker`, `super-worker-push`} (gpt-6-astra, `thinking: high`);
+  MEGASUPER = {`megasuper-worker`, `megasuper-worker-push`, `agent-workflows:megasuper-worker`}
+  (gpt-6-astra, `thinking: xhigh`). Both copy the `complex-worker` bodies.
 - Every agent file sets `inheritGlobalContext: false`; the installer appends the home's
   `lane-policy.md` after a `<!-- lane-policy -->` marker instead. An overlay may replace
   `lane-policy.md`, so the return contract is not in it: every agent but `triager` carries the
@@ -284,6 +289,8 @@ before any `await`. A missing reply means the provider extension is not loaded; 
   a brief. Native reviewer launches emit `kind: review`; a `Tasks:` line or comma-separated task
   header identifies constituents, whose admitted maximum tier is used only when every tier is
   known. Historical missing metadata stays unknown, never inferred from an agent name.
+  `append` warns on stderr, without rejecting, for an `admit` without `tier` and an `ops` or
+  `ops-probe` `dispatch` without `surface`; the root extension shows such warnings through notify.
   Digest/query audit counts split implementation dispatches, review dispatches and reported
   CodeRabbit reviews by known tier, with a separate unknown bucket. These fields are telemetry,
   not authority or enforcement inputs.
@@ -490,6 +497,15 @@ paths are exact, bash write detection is best-effort.
   `codex/ops-*`, `codex/grants-*`, `codex/launch-*` and `codex/goal-*` (exact for edit/write, best
   effort for bash), a second `subagent` status for the same target with no wake since (a return,
   `loop-watch`, `loop-wake`, input, session start or compaction), and `bash` timeouts over 900 s.
+  **Per-loop tier cap** (not marker-gated; applies whenever `loop-continuation:query-launch` names a
+  `report-<name>.md`): a single `{agent, task}` launch of a SUPER agent beyond the 2nd, or of a
+  MEGASUPER agent beyond the 1st, is refused with exactly
+  `loop-guard: per-loop cap reached (2 SUPER, 1 MEGASUPER); park the task needs=owner`. The count is
+  the distinct `run` ids of `dispatch` rows in the loop's state log whose `agent` is in the tier
+  set, excluding rows with `recovery_of`, plus launches this root process allowed whose run id is
+  not in the log yet (a burst in one message, or a brief without the lane header). A restarted root
+  therefore keeps the count. A native `resume` is never refused, but the dispatch row loop-state
+  writes for it counts. An unreadable (not absent) log refuses tier launches.
   **Lanes**: `codex/grants-*` and authority writes, `gh pr merge` outside an ops `release` surface.
 - **loop-state**: `land` is `after-green` only (legacy `pre-green` lines still check and digest);
   `revert` by root with `reason=root-decision`; `park needs=budget`; `close reason=budget` needs a

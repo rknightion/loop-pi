@@ -3,7 +3,7 @@ name: rescue-astra
 description: Specialist rescue, attempt 3 onward (Astra).
 advertise: true
 model: openai/gpt-6-astra
-thinking: medium
+thinking: high
 tools: read, bash, edit, write, grep, find, ls, watch_process
 extensions:
 systemPromptMode: append

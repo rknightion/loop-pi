@@ -6,6 +6,8 @@ const PUSH_AGENTS: ReadonlySet<string> = new Set([
   "lane-worker-push",
   "lane-worker-retry-push",
   "complex-worker-push",
+  "super-worker-push",
+  "megasuper-worker-push",
   "lane-worker-low-push",
 ]);
 

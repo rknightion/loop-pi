@@ -16,6 +16,7 @@ import { installRequestCeiling, installRetryBackoff } from "../request-ceiling/i
 import { bindLaneIdentity } from "./push-grant.ts";
 import { evaluateOpsLaunch, QUERY_LAUNCH_EVENT } from "./ops.ts";
 import { evaluateBashCommand, evaluateBgWait, evaluateSubagentCall, evaluateWatchProcess, isAsyncSubagentLaunch, wrappedGateCommands, bindGateExecution } from "./rules.ts";
+import { agentTier, loggedTierRuns, readStateLog, stateLogFor, tierCapRefusal, type AllowedLaunch } from "./tier-cap.ts";
 import { loadGateDeclarations } from "./gates.ts";
 import { bashProtectedPath, protoActive, runDirFromEnv, toolWriteRefusal } from "./guard-paths.ts";
 import { capturePushExecutions, planPushes, recordPushes, unloggedPushRefusal, type PlannedPush, type PushExecutionEvidence } from "./push-log.ts";
@@ -84,6 +85,21 @@ export default function (pi: ExtensionAPI) {
     return ops;
   };
 
+  /** The armed loop's report path from loop-continuation, or undefined outside a loop. */
+  const queryReportPath = (): string | undefined => {
+    let reportPath: unknown;
+    pi.events.emit(QUERY_LAUNCH_EVENT, {
+      reply: (launch: { reportPath?: unknown } | null | undefined) => {
+        reportPath = launch?.reportPath;
+      },
+    });
+    return typeof reportPath === "string" && reportPath ? reportPath : undefined;
+  };
+
+  // SUPER/MEGASUPER launches this root allowed, by tool call id (tier-cap.ts). Kept for the whole
+  // process: a launch whose dispatch row has not reached the state log yet still counts.
+  const tierLaunches = new Map<string, AllowedLaunch>();
+
   pi.events.on(ASYNC_COMPLETE_EVENT, (data) => {
     const event = data as { runId?: unknown; id?: unknown } | null;
     const runId = typeof event?.runId === "string" ? event.runId : typeof event?.id === "string" ? event.id : undefined;
@@ -149,6 +165,12 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("tool_execution_end", (event) => {
+    const tierLaunch = tierLaunches.get(event.toolCallId);
+    if (tierLaunch !== undefined && tierLaunch.runId === undefined) {
+      // A launch that ended in error started nothing; one that started is matched to its log row.
+      if (event.isError) tierLaunches.delete(event.toolCallId);
+      else tierLaunch.runId = launchedRunId(event.result);
+    }
     const pending = pendingOps.get(event.toolCallId);
     if (pending !== undefined) {
       const surface = pending.surface;
@@ -314,6 +336,24 @@ export default function (pi: ExtensionAPI) {
         return { block: true, reason: ops.reason };
       }
       if (input.action === undefined && typeof input.agent === "string" && typeof input.task === "string") {
+        // Per-loop SUPER/MEGASUPER cap, counted from the loop's state log so a restart keeps it.
+        const tier = agentTier(input.agent);
+        const reportPath = tier ? queryReportPath() : undefined;
+        const log = tier && reportPath ? stateLogFor(reportPath, ctx.cwd) : null;
+        if (tier && log) {
+          let text: string;
+          try {
+            text = readStateLog(log);
+          } catch (error) {
+            return {
+              block: true,
+              reason: `loop-guard: cannot read the loop state log to check the per-loop SUPER/MEGASUPER cap (${error instanceof Error ? error.message : String(error)}).`,
+            };
+          }
+          const refusal = tierCapRefusal(tier, loggedTierRuns(text), tierLaunches.values());
+          if (refusal) return { block: true, reason: refusal };
+          tierLaunches.set(event.toolCallId, { tier });
+        }
         bindLaneIdentity(input, input.agent, ops.entry, { runDir });
         if (ops.entry) pendingOps.set(event.toolCallId, { surface: ops.entry.surface, async: isAsyncSubagentLaunch(input) });
       } else {

@@ -384,6 +384,8 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
         warn(`dispatch for run ${runId} not recorded: ${result.stderr.trim()}`);
         return;
       }
+      // The CLI accepts an ops dispatch with no surface but names the gap on stderr; show it.
+      for (const line of result.stderr.split("\n")) if (line.startsWith("loop-state: warning:")) warn(line.slice("loop-state: ".length));
       recorded = true;
       started.delete(runId);
       dispatched.set(runId, brief);

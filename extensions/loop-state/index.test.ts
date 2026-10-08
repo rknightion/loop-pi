@@ -542,6 +542,26 @@ test("ordinary resume after root restart correlates an early completion and repl
   assert.equal(events(r.log).length, 4, "the durable log suppresses duplicate dispatch and terminal return after restart");
 });
 
+test("an ops resume with a replacement brief keeps its Ops surface, and a missing one is warned, not refused", async () => {
+  const r = makeRepo();
+  execFileSync(BIN, ["append", r.log, "dispatch", "lane=M1", "task=T1", "agent=ops", "run=first", "base=b", "tier=guarded", "surface=deploy:svc"]);
+  execFileSync(BIN, ["append", r.log, "return", "lane=M1", "run=first", "status=partial"]);
+  const h = harness({ reportPath: r.report, cwd: r.repo });
+  h.start();
+  h.call("again", { action: "resume", id: "first", message: "Lane: M1 · Task: T1 · Tier: guarded\nOps surface: deploy:svc\nObjective: retry" });
+  h.result("again", "", { runId: "second" });
+  h.call("bare", { action: "resume", id: "first", message: "Lane: M1 · Task: T1 · Tier: guarded\nObjective: retry once more" });
+  h.result("bare", "", { runId: "third" });
+  await h.shutdown();
+  const dispatches = events(r.log).filter((row) => row.ev === "dispatch");
+  assert.deepEqual(dispatches.map((row) => [row.run, row.agent, row.surface]), [
+    ["first", "ops", "deploy:svc"], ["second", "ops", "deploy:svc"], ["third", "ops", undefined],
+  ]);
+  const notes = h.notes.map((note) => note.message).filter((message) => /has no surface/.test(message));
+  assert.equal(notes.length, 1, JSON.stringify(h.notes));
+  assert.match(notes[0], /dispatch third \(ops\) has no surface/);
+});
+
 test("a recorded dispatch is never duplicated by a later result for the same run id", async () => {
   const r = makeRepo();
   const h = harness({ reportPath: r.report, cwd: r.repo });

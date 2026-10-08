@@ -14,6 +14,12 @@ test("parseBrief preserves an explicit ops Surface without inferring one", () =>
   });
 });
 
+test("parseBrief reads an Ops surface line, which takes precedence over Surface", () => {
+  assert.equal(parseBrief("Lane: L1 · Task: T1 · Tier: guarded\nOps surface: deploy:svc")?.surface, "deploy:svc");
+  assert.equal(parseBrief("Lane: L1 · Task: T1 · Tier: guarded\nSurface: other\nOps surface: deploy:svc")?.surface, "deploy:svc");
+  assert.equal(parseBrief("Lane: L1 · Task: T1 · Tier: guarded\nOps surface:")?.surface, undefined);
+});
+
 test("parseBrief takes the bare task id when the header carries its title", () => {
   assert.deepEqual(parseBrief("Lane: L1 · Task: T-7 (stop the e2e lane test racing) · Tier: routine"), {
     lane: "L1",

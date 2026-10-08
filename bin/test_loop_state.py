@@ -101,6 +101,40 @@ class TierSurfaceTests(Base):
         self.assertEqual(self.events()[3]["surface"], "**/auth/**")
 
 
+class MissingTelemetryWarningTests(Base):
+    """Warn mode: a missing admit tier or ops dispatch surface is accepted but named on stderr."""
+
+    def test_admit_without_tier_is_accepted_with_a_warning_naming_the_field(self):
+        self.append(*OPEN)
+        r = self.append("admit", "task=T1", "source=envelope", "owned=a.txt", "accept=ok")
+        self.assertEqual(self.events()[-1]["task"], "T1")
+        self.assertIn("warning", r.stderr)
+        self.assertIn("admit T1 has no tier", r.stderr)
+        quiet = self.append("admit", "task=T2", "source=envelope", "owned=b.txt", "accept=ok", "tier=routine")
+        self.assertEqual(quiet.stderr, "")
+
+    def test_ops_dispatch_without_surface_is_accepted_with_a_warning_from_either_input(self):
+        self.seed()
+        for agent, run_id in (("ops", "r1"), ("ops-probe", "r2")):
+            body = {"ev": "dispatch", "lane": "L" + run_id, "task": "T1", "agent": agent, "run": run_id, "base": "b"}
+            r = self.append("--by", "ext", stdin=json.dumps(body))
+            self.assertEqual(self.events()[-1]["run"], run_id)
+            self.assertIn("dispatch %s (%s) has no surface" % (run_id, agent), r.stderr)
+        kv = self.append("dispatch", "lane=L3", "task=T1", "agent=ops", "run=r3", "base=b", "tier=guarded")
+        self.assertIn("has no surface", kv.stderr)
+
+    def test_no_warning_where_the_field_is_present_or_no_surface_applies(self):
+        self.append(*OPEN)
+        self.append("admit", "task=T1", "source=envelope", "owned=a.txt", "accept=ok", "tier=guarded")
+        quiet = [
+            self.append("dispatch", "lane=L1", "task=T1", "agent=ops", "run=r1", "base=b", "surface=deploy:x"),
+            self.append("dispatch", "lane=L2", "task=T1", "agent=lane-worker", "run=r2", "base=b"),
+            self.append("dispatch", "lane=L3", "task=T1", "agent=reviewer", "run=r3", "base=b", "kind=review"),
+        ]
+        self.assertEqual([r.stderr for r in quiet], ["", "", ""])
+        self.assertEqual(run("check", self.log).returncode, 0)
+
+
 class ResumeIdentityTests(Base):
     def test_stale_landed_claim_constrains_only_its_original_task(self):
         self.seed()

@@ -28,6 +28,8 @@ from datetime import datetime, timezone
 
 VERSION = 1
 GATE_AGENT = "gate-runner"
+# The agents bound to one ops surface; their dispatches should name it.
+OPS_AGENTS = ("ops", "ops-probe")
 DIGEST_MAX_BYTES = 4096
 JUDGEMENT_MAX_BYTES = 4096
 JUDGEMENTS_IN_DIGEST = 5
@@ -920,8 +922,23 @@ def cmd_append(args):
             if key in event:
                 raise Rejected("%s is set by loop-state" % key)
     framed = do_append(log_path, event, by, run_dir)
+    for warning in telemetry_warnings(framed):
+        sys.stderr.write("loop-state: warning: %s\n" % warning)
     sys.stdout.write("seq=%d\n" % framed["seq"])
     return 0
+
+
+def telemetry_warnings(event):
+    """Warn mode for the tier and surface telemetry: the event is already appended, but a missing
+    admit `tier` or ops dispatch `surface` leaves the audit split unknown, so name the field."""
+    out = []
+    if event["ev"] == "admit" and "tier" not in event:
+        out.append("admit %s has no tier; pass tier=routine|guarded so its lanes and reviews "
+                   "are audited by tier" % event["task"])
+    if event["ev"] == "dispatch" and event["agent"] in OPS_AGENTS and "surface" not in event:
+        out.append("dispatch %s (%s) has no surface; pass the bound ops surface as surface=<id>"
+                   % (event["run"], event["agent"]))
+    return out
 
 
 def cmd_digest(args):
