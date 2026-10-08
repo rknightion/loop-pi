@@ -47,7 +47,7 @@ BUILD_MANIFEST = ".loop-pi-build.json"
 HOME_MANIFEST = ".loop-pi-managed.json"
 # Root-only extensions, loaded by launcher flags, never by settings packages.
 ROOT_EXTENSIONS = ("loop-guard/root.ts", "loop-wait/root.ts", "loop-continuation/index.ts", "loop-state/index.ts",
-                   "lane-worktrees/index.ts", "call-timing/index.ts")
+                   "lane-worktrees/index.ts", "call-timing/index.ts", "loop-status/index.ts")
 # The dispatcher host loads only its own entry: it registers the lane children itself and answers
 # pi-subagents' completion turns with an in-process idle model (extensions/dispatcher).
 DISPATCH_EXTENSIONS = ("dispatcher/index.ts",)

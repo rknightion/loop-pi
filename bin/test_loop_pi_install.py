@@ -294,6 +294,24 @@ class InstallerTests(unittest.TestCase):
                                {"label": "x", "missing_extensions": []}, "loop-pi", "loop-pi-install")
         self.assertIn(f"--extension '{prefix}/extensions/{entry}'", text)
 
+    def test_loop_status_is_root_only_so_lanes_and_the_dispatcher_set_no_status(self):
+        entry = "loop-status/index.ts"
+        self.assertIn(entry, m.ROOT_EXTENSIONS)
+        self.assertNotIn(entry, m.LANE_EXTENSIONS)
+        self.assertNotIn(entry, m.DISPATCH_EXTENSIONS)
+        prefix = fake_prefix(self.tmp)
+        self.assertEqual(m.missing_extensions(prefix).count(entry), 1)
+        manifest = {"label": "x", "missing_extensions": []}
+        root = m.launcher_text(prefix, self.tmp / "h", "/usr/bin/node", manifest, "loop-pi", "loop-pi-install")
+        dispatcher = m.dispatch_launcher_text(prefix, self.tmp / "h", "/usr/bin/node", manifest, "loop-pi-dispatch",
+                                              "loop-pi-install")
+        flag = f"--extension '{prefix}/extensions/{entry}'"
+        self.assertIn(flag, root)
+        self.assertNotIn(flag, dispatcher)
+        rels = {rel for rel, _ in m.source_files()}
+        self.assertIn(f"extensions/{entry}", rels)
+        self.assertFalse(any(rel.startswith("extensions/loop-status/") and "test" in rel.rsplit("/", 1)[1] for rel in rels))
+
     def test_ops_probe_is_in_the_installed_agent_set(self):
         self.assertIn("ops-probe", m.AGENT_SET)
         prefix = fake_prefix(self.tmp)
