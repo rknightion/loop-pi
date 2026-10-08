@@ -184,6 +184,22 @@ from an extension, so the extension adds a wait in front of it.
 - pi's `auto_retry_start` event still reports only pi's own `delayMs`, and is emitted after the
   extension's wait.
 
+## Delivery after an operator abort
+
+loop-wait (root) holds `loop-watch` and `loop-wake` messages, queued or newly fired, once
+`agent_settled` reports `aborted: true`, so the root is not restarted by a wake the operator just
+stopped. The held messages are persisted in the `loop-wait-state` snapshot (`heldMessages`) for as
+long as the hold lasts, survive shutdown and reload, and are restored still held at `session_start`,
+before timers and watchers are reconciled. They are dropped from the snapshot once delivered.
+
+- The hold ends at the `agent_settled` that the owner's next input produces: an `input` event whose
+  `source` is not `extension` marks it pending, and input alone sends nothing. If that settle is
+  itself an abort, the hold continues.
+- An abort preceded by `loop-recovery:request-timeout` (emitted by the request ceiling just before
+  `ctx.abort()`, see "Request ceiling") is not the operator's and is not held; its incident
+  follow-up and any fired wakes go out as before. The flag covers one abort and resets at
+  `agent_start`, `agent_settled` and `session_start`.
+
 ## Test harness
 
 - Tests live beside the code as `*.test.ts`, run with `node --test` from the repository root (Node 26 strips
@@ -212,6 +228,10 @@ before any `await`. A missing reply means the provider extension is not loaded; 
   - loop-continuation answers from its frozen launch state. `ops` is the parsed ops file read and
     hash-checked once at launch detection; a missing, mismatched or invalid file gives `ops: null`
     and an `incidents/ops/` record. Later edits to the file are ignored.
+  - The reply may also carry `concurrency: number`, the goal's `## Run` `concurrency:` value: a bare
+    positive integer (digits only), frozen at arm and restored with the continuation state on a
+    resumed session. The key is absent, not null, when no launch is armed or the value is missing or
+    malformed. Consumers treat it as optional.
 - `loop-guard` needs "is any async subagent run active" for its root rule. It owns detecting that
   (pi-subagents public API if one exists, else tracking `subagent` results and `subagent-notify`
   messages). No other extension provides it.
@@ -277,6 +297,23 @@ before any `await`. A missing reply means the provider extension is not loaded; 
   outcome from hiding unfinished work, but replayed returns never replace a live successor's state.
   Stale `landed: true` claims remain attached to the task of their own dispatch and constrain admission
   without terminating a live successor. The older landed-claim safety contract below is unchanged.
+- Block-only repair output (`loop-state/repair.ts`): the recovery resume names its own file,
+  `output: <run dir>/return-repairs/r-<32 hex>/block.md` with `outputMode: file-only`, so the
+  package never overwrites the lane's bound report with the block. The root extension creates the
+  directory (0700, exclusive; run dir and `return-repairs/` must be owned by this user and not group
+  or world writable) and records the binding before the resume is requested; the package writes the
+  file. The `loop-state-return-recovery` entry carries `repair: {binding: {root, output},
+  original?: {path, bytes, sha256}}`, and its `done` entry adds `repaired: {path, bytes, sha256}`
+  and `originalIntact` (the original output still matches its recorded identity).
+  - Only the bound file supplies the repair's block: inline text and paths named by the completion
+    are never trusted, a completion naming a different output file is refused, and the file must be
+    a plain single-link UTF-8 file of at most 1 MiB, opened without following links.
+  - A bound repair is accepted only from a completion whose `sessionId` is this session's, or from
+    the resumed run's package `status.json` showing a terminal state for this session. Otherwise the
+    completion is ignored and the recovery stays pending.
+  - A restarted root uses the recorded binding, not its own new run dir. A binding is valid only
+    with the exact allocated layout under a `root` that is still its own realpath. With no run dir
+    (`LOOP_PI_RUN_DIR`) no resume is requested and the return is recorded failed.
   The dispatcher retains immediate failed behavior. `loop-state` folds a `gate-runner` dispatch into
   a live lane only, never a task.
 - Root extensions also include `loop-state/index.ts`: it appends `dispatch` and `return` to
@@ -491,6 +528,35 @@ paths are exact, bash write detection is best-effort.
   disposition. No automatic root decision producer or durable cleanup caller is enabled:
   missing decisions conservatively retain copies indefinitely. This does not retain workflows
   or multi-agent launches, restore already-pruned bytes, or change retained-worktree release.
+- **Scratch register and teardown** (`lane-worktrees/teardown.ts`, root only): tool
+  `scratch_register(path, kind: worktree|gate|cache, keep?, disposable?)` records a scratch path the
+  root created. The path must exist and is canonicalised with the native realpath. Refused: `/`; a
+  path containing home, the agent dir, the session cwd or the run dir; anything inside the run dir
+  (also checked by dev/ino ancestry); a main working tree or standalone repository; a plain
+  directory inside a git dir or holding tracked files. A path with a `.git` pointer file, or
+  `kind: worktree`, is recorded as a linked worktree (with its common dir), anything else as a
+  plain dir; `disposable` applies only to a plain dir. Registering again changes `keep` or
+  `disposable`.
+  - Ledger `<run dir>/scratch-ledger.jsonl`: append-only, fsynced, opened without following links,
+    one line per registration `{v: 1, at, path, kind, type: "worktree"|"dir", keep, disposable,
+    dev, ino, commonDir?}`. The last registration of a path wins. A malformed line is ignored with a
+    receipt warning; an unreadable ledger removes nothing.
+  - Teardown runs on `loop-closeout` after the unchanged lane-worktrees sweep, and the closeout line
+    gains `; teardown removed N, kept M, absent K (receipt <path>)`. Ledger entries are decided
+    deepest first, and a path holding another registered or lane-worktrees path that is not removed
+    is kept. A registered worktree is removed only when it is still the registered directory
+    (dev/ino, no link) of the same repository, not locked, `git status --porcelain
+    --untracked-files=all` is empty, it holds no ignored content outside `node_modules` (else kept
+    with `ignored content present` and up to 20 paths in `ignored`), and HEAD is an ancestor of
+    `refs/remotes/origin/HEAD` (unset: kept). It is rechecked, then removed with `git --git-dir
+    <common> worktree remove <path>`, never `--force`. A plain dir is removed only when registered
+    `disposable: true` without `keep`: renamed aside, proved to be the registered directory with no
+    `.git` and no other filesystem beneath, then removed; on a mismatch it is renamed back.
+  - Receipt `<run dir>/teardown.json`: `{v: 1, at, runDir, ledger, counts: {removed, kept,
+    absent}, entries: [{path, source: ledger|lane-worktrees|discovered, kind?, outcome:
+    removed|kept|absent, reason, ignored?}], warnings}`, written through a temp file and rename and
+    rewritten at each closeout. Linked worktrees of the registered repositories and the session
+    repository that nobody registered are listed with source `discovered` and never touched.
 - **loop-guard, root**: refuses `loop-state` with `--by ext|daemon|dispatcher`, a `by=` field other
   than `root`, `--run-dir`, a stdin `by` field or an `append` event on stdin from a file (`< file`),
   edit/write into the run dir, `~/repos/agent-docs/authority/` or the planner's
@@ -541,3 +607,23 @@ The frozen version-1 state-log bodies are `watch {op: "start" | "stop", what: st
 - `loop-state check` accepts new and old logs. Digests preserve legacy task/lane classification and expose new watch/heartbeat information only in logs that have these events; old digest output stays unchanged.
 
 The protocol event table is owned by the protocol source. No authority fences, budgets, pins, model selection or dispatcher behavior are changed.
+
+## Loop status line
+
+`extensions/loop-status/` is a root-only extension (listed in the installer's root extension set
+only; lanes and the dispatcher never load it). It is the sole owner of the status key `loop-status`,
+set with `ctx.ui.setStatus`; it sets no widget and clears the key at `session_shutdown`.
+
+- It reads, and writes nothing to, existing seams: `loop-wait:query-timers` and
+  `loop-wait:query-watchers` (the optional `deadline` of each watcher; no reply shows `timers ?` or
+  `watchers ?`), the latest `loop-continuation-state` entry's `nudgeCount` against `MAX_NUDGES`, this
+  session's live async runs (`subagent:async-started` / `subagent:async-complete`, counted the way
+  loop-continuation counts them), and the newest `heartbeat` row in the tail of the loop-state log
+  beside the launch report. The report path, and `concurrency` for the slot cap, come from
+  `loop-continuation:query-launch` once per launch.
+- There is no timer. The line is rebuilt, coalesced to one microtask, on `subagent:async-started`,
+  `subagent:async-complete`, `session_start`, `agent_start`, `agent_settled` and
+  `tool_execution_end`, so heartbeat age and nudge count are as of that rebuild. Nothing is set
+  without a UI.
+- Format: `loop: <N>/<cap> lanes (or <N> lane(s) when no cap) · <N> timers · <N> watchers · next
+  HH:MM (earliest timer or watcher deadline, if any) · nudge <n>/<max> · hb <age> ago (or hb -)`.

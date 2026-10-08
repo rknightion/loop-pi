@@ -15,6 +15,10 @@ instructions mention Codex- or Claude-only tools, use the pi equivalent.
 - Dispatch: launch each lane as its own async `subagent` call with `{agent, task}`. That is the
   operator-authorised protocol here. Never launch a workflow (the `workflow` field, or the older
   `workflowScript` / `workflowScriptPath`); pi-subagents' "exactly one top-level workflow call" guidance does not apply in this home.
+- Scratch paths: call `scratch_register(path, kind, keep?, disposable?)` for every scratch worktree,
+  gate dir and cache dir you create (`keep` for what a later loop needs, `disposable` for throwaway
+  dirs). Closeout removes only registered clean landed worktrees and disposable dirs and lists the
+  rest in `<run dir>/teardown.json`.
 - `loop-guard` blocks plainly typed mistakes; it is not a security boundary. The closeout audit is
   the evidence that no ungranted remote change happened.
 - This home's runtime is owned by `loop-pi-install`. Never edit its generated files, `auth.json` or
