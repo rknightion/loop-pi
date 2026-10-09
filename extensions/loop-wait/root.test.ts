@@ -111,7 +111,7 @@ async function loadRootWithFakePi(): Promise<{
     events: {
       on: (name: string, handler: (data: unknown) => void) => busHandlers.set(name, handler),
       emit: (name: string, request: { event: typeof stateEvents[number]; reply: (r: Promise<boolean>) => void }) => {
-        if (name !== "loop-wait:state-event") return;
+        if (name !== "loop-wait:state-event") { busHandlers.get(name)?.(request); return; }
         stateEvents.push(request.event);
         request.reply(Promise.resolve(true));
       },
@@ -738,5 +738,25 @@ test("root.ts: a wake held after Esc survives a session restart and is delivered
     assert.equal(third.sent.length, 0, "delivered wakes are not replayed");
     await second.lifecycle.get("session_shutdown")!(undefined, ctx2);
     await third.lifecycle.get("session_shutdown")!(undefined, ctx3);
+  });
+});
+
+
+test("root.ts: recovery refusal retains fired notices without starting a turn", async () => {
+  await withFakeAgentDir(async (agentDir) => {
+    const { tools, lifecycle, sent, busHandlers } = await loadRootWithFakePi();
+    const idleBox = { idle: true };
+    const ctx = fakeCtx(agentDir, idleBox);
+    lifecycle.get("session_start")!(undefined, ctx);
+    busHandlers.set("loop-recovery:may-follow-up", (value) => (value as { reply(allowed: boolean): void }).reply(false));
+    try {
+      await tools.get("wake_at")!.execute("denied", { at: new Date(Date.now() + 30).toISOString(), reason: "retained-after-refusal" }, undefined, undefined, ctx);
+      await delay(400);
+      assert.equal(sent.length, 1);
+      assert.equal(sent[0].options.triggerTurn, false);
+      assert.match(sent[0].message.content, /retained-after-refusal/);
+    } finally {
+      await lifecycle.get("session_shutdown")!(undefined, ctx);
+    }
   });
 });

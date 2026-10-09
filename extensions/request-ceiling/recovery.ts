@@ -1,5 +1,6 @@
 // Supported lifecycle adapter: one pi retry machine, content-free recovery metadata.
 import { randomUUID } from "node:crypto";
+import { isRetryableAssistantError } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export const RECOVERY_STOP = "loop-pi recovery required; automatic continuation declined";
@@ -28,10 +29,22 @@ export function httpProxyError(message?: string): ProxyError | undefined {
 export function portableRequest(payload: unknown): boolean {
   if (!payload || typeof payload !== "object") return false;
   const p = payload as Record<string, unknown>;
-  if (p.previous_response_id != null || !Array.isArray(p.input)) return false;
+  if (p.previous_response_id != null || p.conversation != null || !Array.isArray(p.input)) return false;
+  const inputTypes = new Set(["message", "reasoning", "function_call", "custom_tool_call", "function_call_output", "custom_tool_call_output"]);
+  if (p.input.some((item) => !item || typeof item !== "object" || (item.type !== undefined ? !inputTypes.has(item.type) : !["user", "assistant", "system", "developer"].includes(item.role)))) return false;
   if (Array.isArray(p.tools) && p.tools.some((tool) => !tool || typeof tool !== "object" || !["function", "custom"].includes(tool.type))) return false;
-  const calls = new Set(p.input.filter((item) => item?.type === "function_call" || item?.type === "custom_tool_call").map((item) => item.call_id));
-  if (p.input.some((item) => (item?.type === "function_call_output" || item?.type === "custom_tool_call_output") && !calls.has(item.call_id))) return false;
+  const calls = new Map<string, string>();
+  const completed = new Set<string>();
+  for (const item of p.input) {
+    if (["function_call", "custom_tool_call"].includes(item.type)) {
+      if (typeof item.call_id !== "string" || !item.call_id || calls.has(item.call_id)) return false;
+      calls.set(item.call_id, item.type);
+    } else if (["function_call_output", "custom_tool_call_output"].includes(item.type)) {
+      if (typeof item.call_id !== "string" || calls.get(item.call_id) + "_output" !== item.type || completed.has(item.call_id)) return false;
+      completed.add(item.call_id);
+    }
+  }
+  if (calls.size !== completed.size) return false;
   const pending: unknown[] = [p.input];
   while (pending.length) {
     const value: unknown = pending.pop();
@@ -63,8 +76,13 @@ export function installRecovery(pi: ExtensionAPI, loadSettings: () => unknown): 
   let output = false;
   let error: ProxyError | undefined;
   let attemptId: string | undefined;
+  let responses = false;
+  let toolsExecuted = false;
+  let unsafeOutput = false;
+  let stopReason: string | undefined;
+  let stopNotified = false;
   const clearTimer = () => { if (timer) clearTimeout(timer); timer = undefined; };
-  const reset = () => { clearTimer(); deadline = undefined; expired = false; notified = false; halted = false; active = false; };
+  const reset = () => { clearTimer(); deadline = undefined; expired = false; notified = false; halted = false; active = false; stopReason = undefined; stopNotified = false; };
   const abortRecovery = (ctx: { abort(): void }) => {
     // Synchronous attribution before abort: loop-wait must not mistake this for operator Esc.
     pi.events.emit("loop-recovery:abort", {});
@@ -81,14 +99,26 @@ export function installRecovery(pi: ExtensionAPI, loadSettings: () => unknown): 
     if (Date.now() >= deadline) expire();
     else { timer = setTimeout(expire, deadline - Date.now()); timer.unref?.(); }
   };
+  const notifyExhausted = () => {
+    if (!expired || notified) return;
+    notified = true;
+    pi.sendMessage({ customType: "loop-recovery-exhausted", content: EPISODE_STOP,
+      display: true, details: { episodeMs: recoveryConfig(loadSettings()).episodeMs } }, { triggerTurn: false });
+  };
+  const mayContinue = () => {
+    if (deadline !== undefined && Date.now() >= deadline) expired = true;
+    if (!active) notifyExhausted();
+    return !opted || (!expired && !halted);
+  };
   pi.events.on("loop-recovery:may-follow-up", (value: unknown) => {
-    (value as { reply(allowed: boolean): void }).reply(!opted || (!expired && !halted));
+    (value as { reply(allowed: boolean): void }).reply(mayContinue());
   });
   pi.on("model_select", () => { reset(); opted = false; });
   pi.events.on("loop-recovery:request-timeout", () => { if (active) timedOut = true; });
   pi.on("session_start", reset);
   pi.on("session_shutdown", reset);
   pi.on("input", (event) => {
+    if (event.source === "extension" && !mayContinue()) return { action: "handled" as const };
     // Input may be queued while a request or retry is active. Only an idle
     // genuine user turn resets the episode; queued input cannot extend it.
     if (event.source !== "extension" && !active) reset();
@@ -100,6 +130,7 @@ export function installRecovery(pi: ExtensionAPI, loadSettings: () => unknown): 
     startedAt = Date.now();
     opted = recoveryConfig(loadSettings()).providerIds.includes(ctx.model?.provider ?? "");
     timedOut = false; portable = false; output = false; error = undefined; attemptId = undefined;
+    responses = ctx.model?.api === "openai-responses"; toolsExecuted = false; unsafeOutput = false;
     if (opted && halted) abortRecovery(ctx);
     else if (opted) arm(ctx);
   });
@@ -114,9 +145,12 @@ export function installRecovery(pi: ExtensionAPI, loadSettings: () => unknown): 
     if (expired || (deadline !== undefined && Date.now() >= deadline)) { expired = true; abortRecovery(ctx); }
     if (opted) portable = portableRequest(event.payload);
   });
+  pi.on("tool_execution_start", () => { if (active) toolsExecuted = true; });
   pi.on("provider_stream_event", (event) => {
     if (!active || !opted) return;
-    const data = event.data as { type?: string; error?: unknown; response?: { error?: unknown } };
+    const data = event.data as { type?: string; item?: { type?: string }; error?: unknown; response?: { error?: unknown; output?: { type?: string }[] } };
+    const items = [...(data?.item ? [data.item] : []), ...(Array.isArray(data?.response?.output) ? data.response.output : [])];
+    if (items.some((item) => !item || !["message", "reasoning", "function_call", "custom_tool_call"].includes(item.type ?? ""))) unsafeOutput = true;
     if (data?.type === "response.failed") error = proxyError(data.response?.error);
     else if (data?.type === "error") error = proxyError(data.error ?? data);
     else if (data?.type?.includes("output_item") || data?.type?.endsWith(".delta")) output = true;
@@ -138,22 +172,44 @@ export function installRecovery(pi: ExtensionAPI, loadSettings: () => unknown): 
     if (!opted) return;
     error ??= httpProxyError(message.errorMessage);
     output ||= message.content.some((block) => block.type === "toolCall" || (block.type === "text" && block.text.length > 0) || (block.type === "thinking" && block.thinking.length > 0));
-    const denied = failed && (expired || ((message.stopReason === "error" || timedOut) && (output || !portable || (error !== undefined && !safeProxyRetry(error)))));
-    if (denied) halted = true;
-    const allowed = message.stopReason === "error" && !denied && safeProxyRetry(error);
+    // The pinned Responses agent loop never executes local tool calls from an errored
+    // assistant. Native retry omits that attempt, preserving earlier completed tool results.
+    const localReplay = responses && portable && !toolsExecuted && !unsafeOutput;
+    const interrupted = error?.code === "stream_incomplete" && error.type === "server_error"
+      && (error.status === undefined || (error.status >= 500 && error.status <= 504));
+    const retryable = safeProxyRetry(error) || (localReplay && interrupted);
+    let reason: string | undefined;
+    if (failed && expired) reason = "episode-expired";
+    else if (failed && (message.stopReason === "error" || timedOut)) {
+      if (!portable) reason = "protected-request";
+      else if (toolsExecuted) reason = "tool-execution-observed";
+      else if (unsafeOutput) reason = "hosted-or-unknown-output";
+      else if (output && !(localReplay && interrupted)) reason = "partial-output-not-replayable";
+      else if (error !== undefined && !retryable) reason = "non-retryable-upstream";
+      else if (error === undefined && !timedOut && !isRetryableAssistantError(message)) reason = "unclassified-failure";
+    }
+    const denied = reason !== undefined;
+    if (denied) { halted = true; stopReason ??= reason; }
+    const allowed = message.stopReason === "error" && !denied && retryable;
+    const retryReason = localReplay && interrupted ? "interrupted-local-response" : "unstarted-request";
+    const explanation = `${RECOVERY_STOP} (${stopReason ?? reason}). Inspect saved work, then send a new message to resume.`;
     return { message: {
       ...message,
-      ...(denied ? { stopReason: "error" as const, errorMessage: expired ? EPISODE_STOP : RECOVERY_STOP } : {}),
-      ...(allowed ? { errorMessage: `server error: ${error!.code}; safe unstarted request may retry` } : {}),
-      loopPiRecovery: { attemptId: attemptId ?? null, code: error?.code ?? null, status: error?.status ?? null, disposition: denied ? "stop" : allowed ? "retry" : "unchanged" },
+      ...(denied ? { stopReason: "error" as const, errorMessage: expired ? EPISODE_STOP : explanation } : {}),
+      ...(allowed ? { errorMessage: `server error: ${error!.code}; ${retryReason}; retrying from completed history` } : {}),
+      loopPiRecovery: { attemptId: attemptId ?? null, code: error?.code ?? null, status: error?.status ?? null, disposition: denied ? "stop" : allowed ? "retry" : "unchanged",
+        reason: denied ? (stopReason ?? reason) : allowed ? retryReason : null,
+        outputObserved: output, requestPortable: portable, toolsExecuted },
     } };
   });
   pi.on("agent_settled", () => {
     active = false; clearTimer();
-    if (expired && !notified) {
-      notified = true;
-      pi.sendMessage({ customType: "loop-recovery-exhausted", content: EPISODE_STOP,
-        display: true, details: { episodeMs: recoveryConfig(loadSettings()).episodeMs } }, { triggerTurn: false });
+    if (halted && !expired && !stopNotified) {
+      stopNotified = true;
+      pi.sendMessage({ customType: "loop-recovery-required",
+        content: `${RECOVERY_STOP} (${stopReason}). Child updates are retained. Inspect saved work, then send a new message to resume.`,
+        display: true, details: { reason: stopReason } }, { triggerTurn: false });
     }
+    notifyExhausted();
   });
 }

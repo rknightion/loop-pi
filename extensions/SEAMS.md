@@ -168,9 +168,13 @@ assistant completion or genuine interactive/RPC input received while idle resets
 cannot reset or extend an active episode. Compaction and extension
 follow-ups do not. Settlement disarms the active timer but retains its deadline; expiry
 aborts active work and refuses synthetic restart, without starting a replacement turn.
-A denied partial/protected attempt latches recovery off until idle genuine input or session/model
+A denied protected or ambiguous attempt latches recovery off until idle genuine input or session/model
 reset. `loop-recovery:may-follow-up` synchronously gates the per-request ceiling's synthetic
 continuation; a timeout never authorizes replay after output or with protected context.
+While halted or expired, extension-sourced input is handled without starting a model turn.
+Child notices already appended to the transcript remain available. The loop-wait delivery adapter
+uses the same synchronous query to append fired notices without triggering a refused turn.
+An ordinary user input while idle still resets recovery; automatic input cannot reset its budget.
 Changing providers disposes the previous episode. Ordinary user abort preserves its outcome.
 The request-ceiling recovery controller synchronously emits `loop-recovery:abort` with `{}`
 before calling `ctx.abort()` for episode expiry or halted recovery. This attributes the abort
@@ -182,8 +186,25 @@ a visible `loop-recovery-exhausted` message with `triggerTurn: false`.
 Only explicitly configured provider ids receive structured proxy classification and unique
 `x-client-request-id` headers. Stable session affinity is unchanged. Classification observes
 parsed provider errors before normalization; bounded status/code metadata is retained on the
-assistant message. Only portable originally unanchored requests with no observed output may
-receive the narrow transient allowlist. Protected requests and partial-output failures stop.
+assistant message, together with bounded `reason`, `outputObserved`, `requestPortable` and
+`toolsExecuted` fields. Stop messages name the reason and ask the operator to inspect saved work
+before resuming; one non-triggering `loop-recovery-required` notice surfaces the stop.
+
+For the pinned pi Responses runtime, a failed assistant response exits the agent loop before
+local tool execution. Native retry omits only that failed attempt from model projection; earlier
+completed tool calls and results remain. Therefore portable, originally unanchored Responses
+requests with only local function/custom tools may retry a structured server `stream_incomplete`
+even after partial text, reasoning or tool-call output. No local tool may have started in that
+request, and observed hosted/unknown output items refuse replay. Input with unresolved or duplicate tool
+calls/results, hosted items, bound files or explicit anchors is protected. Unknown structured errors,
+authentication errors, unclassified nonretryable failures and explicit continuity refusals stop.
+No-output errors recognized by pi as transient retain native retry behavior. Ordinary cancellation and partial
+request-ceiling timeouts are not converted into retryable upstream errors. Native retry/backoff
+and the same episode deadline govern every retry; no synthetic user resume resets that deadline.
+This is broader transient recovery, not an exactly-once guarantee for upstream hosted operations
+or external work whose execution cannot be established. The portability check observes the
+request-ceiling payload hook; shipped extensions do not subsequently replace it with bound or
+hosted state. Arbitrary later payload-mutating extensions require their own compatibility proof.
 The pi 1.1.0 retry API accepts text only: allowlisted server failures are normalized to the
 standard `server error` wording at message_end; denied failures use a nonretryable explanation.
 This is an adapter to pi's classifier, not a new retry loop. Header ids describe provider

@@ -6,10 +6,11 @@ function harness() {
   const handlers = new Map<string, Function[]>();
   let aborted = 0;
   const sequence: string[] = [];
+  const notices: any[] = [];
   const ctx = { model: { provider: "fixture" }, abort() { sequence.push("abort"); aborted++; } };
-  installRecovery({ events: { on() {}, emit(name: string) { sequence.push(name); } }, sendMessage() {}, on(name: string, fn: Function) { handlers.set(name, [...(handlers.get(name) ?? []), fn]); } } as any, () => ({ loopPi: { retryRecovery: { episodeMs: 30, providerIds: ["fixture"] } } }));
+  installRecovery({ events: { on() {}, emit(name: string) { sequence.push(name); } }, sendMessage(message: unknown) { notices.push(message); }, on(name: string, fn: Function) { handlers.set(name, [...(handlers.get(name) ?? []), fn]); } } as any, () => ({ loopPi: { retryRecovery: { episodeMs: 30, providerIds: ["fixture"] } } }));
   const emit = (name: string, event: any = {}) => handlers.get(name)?.map((fn) => fn(event, ctx)).at(-1);
-  return { emit, ctx, sequence, get aborted() { return aborted; } };
+  return { emit, ctx, sequence, notices, get aborted() { return aborted; } };
 }
 test("recovery abort attribution precedes timer, expired-turn, request-check and halted aborts", (t) => {
   t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
@@ -101,5 +102,50 @@ test("queued input preserves an existing recovery deadline", (t) => {
   h.emit("input", { source: "rpc" });
   t.mock.timers.tick(20);
   assert.equal(h.aborted, 1, "queued input must not extend the active episode");
+  h.emit("session_shutdown");
+});
+
+test("halted recovery absorbs extension input and reports why while genuine input can resume", () => {
+  const h = harness();
+  h.emit("turn_start");
+  h.emit("before_provider_request", { payload: { input: [], previous_response_id: "bound" } });
+  const result = h.emit("message_end", failure);
+  assert.equal(result.message.loopPiRecovery.reason, "protected-request");
+  assert.match(result.message.errorMessage, /protected-request/);
+  h.emit("agent_settled");
+  assert.deepEqual(h.emit("input", { source: "extension", text: "Subagent updates above." }), { action: "handled" });
+  h.emit("input", { source: "rpc" });
+  assert.equal(h.emit("input", { source: "extension" }), undefined);
+  h.emit("session_shutdown");
+});
+
+
+test("portable history requires unique completed tool pairs and rejects hosted history", () => {
+  const call = { type: "function_call", call_id: "call_one", name: "local", arguments: "{}" };
+  const result = { type: "function_call_output", call_id: "call_one", output: "done" };
+  assert.equal(portableRequest({ input: [call, result] }), true);
+  assert.equal(portableRequest({ input: [call] }), false);
+  assert.equal(portableRequest({ input: [call, call, result] }), false);
+  assert.equal(portableRequest({ input: [{ ...call, call_id: undefined }, { ...result, call_id: undefined }] }), false);
+  assert.equal(portableRequest({ input: [{ type: "web_search_call" }] }), false);
+});
+
+
+test("unclassified nonretryable failure halts automatic wakes without changing user cancellation", () => {
+  const h = harness(); h.emit("turn_start"); h.emit("before_provider_request", { payload: { input: [] } });
+  const result = h.emit("message_end", { message: { role: "assistant", stopReason: "error", content: [], errorMessage: "inference refused" } });
+  assert.equal(result.message.loopPiRecovery.disposition, "stop");
+  h.emit("agent_settled");
+  assert.deepEqual(h.emit("input", { source: "extension" }), { action: "handled" });
+  h.emit("session_shutdown");
+});
+
+test("an idle episode crossing its deadline emits exhaustion once when a wake arrives", (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
+  const h = harness(); h.emit("turn_start"); h.emit("before_provider_request", { payload: { input: [] } });
+  h.emit("message_end", failure); h.emit("agent_settled");
+  t.mock.timers.tick(31);
+  h.emit("input", { source: "extension" }); h.emit("input", { source: "extension" });
+  assert.equal(h.notices.filter((m) => m.customType === "loop-recovery-exhausted").length, 1);
   h.emit("session_shutdown");
 });

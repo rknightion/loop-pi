@@ -45,3 +45,11 @@ path. `bin/leak-scan` enforces that against two lists: the committed generic sha
   change: say so in the commit and update the fixture's expectation deliberately.
 - The pi and pi-subagents versions are pinned exactly in `package.json`. A bump is its own change,
   with the full test run and a note of what the extension API changed.
+
+## Recovery changes
+
+Recovery depends on the pinned agent loop refusing to execute tools from failed assistant
+responses and native retry preserving earlier completed history. Exercise the real Responses
+stream and a side-effecting local tool when changing this boundary; helper-only classification
+checks do not establish it. Hosted tools, protected history and operator cancellation remain
+separate boundaries. Automatic wakes must preserve notices without resetting the outage budget.

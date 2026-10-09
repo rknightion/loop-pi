@@ -535,7 +535,11 @@ export default function (pi: ExtensionAPI): void {
       // every message but the last (see core.ts DeliveryQueue.flush): pi's sendMessage appends a
       // triggerTurn:false message to context immediately while idle, and the final triggerTurn:true
       // message starts exactly one turn that sees the whole batch as context.
-      deliver: (message, opts) => pi.sendMessage(message, { triggerTurn: opts.triggerTurn }),
+      deliver: (message, opts) => {
+        let allowed = true;
+        pi.events.emit("loop-recovery:may-follow-up", { reply: (value: boolean) => { allowed = value; } });
+        pi.sendMessage(message, { triggerTurn: opts.triggerTurn && allowed });
+      },
     });
 
     // Reconstruct before callbacks can persist new state. Legacy entries have no outbox.
