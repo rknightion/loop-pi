@@ -33,12 +33,16 @@ public statement of those contracts.
   (pi-subagents at `<prefix>/node_modules/pi-subagents`). In the source checkout the same relative
   layout holds (`extensions`, `node_modules`). Resolve siblings with
   `new URL("./lane.ts", import.meta.url)`, never from `process.cwd()`.
+### Shared hook scripts
+
 - Home dir: `getAgentDir()` exported by `@earendil-works/pi-coding-agent` (honours
   `PI_CODING_AGENT_DIR`). Guard hook scripts: `<agentDir>/scripts/backlog-guard.py` and
   `<agentDir>/scripts/staging-guard.py`, each run only when present or listed in settings
   `loopPi.requiredHookScripts` (a required one that is absent is an adapter failure), run as `python3 <script>` with a Codex-format JSON payload on
   stdin (`{"hookEventName":"PreToolUse","toolName":...,"toolInput":{...},"cwd":...}`); a deny is
   exit 0 with `hookSpecificOutput.permissionDecision == "deny"` on stdout.
+### Child runtime
+
 - `PI_SUBAGENTS_TEMP_ROOT` is honoured by pi-subagents (`src/shared/types.js:103`).
 - pi-subagents child sessions are written under the parent's session dir:
   `<agentDir>/sessions/<cwd-slug>/<parent-session-basename>/<runId>/...`
@@ -80,6 +84,26 @@ public statement of those contracts.
   binding forgery, not foreground inheritance. Briefs must not treat the guard as enforcing
   a separate no-push right on a granted lane's foreground descendants.
   Installed homes adopt it only after a lock bump.
+
+## Role by entry point
+
+The model root loads `loop-guard/root.ts`; children receive `loop-guard/lane.ts` through
+required-child registration, including agents declaring `extensions: []`. The dispatcher uses
+`dispatcher/index.ts` without an LLM root, and registers the required lane extensions too.
+
+### Unverified
+
+This historical citation refers to the once-unverified shared module instance for
+`registerRequiredChildExtensions`. It is now verified by `loop-guard/e2e.test.ts` on a real
+pi process with the faux provider, as recorded under "Runtime facts"; it is not an open claim.
+
+## Root launcher route
+
+The installer's `DEFAULT_ROOT_ROUTE` is
+`{provider: "openai", model: "gpt-6.1-sol", thinking: "medium"}`. Settings
+`loopPi.rootRoute` override those defaults. The generated model-root launcher places caller
+arguments last, after its provider, model and thinking flags, so explicit caller flags win.
+This is the model-root route, not the dispatcher's in-process idle model.
 
 ## Recorded timing seam
 
@@ -148,6 +172,9 @@ A denied partial/protected attempt latches recovery off until idle genuine input
 reset. `loop-recovery:may-follow-up` synchronously gates the per-request ceiling's synthetic
 continuation; a timeout never authorizes replay after output or with protected context.
 Changing providers disposes the previous episode. Ordinary user abort preserves its outcome.
+The request-ceiling recovery controller synchronously emits `loop-recovery:abort` with `{}`
+before calling `ctx.abort()` for episode expiry or halted recovery. This attributes the abort
+without authorizing a replacement turn.
 The per-request ceiling emits `loop-recovery:request-timeout` before abort so its failure
 also starts the episode; ordinary user cancellation does not start one. Exhaustion posts
 a visible `loop-recovery-exhausted` message with `triggerTurn: false`.
@@ -195,10 +222,12 @@ before timers and watchers are reconciled. They are dropped from the snapshot on
 - The hold ends at the `agent_settled` that the owner's next input produces: an `input` event whose
   `source` is not `extension` marks it pending, and input alone sends nothing. If that settle is
   itself an abort, the hold continues.
-- An abort preceded by `loop-recovery:request-timeout` (emitted by the request ceiling just before
-  `ctx.abort()`, see "Request ceiling") is not the operator's and is not held; its incident
-  follow-up and any fired wakes go out as before. The flag covers one abort and resets at
-  `agent_start`, `agent_settled` and `session_start`.
+- An abort preceded by `loop-recovery:request-timeout` (see "Request ceiling") or
+  `loop-recovery:abort` (see "Retry recovery episode") is not the operator's and does not
+  establish a wake hold. loop-wait records an ephemeral, nonpersisted marker, consumed at exactly
+  one `agent_settled` (whether aborted or not), and reset at `agent_start` and `session_start`.
+  Fired wakes can therefore be delivered after a recovery abort; genuine operator Esc still
+  establishes the unchanged durable hold. An existing hold is not cleared merely by the marker.
 
 ## Test harness
 
@@ -476,6 +505,8 @@ paths are exact, bash write detection is best-effort.
   - Limit: an idle-wake notify (no root extension can rewrite it) holds one capped lane return in
     16 KB with its framing, but pi-subagents batches completions that finish together into one
     notify, which is stored at their sum. The `context` hook still caps what the model sees.
+### loop-closeout
+
 - **Closeout**: `/loop-closeout` (loop-wait) emits `pi.events.emit("loop-closeout", {lines, pending})`
   after its sweep; loop-continuation runs
   `loop-pi-audit closeout --run-dir <rd> [--grants <rd>/audit-grants.json --grants-sha256 <hex>] --push-log <rd>/push-log.jsonl`,
