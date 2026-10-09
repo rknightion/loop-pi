@@ -1,7 +1,8 @@
 // Supported lifecycle adapter: one pi retry machine, content-free recovery metadata.
 import { randomUUID } from "node:crypto";
-import { isRetryableAssistantError } from "@earendil-works/pi-ai";
+import { isContextOverflow, isRetryableAssistantError } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { EMPTY_LENGTH_ERROR } from "./core.ts";
 
 export const RECOVERY_STOP = "loop-pi recovery required; automatic continuation declined";
 export const EPISODE_STOP = "loop-pi recovery budget exhausted; start a new user turn to resume";
@@ -14,7 +15,7 @@ export function recoveryConfig(settings: unknown): RecoveryConfig {
   };
 }
 interface ProxyError { code: string; type?: string; message?: string; status?: number }
-const CODES = new Set(["stream_incomplete", "previous_response_owner_unavailable", "bridge_previous_response_not_found", "continuity_recovery_required", "native_websocket_backpressure", "invalid_api_key", "insufficient_quota"]);
+const CODES = new Set(["stream_incomplete", "previous_response_owner_unavailable", "bridge_previous_response_not_found", "continuity_recovery_required", "native_websocket_backpressure", "invalid_api_key", "insufficient_quota", "context_length_exceeded"]);
 function proxyError(value: unknown, status?: number): ProxyError | undefined {
   if (!value || typeof value !== "object") return;
   const e = value as Record<string, unknown>;
@@ -178,9 +179,14 @@ export function installRecovery(pi: ExtensionAPI, loadSettings: () => unknown): 
     const interrupted = error?.code === "stream_incomplete" && error.type === "server_error"
       && (error.status === undefined || (error.status >= 500 && error.status <= 504));
     const retryable = safeProxyRetry(error) || (localReplay && interrupted);
+    const nativeCompaction = localReplay && !output && message.stopReason === "error"
+      && isContextOverflow(message, ctx.model?.contextWindow);
+    const emptyCeiling = localReplay && message.errorMessage === EMPTY_LENGTH_ERROR
+      && !message.content.some((block) => block.type === "toolCall" || (block.type === "text" && block.text.length > 0));
+    const ownedRecovery = nativeCompaction || emptyCeiling;
     let reason: string | undefined;
     if (failed && expired) reason = "episode-expired";
-    else if (failed && (message.stopReason === "error" || timedOut)) {
+    else if (failed && !ownedRecovery && (message.stopReason === "error" || timedOut)) {
       if (!portable) reason = "protected-request";
       else if (toolsExecuted) reason = "tool-execution-observed";
       else if (unsafeOutput) reason = "hosted-or-unknown-output";
@@ -190,7 +196,7 @@ export function installRecovery(pi: ExtensionAPI, loadSettings: () => unknown): 
     }
     const denied = reason !== undefined;
     if (denied) { halted = true; stopReason ??= reason; }
-    const allowed = message.stopReason === "error" && !denied && retryable;
+    const allowed = message.stopReason === "error" && !denied && !ownedRecovery && retryable;
     const retryReason = localReplay && interrupted ? "interrupted-local-response" : "unstarted-request";
     const explanation = `${RECOVERY_STOP} (${stopReason ?? reason}). Inspect saved work, then send a new message to resume.`;
     return { message: {
@@ -198,7 +204,7 @@ export function installRecovery(pi: ExtensionAPI, loadSettings: () => unknown): 
       ...(denied ? { stopReason: "error" as const, errorMessage: expired ? EPISODE_STOP : explanation } : {}),
       ...(allowed ? { errorMessage: `server error: ${error!.code}; ${retryReason}; retrying from completed history` } : {}),
       loopPiRecovery: { attemptId: attemptId ?? null, code: error?.code ?? null, status: error?.status ?? null, disposition: denied ? "stop" : allowed ? "retry" : "unchanged",
-        reason: denied ? (stopReason ?? reason) : allowed ? retryReason : null,
+        reason: denied ? (stopReason ?? reason) : allowed ? retryReason : nativeCompaction ? "native-compaction" : emptyCeiling ? "bounded-empty-output" : null,
         outputObserved: output, requestPortable: portable, toolsExecuted },
     } };
   });

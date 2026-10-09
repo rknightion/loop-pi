@@ -7,7 +7,7 @@ function harness() {
   let aborted = 0;
   const sequence: string[] = [];
   const notices: any[] = [];
-  const ctx = { model: { provider: "fixture" }, abort() { sequence.push("abort"); aborted++; } };
+  const ctx = { model: { provider: "fixture", api: "openai-responses" }, abort() { sequence.push("abort"); aborted++; } };
   installRecovery({ events: { on() {}, emit(name: string) { sequence.push(name); } }, sendMessage(message: unknown) { notices.push(message); }, on(name: string, fn: Function) { handlers.set(name, [...(handlers.get(name) ?? []), fn]); } } as any, () => ({ loopPi: { retryRecovery: { episodeMs: 30, providerIds: ["fixture"] } } }));
   const emit = (name: string, event: any = {}) => handlers.get(name)?.map((fn) => fn(event, ctx)).at(-1);
   return { emit, ctx, sequence, notices, get aborted() { return aborted; } };
@@ -147,5 +147,27 @@ test("an idle episode crossing its deadline emits exhaustion once when a wake ar
   t.mock.timers.tick(31);
   h.emit("input", { source: "extension" }); h.emit("input", { source: "extension" });
   assert.equal(h.notices.filter((m) => m.customType === "loop-recovery-exhausted").length, 1);
+  h.emit("session_shutdown");
+});
+
+test("context overflow remains available to native compaction rather than halting recovery", () => {
+  const h = harness(); h.emit("turn_start"); h.emit("before_provider_request", { payload: { input: [] } });
+  const message = { role: "assistant", stopReason: "error", content: [], errorMessage: 'OpenAI API error (400): {"error":{"code":"context_length_exceeded","type":"invalid_request_error","message":"maximum context length exceeded"}}' };
+  const result = h.emit("message_end", { message });
+  assert.equal(result.message.errorMessage, message.errorMessage);
+  assert.equal(result.message.loopPiRecovery.disposition, "unchanged");
+  h.emit("agent_settled");
+  assert.equal(h.emit("input", { source: "extension" }), undefined);
+  h.emit("session_shutdown");
+});
+
+test("the request ceiling retains its bounded empty-output follow-up", async () => {
+  const { EMPTY_LENGTH_ERROR } = await import("./core.ts");
+  const h = harness(); h.emit("turn_start"); h.emit("before_provider_request", { payload: { input: [] } });
+  const result = h.emit("message_end", { message: { role: "assistant", stopReason: "error", content: [], errorMessage: EMPTY_LENGTH_ERROR } });
+  assert.equal(result.message.errorMessage, EMPTY_LENGTH_ERROR);
+  assert.equal(result.message.loopPiRecovery.disposition, "unchanged");
+  h.emit("agent_settled");
+  assert.equal(h.emit("input", { source: "extension" }), undefined);
   h.emit("session_shutdown");
 });

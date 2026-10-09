@@ -8,13 +8,17 @@ import { cleanupAll, freshDir, startPiRpc } from "../loop-guard/rpc-test-helpers
 const HERE = dirname(fileURLToPath(import.meta.url));
 after(cleanupAll);
 
-async function runScenario(kind: "anchor" | "partial" | "budget" | "active-budget" | "protected" | "http" | "synthetic" | "ceiling" | "partial-ceiling" | "tool" | "close" | "hosted" | "hosted-output" | "wakes", withWake = false) {
+async function runScenario(kind: "anchor" | "partial" | "budget" | "active-budget" | "protected" | "http" | "synthetic" | "ceiling" | "partial-ceiling" | "tool" | "close" | "hosted" | "hosted-output" | "wakes" | "overflow" | "empty-length", withWake = false) {
   const cwd = freshDir("recovery-work-");
   const seen: { headers: Record<string, unknown>; body: any }[] = [];
   const server = createServer(async (req, res) => {
     let body = ""; for await (const chunk of req) body += chunk;
     seen.push({ headers: req.headers, body: JSON.parse(body) });
     if ((kind === "active-budget" && seen.length === 2) || kind === "ceiling") { req.on("close", () => res.end()); return; }
+    if (kind === "overflow" && seen.length === 2) {
+      res.writeHead(400, {"content-type":"application/json"});
+      res.end(JSON.stringify({error:{code:"context_length_exceeded",type:"invalid_request_error",message:"Your input exceeds the context window of this model."}})); return;
+    }
     if (kind === "http" && seen.length === 1) {
       res.writeHead(502, {"content-type":"application/json"});
       res.end(JSON.stringify({error:{code:"previous_response_owner_unavailable",type:"server_error",message:"Previous response owner account is unavailable; retry later."}})); return;
@@ -22,7 +26,15 @@ async function runScenario(kind: "anchor" | "partial" | "budget" | "active-budge
     res.writeHead(200, { "content-type": "text/event-stream" });
     const send = (data: object) => res.write(`data: ${JSON.stringify(data)}\n\n`);
     send({ type: "response.created", response: { id: "resp_test", status: "in_progress", output: [] } });
-    if (kind === "tool" && seen.length <= 3) {
+    if (kind === "empty-length" && seen.length === 1) {
+      const item = { id: "reasoning_budget", type: "reasoning", summary: [{ type: "summary_text", text: "Still considering the task." }] };
+      send({ type: "response.output_item.added", output_index: 0, item: { ...item, summary: [] } });
+      send({ type: "response.reasoning_summary_text.delta", output_index: 0, item_id: item.id, summary_index: 0, delta: "Still considering the task." });
+      send({ type: "response.output_item.done", output_index: 0, item });
+      send({ type: "response.incomplete", response: { id: "resp_empty", status: "incomplete", incomplete_details: { reason: "max_output_tokens" }, output: [item], usage: { input_tokens: 1, output_tokens: 1000, total_tokens: 1001 } } });
+      res.end(); return;
+    }
+    if ((kind === "tool" && seen.length <= 3) || (kind === "overflow" && seen.length === 1)) {
       const label = seen.length === 1 ? "prior" : seen.length === 2 ? "failed" : "retry";
       const item = { id: `fc_${label}`, type: "function_call", call_id: `call_${label}`, name: "bash", arguments: JSON.stringify({ command: `printf '${label}\\n' >> executions.log` }) };
       send({ type: "response.output_item.added", output_index: 0, item: { ...item, arguments: "" } });
@@ -32,6 +44,12 @@ async function runScenario(kind: "anchor" | "partial" | "budget" | "active-budge
         send({ type: "response.completed", response: { id: `resp_${label}`, status: "completed", output: [item], usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } } });
         res.end(); return;
       }
+    }
+    if (kind === "overflow" && seen.length === 3) {
+      const item = {id:"msg_summary",type:"message",role:"assistant",content:[{type:"output_text",text:"The prior tool completed once. Continue the remaining work.",annotations:[]}]};
+      send({ type: "response.output_item.done", output_index: 0, item });
+      send({ type: "response.completed", response: { id: "resp_summary", status: "completed", output: [item], usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } } });
+      res.end(); return;
     }
     if ((kind === "partial" && seen.length === 1) || kind === "partial-ceiling") {
       send({ type: "response.output_item.added", output_index: 0, item: { id: "msg_test", type: "message", role: "assistant", content: [] } });
@@ -59,11 +77,17 @@ export default function(pi) {
   ${kind === "hosted" ? 'pi.on("before_provider_request", (e) => ({...e.payload, tools:[{type:"web_search_preview"}]}));' : ""}
   pi.registerProvider("fixture", {baseUrl:"http://127.0.0.1:${address.port}/v1",apiKey:"test",api:"openai-responses",models:[{id:"fixture",name:"Fixture",reasoning:false,input:["text"],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:100000,maxTokens:1000}]});
 }`);
-  writeFileSync(join(home, "settings.json"), JSON.stringify({ retry: { maxRetries: kind === "partial" ? 3 : 60, baseDelayMs: kind === "budget" ? 5000 : 200, maxAgentDelayMs: kind === "budget" ? 5000 : 200, provider: { maxRetries: 0 } }, loopPi: { retryRecovery: { episodeMs: kind === "budget" ? 1200 : kind === "synthetic" ? 120 : kind === "active-budget" ? 700 : ["ceiling", "partial-ceiling"].includes(kind) ? 1200 : 10000, providerIds: ["fixture"] }, requestCeiling: { wallClockMs: ["ceiling", "partial-ceiling"].includes(kind) ? 800 : 5000, maxFollowUps: ["ceiling", "partial-ceiling"].includes(kind) ? 2 : 0 } } }));
+  writeFileSync(join(home, "settings.json"), JSON.stringify({ ...(kind === "overflow" ? {compaction:{enabled:true,keepRecentTokens:1,reserveTokens:2000}} : {}), retry: { maxRetries: kind === "partial" ? 3 : 60, baseDelayMs: kind === "budget" ? 5000 : 200, maxAgentDelayMs: kind === "budget" ? 5000 : 200, provider: { maxRetries: 0 } }, loopPi: { retryRecovery: { episodeMs: kind === "budget" ? 1200 : kind === "synthetic" ? 120 : kind === "active-budget" ? 700 : ["ceiling", "partial-ceiling"].includes(kind) ? 1200 : 10000, providerIds: ["fixture"] }, requestCeiling: { wallClockMs: ["ceiling", "partial-ceiling"].includes(kind) ? 800 : 5000, maxFollowUps: ["ceiling", "partial-ceiling", "empty-length"].includes(kind) ? 2 : 0 } } }));
   const session = startPiRpc({ extensions: [fixture, ...(withWake ? [join(HERE, "..", "loop-wait", "root.ts")] : []), ...(process.env.RECOVERY_BASELINE ? [] : [join(HERE, "index.ts")])], extraArgs: ["--provider", "fixture", "--model", "fixture"], agentDir: home, subagentTempRoot: freshDir(), cwd, fauxScriptPath: "" });
   try {
     session.send({ type: "prompt", id: "go", message: "GO" });
     await session.waitFor((e) => e.type === "agent_settled", 15000);
+    if (kind === "empty-length") {
+      const incident = await session.waitFor((e) => e.type === "message_end" && (e.message as any)?.customType === "loop-request-incident", 5000);
+      if (!(incident.message as any).details.exhausted) {
+        await session.waitFor((e) => e.type === "agent_settled" && session.events.filter((x) => x.type === "agent_settled").length >= 2, 5000);
+      }
+    }
     if (withWake) {
       await session.waitFor((e) => e.type === "message_start" && (e.message as any)?.customType === "loop-wake", 5000);
     }
@@ -90,7 +114,7 @@ export default function(pi) {
       await session.waitFor((e) => e.type === "agent_settled" && session.events.filter((x) => x.type === "agent_settled").length > settled, 5000);
       return { seen, events: session.events, errorsBeforeResume, startsBeforeResume, retained };
     }
-    return { seen, events: session.events, executions: kind === "tool" ? readFileSync(join(cwd, "executions.log"), "utf8") : undefined };
+    return { seen, events: session.events, executions: ["tool", "overflow"].includes(kind) ? readFileSync(join(cwd, "executions.log"), "utf8") : undefined };
   } finally { await session.close(); await new Promise<void>((resolve) => server.close(() => resolve())); }
 }
 
@@ -198,4 +222,35 @@ test("real parent wakes retain notices silently while halted and a genuine user 
   assert.equal(seen.length, 2, "only the initial request and genuine resume reach the provider");
   const assistants = events.filter((e) => e.type === "message_end" && (e.message as any)?.role === "assistant");
   assert.equal((assistants.at(-1)?.message as any)?.stopReason, "stop");
+});
+
+
+test("real pi preserves native context-overflow compaction and resumes from its summary", { timeout: 20000 }, async () => {
+  const { seen, events, executions } = await runScenario("overflow");
+  const compacted = events.find((e) => e.type === "compaction_end" && e.reason === "overflow");
+  assert.ok(compacted, "context overflow must reach pi's native compaction path");
+  assert.equal(compacted.aborted, false);
+  assert.equal(compacted.willRetry, true);
+  assert.match((compacted.result as any)?.summary, /The prior tool completed once/);
+  assert.equal(seen.length, 4, "tool request, rejected continuation, summary, then resumed continuation");
+  assert.equal(executions, "prior\n", "compaction must not execute the completed tool again");
+  assert.match(JSON.stringify(seen[3].body.input), /The prior tool completed once/);
+  const assistants = events.filter((e) => e.type === "message_end" && (e.message as any)?.role === "assistant");
+  assert.equal((assistants.at(-1)?.message as any)?.stopReason, "stop");
+  assert.ok(!events.some((e) => e.type === "message_end" && (e.message as any)?.loopPiRecovery?.disposition === "stop"));
+});
+
+
+test("real pi preserves the bounded request-ceiling followup after reasoning exhausts the output budget", { timeout: 20000 }, async () => {
+  const { seen, events } = await runScenario("empty-length");
+  const firstAssistant = events.find((e) => e.type === "message_end" && (e.message as any)?.role === "assistant");
+  assert.ok((firstAssistant?.message as any)?.content.some((block: any) => block.type === "thinking" && block.thinking === "Still considering the task."));
+  assert.equal(seen.length, 2, "the output-budget incident must start its permitted followup");
+  const incidents = events.filter((e) => e.type === "message_end" && (e.message as any)?.customType === "loop-request-incident");
+  assert.equal(incidents.length, 1);
+  assert.equal((incidents[0].message as any).details.kind, "empty-length");
+  assert.equal((incidents[0].message as any).details.exhausted, false);
+  const assistants = events.filter((e) => e.type === "message_end" && (e.message as any)?.role === "assistant");
+  assert.equal((assistants.at(-1)?.message as any)?.stopReason, "stop");
+  assert.ok(!events.some((e) => e.type === "message_end" && (e.message as any)?.loopPiRecovery?.disposition === "stop"));
 });

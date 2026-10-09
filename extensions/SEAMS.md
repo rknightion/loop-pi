@@ -198,7 +198,11 @@ even after partial text, reasoning or tool-call output. No local tool may have s
 request, and observed hosted/unknown output items refuse replay. Input with unresolved or duplicate tool
 calls/results, hosted items, bound files or explicit anchors is protected. Unknown structured errors,
 authentication errors, unclassified nonretryable failures and explicit continuity refusals stop.
-No-output errors recognized by pi as transient retain native retry behavior. Ordinary cancellation and partial
+No-output errors recognized by pi as transient retain native retry behavior. For portable Responses requests without output, context-window
+overflow remains unchanged for native compaction, without latching recovery off or resetting
+the episode; an expired episode still stops it. The request ceiling also retains its existing
+bounded follow-up for an empty answer (including reasoning-only output), only with portable
+local-tool context and no text or tool calls. Neither controller restarts the recovery budget. Ordinary cancellation and partial
 request-ceiling timeouts are not converted into retryable upstream errors. Native retry/backoff
 and the same episode deadline govern every retry; no synthetic user resume resets that deadline.
 This is broader transient recovery, not an exactly-once guarantee for upstream hosted operations
