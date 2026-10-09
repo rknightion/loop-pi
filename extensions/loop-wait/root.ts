@@ -97,7 +97,7 @@ export default function (pi: ExtensionAPI): void {
   let ownerInputPending = false;
   // True from the start of a hold until its messages are delivered: the queue is then persisted.
   let persistHeld = false;
-  // Set when request-ceiling is about to abort a run, so that abort is not read as the operator's.
+  // Set when request-ceiling or retry recovery is about to abort a run, not the operator.
   let ceilingAbort = false;
   // Session identities pi-subagents may stamp on this session's async-started events.
   let sessionIdentities = new Set<string>();
@@ -335,6 +335,11 @@ export default function (pi: ExtensionAPI): void {
   // request-ceiling emits this just before it aborts a stuck request (SEAMS.md "Request ceiling").
   // That abort is not the operator's: its incident follow-up and any fired wakes go out as before.
   pi.events.on("loop-recovery:request-timeout", () => {
+    ceilingAbort = true;
+  });
+  // Recovery emits this synchronously before an episode-expiry or halted-recovery abort.
+  // Like a request timeout, it exempts only the next settle from the operator wake hold.
+  pi.events.on("loop-recovery:abort", () => {
     ceilingAbort = true;
   });
   pi.events.on("loop-wait:query-timers", (data) => {

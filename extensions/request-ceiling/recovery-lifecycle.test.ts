@@ -5,11 +5,33 @@ import { installRecovery, portableRequest, safeProxyRetry, recoveryConfig } from
 function harness() {
   const handlers = new Map<string, Function[]>();
   let aborted = 0;
-  const ctx = { model: { provider: "fixture" }, abort() { aborted++; } };
-  installRecovery({ events: { on() {} }, sendMessage() {}, on(name: string, fn: Function) { handlers.set(name, [...(handlers.get(name) ?? []), fn]); } } as any, () => ({ loopPi: { retryRecovery: { episodeMs: 30, providerIds: ["fixture"] } } }));
+  const sequence: string[] = [];
+  const ctx = { model: { provider: "fixture" }, abort() { sequence.push("abort"); aborted++; } };
+  installRecovery({ events: { on() {}, emit(name: string) { sequence.push(name); } }, sendMessage() {}, on(name: string, fn: Function) { handlers.set(name, [...(handlers.get(name) ?? []), fn]); } } as any, () => ({ loopPi: { retryRecovery: { episodeMs: 30, providerIds: ["fixture"] } } }));
   const emit = (name: string, event: any = {}) => handlers.get(name)?.map((fn) => fn(event, ctx)).at(-1);
-  return { emit, ctx, get aborted() { return aborted; } };
+  return { emit, ctx, sequence, get aborted() { return aborted; } };
 }
+test("recovery abort attribution precedes timer, expired-turn, request-check and halted aborts", (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
+  const h = harness();
+  h.emit("turn_start");
+  h.emit("before_provider_request", { payload: { input: [] } });
+  h.emit("message_end", failure);
+  t.mock.timers.tick(30);
+  assert.deepEqual(h.sequence, ["loop-recovery:abort", "abort"]);
+  h.emit("agent_settled");
+  h.sequence.length = 0;
+  h.emit("turn_start");
+  assert.deepEqual(h.sequence, ["loop-recovery:abort", "abort"], "expired synthetic turn");
+  h.sequence.length = 0;
+  h.emit("before_provider_request", { payload: { input: [] } });
+  assert.deepEqual(h.sequence, ["loop-recovery:abort", "abort"], "request deadline check");
+  h.emit("message_end", failure); h.emit("agent_settled");
+  h.sequence.length = 0; h.emit("turn_start");
+  assert.deepEqual(h.sequence, ["loop-recovery:abort", "abort"], "halted recovery restart");
+  h.emit("session_shutdown");
+});
+
 const failure = { message: { role: "assistant", stopReason: "error", content: [], errorMessage: "fetch failed" } };
 
 test("episode survives synthetic settlement but resets on a genuine user input and success", async () => {

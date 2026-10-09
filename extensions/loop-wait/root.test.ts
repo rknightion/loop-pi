@@ -612,6 +612,35 @@ test("root.ts: an abort the request ceiling caused still flushes, and the next p
   });
 });
 
+test("root.ts: a recovery abort delivers fired wakes but exempts only one settle", async () => {
+  await withFakeAgentDir(async (agentDir) => {
+    const { tools, lifecycle, sent, busHandlers } = await loadRootWithFakePi();
+    const idleBox = { idle: false };
+    const ctx = fakeCtx(agentDir, idleBox);
+    lifecycle.get("session_start")!(undefined, ctx);
+    try {
+      await tools.get("wake_at")!.execute("r1", { at: new Date(Date.now() + 30).toISOString(), reason: "recovery-expiry" }, undefined, undefined, ctx);
+      await delay(150);
+      assert.equal(sent.length, 0, "wake fired while busy");
+      busHandlers.get("loop-recovery:abort")!({});
+      idleBox.idle = true;
+      lifecycle.get("agent_settled")!({ type: "agent_settled", aborted: true }, ctx);
+      await delay(400);
+      assert.equal(sent.length, 1, "recovery abort must deliver, not hold");
+      assert.equal(sent[0].options.triggerTurn, true);
+      sent.length = 0; idleBox.idle = false;
+      await tools.get("wake_at")!.execute("r2", { at: new Date(Date.now() + 30).toISOString(), reason: "next-operator-abort" }, undefined, undefined, ctx);
+      await delay(150);
+      idleBox.idle = true;
+      lifecycle.get("agent_settled")!({ type: "agent_settled", aborted: true }, ctx);
+      await delay(400);
+      assert.equal(sent.length, 0, "the next plain abort must still hold");
+    } finally {
+      await lifecycle.get("session_shutdown")!(undefined, ctx);
+    }
+  });
+});
+
 test("RPC: a real operator abort holds a fired wake until the next prompt", async () => {
   const script = writeFauxScript([
     { match: "ARM_THEN_HANG", once: true, toolCalls: [{ name: "wake_at", args: { at: new Date(Date.now() + 400).toISOString(), reason: "esc-held-wake" } }] },

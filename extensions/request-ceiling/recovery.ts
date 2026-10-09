@@ -65,13 +65,18 @@ export function installRecovery(pi: ExtensionAPI, loadSettings: () => unknown): 
   let attemptId: string | undefined;
   const clearTimer = () => { if (timer) clearTimeout(timer); timer = undefined; };
   const reset = () => { clearTimer(); deadline = undefined; expired = false; notified = false; halted = false; active = false; };
+  const abortRecovery = (ctx: { abort(): void }) => {
+    // Synchronous attribution before abort: loop-wait must not mistake this for operator Esc.
+    pi.events.emit("loop-recovery:abort", {});
+    ctx.abort();
+  };
   const arm = (ctx: { abort(): void }) => {
     clearTimer();
     if (deadline === undefined || !active) return;
     const expire = () => {
       timer = undefined;
       expired = true;
-      if (active) ctx.abort();
+      if (active) abortRecovery(ctx);
     };
     if (Date.now() >= deadline) expire();
     else { timer = setTimeout(expire, deadline - Date.now()); timer.unref?.(); }
@@ -95,7 +100,7 @@ export function installRecovery(pi: ExtensionAPI, loadSettings: () => unknown): 
     startedAt = Date.now();
     opted = recoveryConfig(loadSettings()).providerIds.includes(ctx.model?.provider ?? "");
     timedOut = false; portable = false; output = false; error = undefined; attemptId = undefined;
-    if (opted && halted) ctx.abort();
+    if (opted && halted) abortRecovery(ctx);
     else if (opted) arm(ctx);
   });
   pi.on("before_provider_headers", (event) => {
@@ -106,7 +111,7 @@ export function installRecovery(pi: ExtensionAPI, loadSettings: () => unknown): 
   });
   pi.on("before_provider_request", (event, ctx) => {
     if (!active || !opted) return;
-    if (expired || (deadline !== undefined && Date.now() >= deadline)) { expired = true; ctx.abort(); }
+    if (expired || (deadline !== undefined && Date.now() >= deadline)) { expired = true; abortRecovery(ctx); }
     if (opted) portable = portableRequest(event.payload);
   });
   pi.on("provider_stream_event", (event) => {
