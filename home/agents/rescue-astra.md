@@ -1,6 +1,6 @@
 ---
 name: rescue-astra
-description: Specialist rescue, attempt 3 onward (Astra).
+description: Specialist rescue, rung 2 (Astra/high); runs only after rescue-astra-medium has failed.
 advertise: true
 model: openai/gpt-6-astra
 thinking: high

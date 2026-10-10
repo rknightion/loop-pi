@@ -1,9 +1,9 @@
 ---
-name: rescue-sol
-description: Specialist rescue, attempt 3 onward (Sol).
+name: rescue-astra-medium
+description: Specialist rescue, rung 1 (Astra/medium); runs after the worker and retry worker have failed; the root does not rescue.
 advertise: true
-model: openai/gpt-6.1-sol
-thinking: high
+model: openai/gpt-6-astra
+thinking: medium
 tools: read, bash, edit, write, grep, find, ls, watch_process
 extensions:
 systemPromptMode: append

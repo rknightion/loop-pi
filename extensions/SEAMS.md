@@ -100,7 +100,7 @@ pi process with the faux provider, as recorded under "Runtime facts"; it is not 
 ## Root launcher route
 
 The installer's `DEFAULT_ROOT_ROUTE` is
-`{provider: "openai", model: "gpt-6.1-sol", thinking: "medium"}`. Settings
+`{provider: "openai", model: "gpt-6.1-sol", thinking: "high"}`. Settings
 `loopPi.rootRoute` override those defaults. The generated model-root launcher places caller
 arguments last, after its provider, model and thinking flags, so explicit caller flags win.
 This is the model-root route, not the dispatcher's in-process idle model.
@@ -329,7 +329,7 @@ before any `await`. A missing reply means the provider extension is not loaded; 
   `lane-worker`, `lane-worker-push`, `lane-worker-low`, `lane-worker-low-push`, `lane-worker-retry`,
   `lane-worker-retry-push`, `complex-worker`, `complex-worker-push`, `super-worker`,
   `super-worker-push`, `megasuper-worker`, `megasuper-worker-push`, `reviewer`, `reviewer-high`,
-  `security-reviewer`, `rescue-sol`, `rescue-astra`, `ops`, `ops-probe`, `triager`.
+  `security-reviewer`, `rescue-astra-medium`, `rescue-astra`, `ops`, `ops-probe`, `triager`.
 - Escalation tiers: SUPER = {`super-worker`, `super-worker-push`} (gpt-6-astra, `thinking: high`);
   MEGASUPER = {`megasuper-worker`, `megasuper-worker-push`, `agent-workflows:megasuper-worker`}
   (gpt-6-astra, `thinking: xhigh`). Both copy the `complex-worker` bodies.

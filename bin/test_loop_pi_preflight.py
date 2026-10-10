@@ -35,7 +35,7 @@ C3_AGENTS = [
     "reviewer",
     "reviewer-high",
     "security-reviewer",
-    "rescue-sol",
+    "rescue-astra-medium",
     "rescue-astra",
     "ops",
     "ops-probe",

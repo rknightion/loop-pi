@@ -76,7 +76,7 @@ Settings under `loopPi` in `home/settings.json` (or your overlay):
 | Key | Default | Meaning |
 |---|---|---|
 | `modelFamily` | `{"provider": "openai", "pattern": "^gpt-6(\\.[0-9]+)?(-[a-z0-9]+)+$", "name": "gpt-6"}` | the only models the root and lanes may run |
-| `rootRoute` | `{"provider": "openai", "model": "gpt-6.1-sol", "thinking": "medium"}` | the root's model, and the fallback when a session selects one outside the family |
+| `rootRoute` | `{"provider": "openai", "model": "gpt-6.1-sol", "thinking": "high"}` | the root's model, and the fallback when a session selects one outside the family |
 | `requiredHookScripts` | `[]` | guard scripts that must exist; a missing required one blocks every lane tool call |
 | `onIncident` | `[]` | argv of a notifier run, detached, whenever the loop writes an incident file; `{file}` in any element is replaced by the incident's absolute path. Failures are ignored. loop-pi ships no notifier: an overlay sets this to its own command |
 

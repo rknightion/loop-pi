@@ -3,7 +3,7 @@ name: ops
 description: OPS lane: runs one granted ops surface's commands (deploy, probe, release, secret write).
 advertise: true
 model: openai/gpt-6.1-sol
-thinking: high
+thinking: medium
 tools: read, bash, grep, find, ls, watch_process
 extensions:
 systemPromptMode: append

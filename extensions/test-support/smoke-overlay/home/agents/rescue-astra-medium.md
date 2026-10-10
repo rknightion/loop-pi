@@ -1,5 +1,5 @@
 ---
-name: rescue-sol
+name: rescue-astra-medium
 description: Offline installed-build smoke worker
 tools: bash
 extensions: []

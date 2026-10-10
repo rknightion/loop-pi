@@ -806,7 +806,7 @@ test("C3_AGENTS matches SEAMS.md exactly", () => {
       "mapper",
       "mapper-deep",
       "rescue-astra",
-      "rescue-sol",
+      "rescue-astra-medium",
       "reviewer",
       "reviewer-high",
       "security-reviewer",

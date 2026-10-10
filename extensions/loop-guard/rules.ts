@@ -70,7 +70,7 @@ export const C3_AGENTS: ReadonlySet<string> = new Set([
   "reviewer",
   "reviewer-high",
   "security-reviewer",
-  "rescue-sol",
+  "rescue-astra-medium",
   "rescue-astra",
   "lane-worker-low",
   "lane-worker-low-push",

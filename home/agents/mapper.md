@@ -2,8 +2,8 @@
 name: mapper
 description: RETRIEVAL and MAPPING lane: read-only inventories, code maps and extraction.
 advertise: true
-model: openai/gpt-6-luna
-thinking: medium
+model: openai/gpt-6.1-sol
+thinking: low
 tools: read, grep, find, ls, bash
 extensions:
 systemPromptMode: append
