@@ -19,6 +19,100 @@ const fresh = () => {
 
 const BLOCK = '```lane-return\n{"v":2,"lane":"L1","status":"complete","sha":null,"landed":false}\n```';
 
+// Invoke the pinned package's real preview producer: do not reproduce its slice/line-end logic.
+const nativeOutput = await import(new URL("../../node_modules/pi-subagents/src/runs/shared/single-output.js", import.meta.url).href);
+const agentDir = new URL("../../home/agents/", import.meta.url);
+const serializedBudget = (policy: string) => {
+  const match = /serialized fenced block at most ([\d,]+) UTF-16 code units/.exec(policy);
+  return match ? Number(match[1].replaceAll(",", "")) : null;
+};
+const fenced = (data: Record<string, unknown>, tag = "lane-return") => `\`\`\`${tag}\n${JSON.stringify(data)}\n\`\`\`\n`;
+const returnData = (status: string, tail: string) => ({
+  v: 2, lane: "L-preview", status, sha: null, landed: false, base: "a".repeat(40),
+  check: 'env LABEL="é😀" npm test && printf "\\n"', exit: status === "partial" ? null : 1,
+  tail, ci: null, coderabbit: { ran: false, major: 0, unreviewed: 0 },
+  questions: ["Review remains pending; full evidence: /runs/evidence/output.md"],
+});
+const oldAllowedReturn = (status: string) => fenced(returnData(status, Array.from({ length: 40 }, (_, i) => `${i}: ${"é😀\\\"".repeat(24)}`).join("\n")));
+const maximalReturn = (status: string, budget: number | null) => {
+  if (budget === null) return oldAllowedReturn(status); // The old policy allowed this 40-line tail.
+  const data = returnData(status, 'last failure: é😀\\"\n');
+  const remaining = budget - fenced(data).length;
+  assert.ok(remaining >= 0, "required fixed fields must fit without abbreviating the exact check");
+  data.tail += "x".repeat(remaining);
+  const block = fenced(data);
+  assert.equal(block.length, budget, "budget counts serialized escapes, fences and final newline");
+  assert.ok(Buffer.byteLength(block) > block.length, "UTF-8 bytes differ from native UTF-16 units");
+  assert.ok([...block].length < block.length, "astral characters count as two native units");
+  return block;
+};
+const nativePreview = (output: string, mode: "artifact" | "saved" | "summary") => {
+  const fullPath = join(fresh(), "output.md");
+  writeFileSync(fullPath, output);
+  const input = mode === "saved" ? `${output}\n\n${nativeOutput.formatSavedOutputReference(fullPath, output).message}` : output;
+  const preview = mode === "summary"
+    ? nativeOutput.capSummaryOutputs(`lane-worker:\n${input}`, [{ agent: "lane-worker", output: input, artifactPaths: { outputPath: fullPath } }])
+    : nativeOutput.capInlineOutput(input, mode === "saved" ? { savedPath: fullPath } : { artifactPath: fullPath });
+  assert.ok(preview.includes("…"), "exercise actual truncation, not a short-output bypass");
+  assert.ok(preview.includes(fullPath), "native preview retains its full-output reference");
+  assert.equal(readFileSync(fullPath, "utf8"), output, "full copy is unchanged");
+  return preview;
+};
+
+test("pinned native preview exposes the old allowed 40-line v2 return cut mid-block", () => {
+  assert.equal(JSON.parse(readFileSync(new URL("../../node_modules/pi-subagents/package.json", import.meta.url), "utf8")).version, "0.77.0");
+  const block = oldAllowedReturn("partial");
+  assert.equal(JSON.parse(block.split("\n")[1]).tail.split("\n").length, 40);
+  assert.equal(parseLaneReturn(block)!.status, "partial");
+  assert.equal(parseDispatcherLaneReturn(block).parsed, true);
+  const preview = nativePreview(block, "artifact");
+  assert.ok(preview.startsWith("```lane-return\n"));
+  assert.ok(!preview.includes("\n```"), "the native preview loses the closing fence");
+  assert.equal(parseLaneReturn(preview), null);
+  assert.equal(parseDispatcherLaneReturn(preview).parsed, false);
+});
+
+for (const status of ["failed", "partial"]) {
+  test(`maximal producer-allowed ${status} return survives the pinned native preview for both consumers`, () => {
+    const policy = readFileSync(new URL("lane-worker.md", agentDir), "utf8");
+    const budget = serializedBudget(policy);
+    const block = maximalReturn(status, budget);
+    for (const mode of ["artifact", "saved", "summary"] as const) {
+      // No newline until well past the preview; also test frequent line ends after the fence.
+      for (const prose of ["z".repeat(4_000), "report line\n".repeat(400)]) {
+        const preview = nativePreview(block + prose, mode);
+        assert.ok(preview.includes(block), "the entire serialized block, closing fence and newline must survive");
+        assert.deepEqual(parseLaneReturn(preview), parseLaneReturn(block));
+        assert.deepEqual(parseDispatcherLaneReturn(preview), parseDispatcherLaneReturn(block));
+        assert.deepEqual(returnEvent("L-preview", "run-preview", parseLaneReturn(preview)), returnEvent("L-preview", "run-preview", parseLaneReturn(block)));
+      }
+    }
+    assert.notEqual(budget, null, "the real producer policy must define the tested serialized budget");
+  });
+}
+
+test("every pi producer shares the serialized preview budget; triage stays a distinct block", () => {
+  const reference = serializedBudget(readFileSync(new URL("lane-worker.md", agentDir), "utf8"));
+  assert.notEqual(reference, null);
+  for (const name of readdirSync(agentDir).filter((name) => name.endsWith(".md"))) {
+    const policy = readFileSync(new URL(name, agentDir), "utf8");
+    assert.equal(serializedBudget(policy), reference, name);
+    assert.match(policy, /including fences,\s*newlines and JSON escapes/, name);
+    if (name === "triager.md") {
+      assert.match(policy, /```triage\n/);
+      const data = { v: 1, lane: "L-preview", decision: "park", reason: 'é😀\\"', brief: null, needs: "defect", split: null };
+      data.reason += "x".repeat(reference! - fenced(data, "triage").length);
+      const block = fenced(data, "triage");
+      assert.equal(block.length, reference);
+      assert.ok(nativePreview(block + "z".repeat(4_000), "artifact").includes(block));
+      assert.equal(parseLaneReturn(block), null, "triage must not become a lane-return");
+    } else {
+      assert.match(policy, /```lane-return\n/);
+      assert.match(policy, /never abbreviate the exact check/);
+    }
+  }
+});
+
 for (const boundary of ["root", "lane"]) {
   test(`${boundary} cap preserves the dispatcher outcome when an annotated trailing fence is core-only`, () => {
     const block = (status: string, exit: number) => `\`\`\`lane-return\n${JSON.stringify({ v: 2, lane: "L1", status, exit, sha: null, landed: false })}\n\`\`\``;

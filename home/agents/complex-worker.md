@@ -48,6 +48,14 @@ the block first: the root sees only the first 2,000 characters of a long return.
 
 The block:
 
+Keep the entire serialized fenced block at most 1,800 UTF-16 code units (including fences,
+newlines and JSON escapes); measure after serialization, not UTF-8 bytes or code points.
+Use compact JSON. Keep every required field and truthful status/base/sha/check/exit;
+never abbreviate the exact check. `tail` is a short final excerpt (at most 40 lines, fewer to fit).
+Put full logs, findings and all questions in the retained artifact; give concise question
+summaries with its absolute path. If fixed fields alone cannot fit, report a return-contract
+defect to the root; never abbreviate the exact check.
+
 ```lane-return
 {"v":2,"lane":"<id>","status":"complete|partial|blocked|failed","sha":"<full>|null","landed":true|false,
  "base":"<full SHA>","check":"<exact command>","exit":<int>|null,"tail":"<last <= 40 lines>",

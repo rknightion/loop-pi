@@ -45,6 +45,16 @@ the block first: the root sees only the first 2,000 characters of a long return.
 
 The block:
 
+Keep the entire serialized fenced block at most 1,800 UTF-16 code units (including fences,
+newlines and JSON escapes); measure after serialization, not UTF-8 bytes or code points.
+Use compact JSON. Keep every triage field and truthful decision/needs. Keep the reason concise;
+put full findings in the retained artifact and cite its absolute path. Revised/split briefs
+must remain usable inline, not file pointers. Do not substitute a lane-return block for triage.
+If no truthful, usable inline `retry` or `split` block fits, return a concise `park` with
+`needs: "defect"`, `brief: null` and `split: null`; name the overflow and retained artifact in
+`reason`. Never shorten acceptance criteria or replace required briefs with pointers to fit.
+If fixed fields alone cannot fit even that park, report a return-contract defect to the root.
+
 ```triage
 {"v":1,"lane":"<id>","decision":"retry|park|split","reason":"<why, citing the evidence>",
  "brief":"<revised brief>|null","needs":"owner|authority|evidence-later|dependency|defect|null",
