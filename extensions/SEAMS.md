@@ -528,9 +528,12 @@ paths are exact, bash write detection is best-effort.
     omission line naming the full copy, up to its last 8,192 bytes and the last `lane-return` block
     if not wholly kept in the head or tail. With no run dir it is left uncapped. The dispatcher's RPC completion path applies the same
     cap. The full copy is pi-subagents' saved output only when its structured completion (the
-    async-complete payload's single result `savedOutputPath`, for the notify's own last
-    `Retention-managed async directory:` line) or a reference-only marker on the first line of the
-    lane's output names it; a path in the return body is never used. Otherwise `returns/<runId>.md`.
+    async-complete payload's single result `savedOutputPath`) matches the notify's sole valid
+    `details.runs[].runId`. Absent structured runs, the notify's last `Retention-managed async
+    directory:` line supplies the legacy identity and directory check. A reference-only marker
+    on the first line may name the copy; a path in the return body is never used. Batched or
+    malformed structured identities never select one child's file, including that marker: retain
+    the whole notify in a hash-named copy. Otherwise the fallback is `returns/<runId>.md`.
   - Either cap: the head ends before the earliest `lane-return` opener with no closing fence
     inside the kept head, including earlier blocks and incomplete opener header lines. A protected
     block wholly inside the head is not appended again. Head and tail are UTF-8-safe maxima, not

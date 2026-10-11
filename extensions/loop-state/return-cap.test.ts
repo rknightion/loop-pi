@@ -7,7 +7,7 @@ import { after, test } from "node:test";
 import loopState from "./index.ts";
 import { parseLaneReturn, returnEvent } from "./core.ts";
 import { parseLaneReturn as parseDispatcherLaneReturn } from "../dispatcher/brief.ts";
-import { capLaneAssistantMessage, capNotifyContent, capText, completionInfo, HEAD_BYTES, LANE_RETURN_CAP_BYTES, RETURN_CAP_BYTES, TAIL_BYTES } from "./return-cap.ts";
+import { capLaneAssistantMessage, capNotifyContent, capNotifyMessage, capText, completionInfo, HEAD_BYTES, LANE_RETURN_CAP_BYTES, RETURN_CAP_BYTES, TAIL_BYTES } from "./return-cap.ts";
 
 const dirs: string[] = [];
 after(() => dirs.forEach((d) => rmSync(d, { recursive: true, force: true })));
@@ -93,6 +93,53 @@ test("the full text goes to returns/<run id>.md, or the saved output file pi-sub
   const capped2 = capNotifyContent(withSaved, runDir)!;
   assert.equal(capped2.fullPath, saved);
   assert.match(capped2.text, new RegExp(`full return: ${saved.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} \\.\\.\\.\\]`));
+});
+
+// Synthetic content, native 0.77.0 shape: notify.js sendCompletion emits
+// details.runs via notifyRunDetails (which removes previews, not run identity).
+test("native structured notify identity wins over missing or misleading directory text", () => {
+  const runDir = fresh();
+  const saved = join(fresh(), "output.md");
+  writeFileSync(saved, "synthetic saved output");
+  const info = { runId: "native-run", asyncDir: "/tmp/sub/native-run", savedOutputPath: saved };
+  for (const suffix of ["", "\nRetention-managed async directory: /tmp/sub/other-run"]) {
+    const message = {
+      role: "custom", customType: "subagent-notify", display: false,
+      content: `Background task completed: **lane-worker**\n\n${BLOCK}\n${"q".repeat(40_000)}${suffix}`,
+      details: { runs: [{ runId: "native-run", status: "completed", source: "async", agent: "lane-worker" }] },
+    };
+    const queried: string[] = [];
+    const capped = capNotifyMessage(message, runDir, (id) => (queried.push(id), info))!;
+    assert.deepEqual(queried, ["native-run"]);
+    assert.ok(capped.content.includes(`full return: ${saved}`));
+    assert.ok(Buffer.byteLength(capped.content) <= RETURN_CAP_BYTES);
+    assert.deepEqual(parseLaneReturn(capped.content), parseLaneReturn(message.content));
+    assert.equal(capped.details, message.details);
+  }
+  const message = { role: "custom", customType: "subagent-notify", content: "z".repeat(40_000), details: { runs: [{ runId: "native-run" }] } };
+  const capped = capNotifyMessage(message, runDir)!;
+  assert.ok(capped.content.includes(join(runDir, "returns", "native-run.md")));
+  assert.equal(readFileSync(join(runDir, "returns", "native-run.md"), "utf8"), message.content);
+  const wrong = capNotifyMessage(message, runDir, () => ({ ...info, runId: "other-run" }))!;
+  assert.ok(!wrong.content.includes(`full return: ${saved}`), "a mismatched completion is not this run");
+});
+
+test("structured batches and malformed identities retain the entire notify without guessing a run", () => {
+  const content = `${BLOCK}\n${"z".repeat(40_000)}\nRetention-managed async directory: /tmp/sub/other-run`;
+  for (const runs of [[], [{ runId: "one" }, { runId: "two" }], [{ runId: "one" }, { runId: "one" }], null, "bad", [null], [{}], [{ runId: 4 }], [{ runId: "../escape" }], [{ runId: "x".repeat(257) }]]) {
+    const runDir = fresh();
+    const capped = capNotifyMessage({ role: "custom", customType: "subagent-notify", content, details: { runs } }, runDir, () => { throw new Error("must not guess"); })!;
+    const files = readdirSync(join(runDir, "returns"));
+    assert.equal(files.length, 1);
+    assert.match(files[0], /^notify-[a-f0-9]{16}\.md$/);
+    assert.equal(readFileSync(join(runDir, "returns", files[0]), "utf8"), content);
+    assert.ok(Buffer.byteLength(capped.content) <= RETURN_CAP_BYTES);
+  }
+  for (const details of [undefined, {}, { runs: undefined }]) {
+    const runDir = fresh();
+    const capped = capNotifyMessage({ role: "custom", customType: "subagent-notify", content, details }, runDir)!;
+    assert.ok(capped.content.includes(join(runDir, "returns", "other-run.md")), "absent structured runs keep the legacy fallback");
+  }
 });
 
 test("without a run dir the message is left whole rather than lose its full text", () => {

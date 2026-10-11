@@ -5,7 +5,8 @@
 // path is named instead. Used by the loop-state extension (LLM roots) and the dispatcher.
 //
 // The saved-output path comes only from pi-subagents' structured completion (the async-complete
-// payload's single result `savedOutputPath`, matched to the notify by its async directory line), or
+// payload's single result `savedOutputPath`, matched by details.runs[].runId when present,
+// otherwise by its async directory line), or
 // from a reference-only marker that is the first line of the lane's output. Never from free text in
 // the return body: a lane can write any line there, and a wrong path loses the full text.
 //
@@ -143,6 +144,20 @@ export function runIdFromNotify(text: string): string | null {
   return RUN_ID_RE.test(id) ? id : null;
 }
 
+/** Native notify identity: undefined permits legacy text fallback; null refuses an ambiguous or
+ * malformed structured identity. A whole batched notify cannot use one child's saved output. */
+function structuredNotifyRunId(details: unknown): string | null | undefined {
+  if (!details || typeof details !== "object") return undefined;
+  const runs = (details as { runs?: unknown }).runs;
+  if (runs === undefined) return undefined;
+  if (!Array.isArray(runs) || runs.length !== 1) return null;
+  const run = runs[0];
+  if (!run || typeof run !== "object") return null;
+  const id = (run as { runId?: unknown }).runId;
+  // Bound validation work and filenames independently of malformed metadata size.
+  return typeof id === "string" && id.length <= 256 && RUN_ID_RE.test(id) ? id : null;
+}
+
 /** What pi-subagents' structured completion says about one run. */
 export interface CompletionInfo {
   runId: string;
@@ -206,15 +221,19 @@ export function capNotifyContent(
   text: string,
   runDir: string | undefined,
   completion?: (runId: string) => CompletionInfo | undefined,
+  details?: unknown,
 ): { text: string; fullPath: string } | null {
   if (Buffer.byteLength(text, "utf8") <= RETURN_CAP_BYTES) return null;
   if (!runDir || !existsSync(runDir)) return null;
-  const runId = runIdFromNotify(text);
+  const nativeId = structuredNotifyRunId(details);
+  const runId = nativeId === undefined ? runIdFromNotify(text) : nativeId;
   const known = runId ? completion?.(runId) : undefined;
-  // The structured completion must be the one this notify's own async directory line names.
-  const structured = known && (known.asyncDir === null || known.asyncDir === asyncDirFromNotify(text)) ? known.savedOutputPath : null;
+  // Native identity is authoritative even when the directory text is absent or misleading.
+  // Legacy notifications retain their directory check; never accept another run's completion.
+  const structured = known && known.runId === runId
+    && (nativeId !== undefined || known.asyncDir === null || known.asyncDir === asyncDirFromNotify(text)) ? known.savedOutputPath : null;
   let fullPath: string | null = isFile(structured) ? structured : null;
-  if (!fullPath) {
+  if (!fullPath && nativeId !== null) {
     const marker = firstLineSavedOutput(text);
     if (isFile(marker)) fullPath = marker;
   }
@@ -234,13 +253,13 @@ export function capNotifyContent(
 }
 
 /** The capped replacement for a `subagent-notify` custom message, or undefined to leave it alone. */
-export function capNotifyMessage<M extends { role?: string; customType?: string; content?: unknown }>(
+export function capNotifyMessage<M extends { role?: string; customType?: string; content?: unknown; details?: unknown }>(
   message: M,
   runDir: string | undefined,
   completion?: (runId: string) => CompletionInfo | undefined,
 ): M | undefined {
   if (message.role !== "custom" || message.customType !== NOTIFY_CUSTOM_TYPE) return undefined;
-  const capped = capNotifyContent(contentText(message.content), runDir, completion);
+  const capped = capNotifyContent(contentText(message.content), runDir, completion, message.details);
   return capped ? { ...message, content: capped.text } : undefined;
 }
 
