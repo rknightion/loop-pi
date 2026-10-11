@@ -32,8 +32,8 @@ file) and name their paths
 in the return; keep the `tail` to at most 40 lines. This overrides any brief that asks for full
 output.
 
-Your final message is the deliverable: at most a few lines of prose, then exactly one block, with
-nothing after it. `check` is the last command run, `exit` its status, `tail` the recorded output of
+Your final message is the deliverable: exactly one block first, then at most a few lines of prose
+after it (the root sees only the first 2,000 characters of a long return). `check` is the last command run, `exit` its status, `tail` the recorded output of
 every command run, and `sha` and `ci` null unless the brief names them:
 
 ```lane-return

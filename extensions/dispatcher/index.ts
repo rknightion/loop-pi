@@ -4,9 +4,12 @@
 // `input` handler runs the whole loop and returns `handled`, so the prompt never reaches a model and
 // the process lives exactly as long as the loop. pi-subagents still asks for a turn on each
 // completion: while the loop runs the session is idle, so it appends the notice and sends its
-// `Subagent updates above.` wake prompt, which this handler lets through. The session's model is
-// this extension's in-process `loop-dispatch/idle` provider, which answers with an empty stop and
-// never makes a network request.
+// wake prompt (PARENT_WAKE_TEXT, ../loop-continuation/state.ts), which this handler lets through.
+// The session's model is this extension's in-process `loop-dispatch/idle` provider, which answers
+// with an empty stop and never makes a network request. pi-subagents 0.77.0 answers that empty
+// reply with a `subagent-completion-unanswered` reminder (one more idle turn), then a
+// `subagent-completion-unhandled` notice; neither reaches the scheduler, which reads completions
+// from the async-complete payload.
 //
 // Lanes go through pi-subagents' RPC `spawn` after loop-guard's subagent rule and identity binding.
 // The lane guards are registered as required child extensions, fail closed. Every S2 event,

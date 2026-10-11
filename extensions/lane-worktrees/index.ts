@@ -31,6 +31,7 @@ import { registerScratch, RECEIPT_FILE, SCRATCH_KINDS, teardown, type ReceiptEnt
 export const PATCH_STATE_CUSTOM_TYPE = "lane-patches-state";
 export const PATCH_DECISION_EVENT = "lane-worktrees:patch-decision";
 import { allocationIdentity, confinedPath, prepareParent, registerAllocation, verifyAllocation, verifyRunCwd, type AllocationIdentity } from "./identity.ts";
+import { deleteSubagentField, subagentCallView } from "../loop-guard/subagent-view.ts";
 
 const PROTO_FILE = "loop-pi-proto";
 export const SCRATCH_TOOL = "scratch_register";
@@ -557,8 +558,13 @@ export default function (pi: ExtensionAPI) {
     }
     if (event.toolName !== "subagent" || !markerPresent()) return;
     const input = event.input as Record<string, unknown>;
-    if (input.action === "resume") {
-      const target = typeof input.id === "string" ? input.id.trim() : typeof input.runId === "string" ? input.runId.trim() : typeof input.dir === "string" ? basename(resolve(input.dir)) : undefined;
+    // pi-subagents 0.77.0 flattens `options` only inside execute: read every field through the same
+    // merged view the guard uses. A malformed `options` is left to the package, which refuses it.
+    const merged = subagentCallView(input);
+    if (!merged.ok) return;
+    const fields = merged.view;
+    if (fields.action === "resume") {
+      const target = typeof fields.id === "string" ? fields.id.trim() : typeof fields.runId === "string" ? fields.runId.trim() : typeof fields.dir === "string" ? basename(resolve(fields.dir)) : undefined;
       const retained = target ? [...patchRuns.values()].filter((r) => r.runId === target || r.runId.startsWith(target)) : [];
       if (retained.length === 1) patchCalls.set(event.toolCallId, { lane: retained[0].lane, task: retained[0].task });
       if (target && [...retiredRuns].some((id) => id === target || id.startsWith(target))) return { block: true, reason: "lane-worktrees: this run's allocation was explicitly released; same-protocol resume is refused." };
@@ -581,27 +587,29 @@ export default function (pi: ExtensionAPI) {
       }
       return;
     }
-    if (input.action !== undefined || typeof input.agent !== "string") return;
+    if (fields.action !== undefined || typeof input.agent !== "string") return;
     // Only the named single-agent surface is ours. Leave workflows and malformed/conflicting
     // public inputs to their existing validator; never turn a refused shape into a valid launch.
-    if (input.workflow !== undefined || input.workflowScript !== undefined || input.tasks !== undefined || input.chain !== undefined) return;
-    if ((input.isolation === "worktree" && input.worktree === false) || (input.isolation !== undefined && input.isolation !== "worktree")) return;
+    if (fields.workflow !== undefined || fields.workflowScript !== undefined || fields.tasks !== undefined || fields.chain !== undefined) return;
+    if ((fields.isolation === "worktree" && fields.worktree === false) || (fields.isolation !== undefined && fields.isolation !== "worktree")) return;
     const governed = parseBrief(input.task);
     if (!governed) return;
     patchCalls.set(event.toolCallId, { lane: governed.lane, task: governed.task });
     const dir = runDir()!;
     const brief = parseLaneBrief(input.task);
-    if (!brief || (input.isolation !== "worktree" && input.worktree !== true)) {
+    if (!brief || (fields.isolation !== "worktree" && fields.worktree !== true)) {
       // Defaults are resolved inside pi-subagents after this hook; bind naming even when worktree
       // is omitted. Explicit shared-cwd requests do not allocate and need no naming override.
-      if (input.worktree === false) return;
-      const declared = input.lane as Record<string, unknown> | undefined;
+      if (fields.worktree === false) return;
+      const declared = fields.lane as Record<string, unknown> | undefined;
       // Never turn a malformed caller lane into a valid launch. Other fields remain untouched for
       // the package's full validator (including unknown fields, mode, claims and outputPaths).
       if (declared !== undefined && (!declared || typeof declared !== "object" || Array.isArray(declared) || declared.version !== 1 || typeof declared.key !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(declared.key.trim()))) {
         return { block: true, reason: "lane-worktrees: invalid governed native lane metadata; omit lane or supply a version-1 lane with a valid key." };
       }
       const key = nativeLaneKey(real(dir), governed.lane, governed.task);
+      // One lane, at the top level: a caller's `options.lane` would conflict with the bound key.
+      deleteSubagentField(input, "lane");
       input.lane = { ...declared, version: 1, key };
       if (!nativeNames.has(key)) nativeNames.set(key, { key, lane: governed.lane, task: governed.task, runs: [] });
       pendingNames.set(event.toolCallId, key);
@@ -638,7 +646,7 @@ export default function (pi: ExtensionAPI) {
       } else {
         const status = await git(repo, ["status", "--porcelain", "--untracked-files=all"]);
         if (status.code !== 0 || status.stdout.trim()) return { block: true, reason: "lane-worktrees: worktree isolation requires a clean git working tree." };
-        const baseRef = input.baseRef ?? "HEAD";
+        const baseRef = fields.baseRef ?? "HEAD";
         if (typeof baseRef !== "string" || /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(baseRef) || (await git(repo, ["check-ref-format", "--allow-onelevel", baseRef])).code !== 0) {
           return { block: true, reason: "lane-worktrees: baseRef must be HEAD or a supported named Git ref, not a commit ID or revision expression." };
         }

@@ -82,7 +82,7 @@ test("missing child identity denies a real bash push by default", { timeout: 30_
   } finally { await session.close(); }
 });
 
-test("a lane's model cannot forge nested launch bindings", { timeout: 60_000 }, async () => {
+for (const shape of ["top-level", "options"] as const) test(`a lane's model cannot forge nested launch bindings (${shape})`, { timeout: 60_000 }, async () => {
   const home = freshDir("nested-push-home-");
   const cwd = freshDir("nested-push-repo-");
   const remote = freshDir("nested-push-remote-");
@@ -93,8 +93,10 @@ test("a lane's model cannot forge nested launch bindings", { timeout: 60_000 }, 
   mkdirSync(join(home, "agents"), { recursive: true });
   writeFileSync(join(home, "settings.json"), JSON.stringify({ packages: [PI_SUBAGENTS_PACKAGE_DIR], subagents: { agentExcludeDirs: ["~/.agents"] } }));
   writeFileSync(join(home, "agents", "lane-worker.md"), ["---", "name: lane-worker", "description: Nested spoof test", "tools: bash", `extensions: ${LANE_EXTENSION}`, `subagentOnlyExtensions: ${FAUX_EXTENSION}`, "model: faux/faux-1", "---", "Test worker."].join("\n"));
+  // pi-subagents 0.77.0 accepts the binding at the top level or inside `options`.
+  const forged = { "loop-pi.guard/1": { agent: "lane-worker-push" } };
   const script = writeFauxScript([
-    { match: "NESTED_SPOOF", once: true, toolCalls: [{ name: "subagent", args: { agent: "lane-worker", task: "NESTED_CHILD_PUSH", async: true, extensionBindings: { "loop-pi.guard/1": { agent: "lane-worker-push" } } } }] },
+    { match: "NESTED_SPOOF", once: true, toolCalls: [{ name: "subagent", args: { agent: "lane-worker", task: "NESTED_CHILD_PUSH", async: true, ...(shape === "options" ? { options: { extensionBindings: forged } } : { extensionBindings: forged }) } }] },
     { match: "NESTED_CHILD_PUSH", once: true, toolCalls: [{ name: "bash", args: { command: "git push origin HEAD:refs/heads/main" } }] },
     { match: ".*", text: "done" },
   ]);

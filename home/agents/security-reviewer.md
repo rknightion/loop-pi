@@ -31,8 +31,8 @@ file) and name their paths
 in the return; keep the `tail` to at most 40 lines. This overrides any brief that asks for full
 output.
 
-Your final message is the deliverable: at most a few lines of prose, then exactly one block, with
-nothing after it. The prose's last line is the PASS or FAIL verdict for the named candidate; `sha`
+Your final message is the deliverable: exactly one block first, then at most a few lines of prose
+after it (the root sees only the first 2,000 characters of a long return). The prose's last line is the PASS or FAIL verdict for the named candidate; `sha`
 is the reviewed SHA and `landed` false:
 
 ```lane-return

@@ -602,6 +602,21 @@ test("ordinary resume after root restart correlates an early completion and repl
   assert.equal(events(r.log).length, 4, "the durable log suppresses duplicate dispatch and terminal return after restart");
 });
 
+test("a resume by async dir, top-level or in pi-subagents 0.77.0 `options`, records the original identity", async () => {
+  const r = makeRepo();
+  execFileSync(BIN, ["append", r.log, "dispatch", "lane=L1", "task=T1", "agent=lane-worker", "run=original", "base=b", "tier=guarded"]);
+  execFileSync(BIN, ["append", r.log, "return", "lane=L1", "run=original", "status=partial"]);
+  const h = harness({ reportPath: r.report, cwd: r.repo });
+  h.start();
+  h.call("by-dir", { action: "resume", dir: "/tmp/async-subagent-runs/original", message: "continue" });
+  h.result("by-dir", "", { runId: "second" });
+  h.call("by-option", { action: "resume", message: "continue", options: { dir: "/tmp/async-subagent-runs/original" } });
+  h.result("by-option", "", { runId: "third" });
+  await h.shutdown();
+  const dispatches = events(r.log).filter((row) => row.ev === "dispatch");
+  assert.deepEqual(dispatches.map((row) => [row.run, row.lane, row.task]), [["original", "L1", "T1"], ["second", "L1", "T1"], ["third", "L1", "T1"]]);
+});
+
 test("an ops resume with a replacement brief keeps its Ops surface, and a missing one is warned, not refused", async () => {
   const r = makeRepo();
   execFileSync(BIN, ["append", r.log, "dispatch", "lane=M1", "task=T1", "agent=ops", "run=first", "base=b", "tier=guarded", "surface=deploy:svc"]);

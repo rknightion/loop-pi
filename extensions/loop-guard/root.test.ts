@@ -216,7 +216,7 @@ test("root tool_call: watch_process blocked while an async subagent run is activ
 });
 
 test("root tool_call: watch_process allowed again once its run's async-complete arrives", async () => {
-  // pi-subagents 0.76.1 appends an idle root's subagent-notify with no extension message events,
+  // pi-subagents 0.77.0 appends an idle root's subagent-notify with no extension message events,
   // so only the completion event can release the run.
   const fake = fakeApi();
   rootExtension(fake.api as any);
@@ -443,7 +443,7 @@ function opsRoot(ops?: unknown) {
   const end = fake.handlers.get("tool_execution_end")![0];
   const launch = (toolCallId: string, input: Record<string, unknown>) =>
     handler({ type: "tool_call", toolCallId, toolName: "subagent", input }, ctx);
-  // The tool result shape pi-subagents 0.76.1 returns for a single async launch (async-execution.js).
+  // The tool result shape pi-subagents 0.77.0 returns for a single async launch (async-execution.js).
   const started = (toolCallId: string, runId: string) =>
     end(
       {
@@ -564,4 +564,12 @@ test("root ops: a model-supplied binding is replaced on a single launch and drop
   const management: Record<string, unknown> = { action: "status", id: "run-a", extensionBindings: forged };
   assert.equal((await launch("2", management))?.block ?? false, false);
   assert.equal(management.extensionBindings, undefined);
+  // pi-subagents 0.77.0 also takes extensionBindings inside `options`: strip it there on both shapes.
+  const optSingle: Record<string, unknown> = { agent: "lane-worker", task: "x", options: { extensionBindings: forged } };
+  assert.equal((await launch("3", optSingle))?.block ?? false, false);
+  assert.deepEqual(optSingle.extensionBindings, { "loop-pi.guard/1": { agent: "lane-worker" } });
+  assert.equal((optSingle.options as Record<string, unknown>).extensionBindings, undefined);
+  const optManagement: Record<string, unknown> = { action: "status", id: "run-a", options: { extensionBindings: forged } };
+  assert.equal((await launch("4", optManagement))?.block ?? false, false);
+  assert.equal((optManagement.options as Record<string, unknown>).extensionBindings, undefined);
 });

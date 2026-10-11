@@ -385,6 +385,12 @@ export default function (pi: ExtensionAPI) {
   pi.on(
     "agent_before_settle",
     async (event: AgentBeforeSettleEvent, ctx): Promise<AgentBeforeSettleEventResult> => {
+      // An earlier handler already continues this run. pi-subagents 0.77.0 does this for a silent
+      // completion turn with its `subagent-completion-unanswered` reminder (a known package
+      // customType, not a push); a nudge on top would give one silent turn two prompts. Decide at the
+      // settle that follows, with the push flag intact. Its terminal `subagent-completion-unhandled`
+      // notice does not continue the run, so the nudge chain still keeps an unmarked root going.
+      if (event.continue) return {};
       const wasPushed = pushDetected;
       pushDetected = false;
 

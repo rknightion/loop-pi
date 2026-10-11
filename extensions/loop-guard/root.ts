@@ -12,6 +12,7 @@ import { getAgentDir, isToolCallEventType } from "@earendil-works/pi-coding-agen
 import { registerRequiredChildExtensions } from "pi-subagents/required-child-extensions";
 import { hookScriptsToRun, runHookScripts } from "./hooks.ts";
 import { installModelFamily, subagentOverrideBlock } from "./model-family.ts";
+import { deleteSubagentField } from "./subagent-view.ts";
 import { installRequestCeiling, installRetryBackoff } from "../request-ceiling/index.ts";
 import { bindLaneIdentity } from "./push-grant.ts";
 import { evaluateOpsLaunch, QUERY_LAUNCH_EVENT } from "./ops.ts";
@@ -30,7 +31,7 @@ export const ROOT_BASH_TIMEOUT_MAX_S = 900;
 /** Custom messages that wake the root: a lane return, a watcher exit and a fired timer. */
 const WAKE_MESSAGES: ReadonlySet<string> = new Set(["subagent-notify", "loop-watch", "loop-wake"]);
 
-/** The run id of an async launch from its tool result (pi-subagents 0.76.1): `details.runId`, else
+/** The run id of an async launch from its tool result (pi-subagents 0.77.0): `details.runId`, else
  *  `details.asyncId`, else the `Async: <agent> [<id>]` text. */
 export function launchedRunId(result: unknown): string | undefined {
   const r = result as { details?: { runId?: unknown; asyncId?: unknown }; content?: { type?: string; text?: unknown }[] } | undefined;
@@ -154,7 +155,7 @@ export default function (pi: ExtensionAPI) {
   // is tracked by tool call id until its tool execution ends, then by the run id it reported until
   // `subagent:async-complete` names that run. The completion event fires whether the root was busy
   // or idle; an idle root's `subagent-notify` reaches no extension message event (pi-subagents
-  // 0.76.1 parent wake), so it cannot be the release. A launch that ends in error started no run
+  // 0.77.0 parent wake), so it cannot be the release. A launch that ends in error started no run
   // and is dropped; one that succeeded without a run id can never be seen completing, so it stays
   // active for the session, which is the safe direction for a rule whose purpose is "don't block a
   // pushed completion".
@@ -354,11 +355,13 @@ export default function (pi: ExtensionAPI) {
           if (refusal) return { block: true, reason: refusal };
           tierLaunches.set(event.toolCallId, { tier });
         }
+        // A model-supplied binding inside pi-subagents 0.77.0 `options` would conflict with the bound one.
+        deleteSubagentField(input, "extensionBindings");
         bindLaneIdentity(input, input.agent, ops.entry, { runDir });
         if (ops.entry) pendingOps.set(event.toolCallId, { surface: ops.entry.surface, async: isAsyncSubagentLaunch(input) });
       } else {
         // Only a single launch is bound; a model-supplied binding never reaches any other shape.
-        delete input.extensionBindings;
+        deleteSubagentField(input, "extensionBindings");
       }
       return;
     }

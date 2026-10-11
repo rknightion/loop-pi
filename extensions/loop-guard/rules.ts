@@ -27,6 +27,7 @@
 
 import { interpreterNetworkRefusal, type OpsEntry } from "./ops.ts";
 import type { GateDeclarations } from "./gates.ts";
+import { subagentCallView, subagentFields } from "./subagent-view.ts";
 
 export type Role = "root" | "lane";
 
@@ -2357,7 +2358,8 @@ export interface SubagentInput {
  *  launch via `workflowScript`/`workflowScriptPath`/the named `workflow`
  *  resource field. Used both to decide the agent-allowlist check and to track
  *  "is any async subagent run active" in root.ts. */
-export function isSubagentLaunch(input: SubagentInput): boolean {
+export function isSubagentLaunch(raw: SubagentInput): boolean {
+  const input = subagentFields(raw);
   if (typeof input.agent === "string" && typeof input.task === "string") return true;
   if (typeof input.workflowScript === "string") return true;
   if (typeof input.workflowScriptPath === "string") return true;
@@ -2368,10 +2370,15 @@ export function isSubagentLaunch(input: SubagentInput): boolean {
 /** True for a launch that runs in the background (the default for every
  *  launch shape unless the call explicitly sets `async: false`). */
 export function isAsyncSubagentLaunch(input: SubagentInput): boolean {
-  return isSubagentLaunch(input) && input.async !== false;
+  return isSubagentLaunch(input) && subagentFields(input).async !== false;
 }
 
-export function evaluateSubagentCall(input: SubagentInput): Decision {
+/** Every check reads the merged view (SEAMS: pi-subagents 0.77.0 `options`), so a field moved
+ *  into `options` is refused exactly as at the top level. */
+export function evaluateSubagentCall(raw: SubagentInput): Decision {
+  const merged = subagentCallView(raw);
+  if (!merged.ok) return block(merged.reason);
+  const input: SubagentInput = merged.view;
   if (input.machine !== undefined) {
     return block("loop-guard: `subagent` calls may not set `machine` (root rule, C4 item 4).");
   }
@@ -2384,7 +2391,7 @@ export function evaluateSubagentCall(input: SubagentInput): Decision {
   // pi-subagents' own guidance asks for one workflow call holding
   // every child. Appendix C launches each lane as its own async call instead:
   // only single-agent launches get the checkpoint steer before `timeoutMs`,
-  // and each lane's completion wakes the root separately. pi-subagents 0.76.1
+  // and each lane's completion wakes the root separately. pi-subagents 0.77.0
   // carries a workflow in one `workflow` field (`true` for the reply's js
   // block, a path, or a named resource); the removed `workflowScript` /
   // `workflowScriptPath` stay listed as a backstop. `action: "validate"` with

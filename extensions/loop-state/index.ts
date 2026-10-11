@@ -14,12 +14,13 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { basename, isAbsolute, join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { type Brief, deriveLogPath, failedRunBlock, parseBrief, parseLaneReturn, returnEvent, runFailed, runIdFromText } from "./core.ts";
 import { allocateRepair, type ArtifactIdentity, artifactIdentity, identityOf, readRepair, type RepairBinding, validBinding, validIdentity } from "./repair.ts";
 import { capNotifyMessage, type CompletionInfo, completionInfo, contentText, NOTIFY_CUSTOM_TYPE, RETURN_CAP_BYTES } from "./return-cap.ts";
+import { subagentFields } from "../loop-guard/subagent-view.ts";
 
 export const DIGEST_CUSTOM_TYPE = "loop-state-digest";
 const CLI_TIMEOUT_MS = 10_000;
@@ -203,8 +204,11 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
     } catch { /* No log yet. */ }
   }
 
-  function resumeBrief(input: Record<string, unknown>): LaneBrief | null {
-    const target = input.id ?? input.runId;
+  function resumeBrief(raw: Record<string, unknown>): LaneBrief | null {
+    // pi-subagents resolves a resume by id, else by its async dir (whose name is the run id), and
+    // 0.77.0 takes `dir` inside `options`: read the same merged view the guard reads.
+    const input = subagentFields(raw);
+    const target = input.id ?? input.runId ?? (typeof input.dir === "string" && input.dir ? basename(resolve(input.dir)) : undefined);
     if (typeof target !== "string" || !target) return null;
     const log = resolveLog();
     if (log) restoreIdentities(log);
@@ -231,7 +235,7 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
     return r.code === 0 && sha ? sha : "unknown";
   }
 
-  // pi-subagents 0.76.1 docs/extension-api.md and src/extension/rpc.js:
+  // pi-subagents 0.77.0 docs/extension-api.md and src/extension/rpc.js:
   // resume uses the persisted child and returns data.details with a NEW async run id.
   // `output` names the separate repair file (file-only mode): without it the package resumes with
   // the original run's output binding and overwrites the lane's report with the block.

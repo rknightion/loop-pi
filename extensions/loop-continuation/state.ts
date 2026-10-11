@@ -15,10 +15,16 @@ export const PUSH_CUSTOM_TYPES: ReadonlySet<string> = new Set(["subagent-notify"
  * pi-subagents' wake for an idle parent (its `src/shared/parent-wake.js`, not exported): the
  * notice is appended with no extension `message_start`/`message_end`, then this extension-sourced
  * user message starts the turn. A busy parent still gets the notice as a steer, with message events.
+ * PARENT_WAKE_TEXT is pi-subagents 0.77.0's text (wake.test.ts pins it against the installed
+ * package); 0.76.1's shorter text stays recognised for a root resumed across the upgrade.
  */
-export const PARENT_WAKE_TEXT = "Subagent updates above.";
+export const PARENT_WAKE_TEXT =
+  "Inspect subagent updates above. Answer pending supervisor requests within your authority. For completed work, " +
+  "read saved results and resume the already-authorized parent task, or report completion. If approval is required, " +
+  "explicitly ask the user. Do not silently yield, rerun completed work, or infer new authorization.";
+const LEGACY_PARENT_WAKE_TEXT = "Subagent updates above.";
 export const isParentWake = (event: { source?: string; text?: string }): boolean =>
-  event.source === "extension" && event.text === PARENT_WAKE_TEXT;
+  event.source === "extension" && (event.text === PARENT_WAKE_TEXT || event.text === LEGACY_PARENT_WAKE_TEXT);
 
 export const MAX_NUDGES = 3;
 

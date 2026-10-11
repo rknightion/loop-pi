@@ -208,7 +208,17 @@ test("the dispatcher runs three disjoint tasks through RPC lanes, a composed gat
   assert.ok(t1Text.includes(runDir.replace(/^\/private/, "")), "the bound run dir is this run's");
   const parent = sessions.find((p) => !p.includes("/run-") && !p.includes("subagent-artifacts"));
   assert.ok(parent, "the dispatcher's own session exists");
-  const turns = readFileSync(parent!, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l).message).filter((m) => m?.role === "assistant");
+  const parentEntries = readFileSync(parent!, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  const turns = parentEntries.map((e) => e.message).filter((m) => m?.role === "assistant");
   assert.ok(turns.length > 0, "completions trigger turns, which the idle model answers");
+  // pi-subagents 0.77.0 follows the idle model's empty reply with its own settle reminders. They only
+  // add idle turns: each lane still has one dispatch and one return, and the loop closes once.
+  const reminders = parentEntries.map((e) => e.customType).filter((t) => typeof t === "string" && t.startsWith("subagent-completion-"));
+  assert.ok(reminders.includes("subagent-completion-unanswered") && reminders.includes("subagent-completion-unhandled"), `the package reminders fired: ${reminders}`);
+  for (const run of workRuns) {
+    assert.equal(events.filter((e) => e.ev === "dispatch" && e.run === run).length, 1, `one dispatch for ${run}`);
+    assert.equal(events.filter((e) => e.ev === "return" && e.run === run).length, 1, `one return for ${run}`);
+  }
+  assert.equal(events.filter((e) => e.ev === "close").length, 1, "the loop closes once");
   for (const m of turns) assert.equal(`${m.provider}/${m.model}`, "loop-dispatch/idle", "the dispatcher never calls a model");
 });

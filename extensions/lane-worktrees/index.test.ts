@@ -459,6 +459,13 @@ test("conflicting inputs and workflow launches keep native validation; baseRef a
     const invalid = await s.launch(brief("L3", "T3"), { isolation: "worktree", baseRef: "HEAD~1" });
     assert.equal(invalid.result?.block, true);
     assert.equal(existsSync(s.path("L3")), false);
+    // pi-subagents 0.77.0 takes baseRef inside `options`: it is honoured or refused there too.
+    const optionBase = await s.launch(brief("L4", "T4"), { isolation: "worktree", options: { baseRef: "candidate-base" } });
+    assert.equal(optionBase.result, undefined);
+    assert.equal(git(String(optionBase.input.cwd), "rev-parse", "HEAD"), earlier);
+    const optionInvalid = await s.launch(brief("L5", "T5"), { isolation: "worktree", options: { baseRef: "HEAD~1" } });
+    assert.equal(optionInvalid.result?.block, true);
+    assert.equal(existsSync(s.path("L5")), false);
   } finally {
     s.restore();
   }
@@ -637,7 +644,7 @@ test("released run tombstones survive reload and non-reused allocations prevent 
     const b = await s.launch(brief("L1", "T2"));
     await s.end(b.id, { runId: "replacement-run" });
     assert.notEqual(b.input.cwd, oldPath);
-    for (const input of [{ action: "resume", id: "released-run" }, { action: "resume", runId: "released-" }, { action: "resume", dir: "/tmp/async-subagent-runs/released-run" }]) {
+    for (const input of [{ action: "resume", id: "released-run" }, { action: "resume", runId: "released-" }, { action: "resume", dir: "/tmp/async-subagent-runs/released-run" }, { action: "resume", options: { dir: "/tmp/async-subagent-runs/released-run" } }]) {
       const refused = await s.handlers.get("tool_call")!({ toolName: "subagent", toolCallId: "old-resume", input }, s.ctx);
       assert.equal(refused?.block, true);
       assert.match(refused.reason, /explicitly released/);
@@ -785,6 +792,21 @@ test("native naming is opaque, scoped and retains exact task/run identity throug
     assert.notEqual(nativeLaneKey(s.runDir, "N1", task), nativeLaneKey(s.runDir, "N2", task));
     assert.notEqual(nativeLaneKey(s.runDir, "N1", task), nativeLaneKey(s.runDir, "N1", task + "x"));
     assert.notEqual(nativeLaneKey(s.runDir, "N1", task), nativeLaneKey(s.runDir + "x", "N1", task));
+  } finally { s.restore(); }
+});
+
+test("native naming reads lane metadata from pi-subagents 0.77.0 `options` and lifts it to one place", async () => {
+  const s = setup();
+  const text = "Lane: N1 · Task: T1 · Tier: guarded\nObjective: x";
+  try {
+    const a = await s.launch(text, { isolation: "worktree", options: { lane: { version: 1, key: "caller", mode: "scout" }, context: "fresh" } });
+    assert.equal(a.result, undefined);
+    const metadata = a.input.lane as Record<string, unknown>;
+    assert.equal(metadata.key, nativeLaneKey(realpathSync(s.runDir), "N1", "T1"));
+    assert.equal(metadata.mode, "scout", "the caller's other lane fields are kept");
+    assert.deepEqual(a.input.options, { context: "fresh" }, "no second, conflicting lane is left in options");
+    const bad = await s.launch(text, { worktree: true, options: { lane: { version: 1, key: "bad/key" } } });
+    assert.equal(bad.result?.block, true);
   } finally { s.restore(); }
 });
 

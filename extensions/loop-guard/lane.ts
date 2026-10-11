@@ -13,6 +13,7 @@ import type { ExtensionAPI, ExtensionContext, ToolCallEvent, ToolCallEventResult
 import { getAgentDir, isToolCallEventType } from "@earendil-works/pi-coding-agent";
 import { hookScriptsToRun, runHookScripts } from "./hooks.ts";
 import { installModelFamily, subagentOverrideBlock } from "./model-family.ts";
+import { hasSubagentField } from "./subagent-view.ts";
 import { installRequestCeiling, installRetryBackoff } from "../request-ceiling/index.ts";
 import { evaluateBashCommand, wrappedGateCommands, bindGateExecution } from "./rules.ts";
 import { loadGateDeclarations } from "./gates.ts";
@@ -171,7 +172,8 @@ export default function (pi: ExtensionAPI) {
     if (event.toolName === "subagent") {
       // Only the root supplies launch identity. A nested caller must not forge
       // bindings now that the feature is enabled globally.
-      if ((event.input as Record<string, unknown>).extensionBindings !== undefined) {
+      // pi-subagents 0.77.0 also accepts the field inside `options`.
+      if (hasSubagentField(event.input, "extensionBindings")) {
         return { block: true, reason: "loop-guard: lanes may not supply extensionBindings; only the root binds lane identity." };
       }
       return subagentOverrideBlock(event.input);

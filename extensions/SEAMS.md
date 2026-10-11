@@ -15,11 +15,13 @@ public statement of those contracts.
   not ours, and resolve through pi's loader at runtime. pi 1.1.0 publishes no
   `npm-shrinkwrap.json`, so npm hoists them to the top-level `node_modules`; never rely on either
   layout (`tsconfig.json` lists both, and the loop-wait test hook resolves from pi's directory).
-- **Project trust (pi-subagents 0.76.1):** children follow the parent session's project trust, so
+- **Project trust (pi-subagents 0.77.0):** children follow the parent session's project trust, so
   with `defaultProjectTrust: "never"` a child no longer loads the target repository's `.pi/`
-  settings, system prompt files, skills or extensions. Agent discovery is not trust-gated:
-  repository `.pi/agents` and `.agents/*.md` still outrank the home's agents. `loop-pi-preflight` stays.
-- **Tool list (pi 1.1.0 / pi-subagents 0.76.1):** `toolActivation` is `"eager"`; never `"auto"`.
+  settings, system prompt files, skills or extensions. Agent discovery is trust-gated too
+  (`src/agents/agents.js` `buildAgentDiscoverySources`): an untrusted project contributes no
+  `.agents` / `.pi/agents` or chain directories and no project agent settings, so repository agents
+  no longer outrank the home's. `loop-pi-preflight` stays as the check for a trusted project.
+- **Tool list (pi 1.1.0 / pi-subagents 0.77.0):** `toolActivation` is `"eager"`; never `"auto"`.
   codex-lb never acknowledges a request carrying an `additional_tools` item, which pi sends for a
   mid-conversation tool addition when a model's `compat.supportsAdditionalTools` is true. The overlay
   sets that and `supportsToolSearch` false for every family model, so a changed tool list is resent
@@ -49,22 +51,22 @@ public statement of those contracts.
   (`src/extension/index.js`, `getSubagentSessionRoot`); async run state under `$PI_SUBAGENTS_TEMP_ROOT`
   (`async-subagent-runs/`, `async-subagent-results/`).
 - pi-subagents async completion message: `customType: "subagent-notify"`
-  (`src/runs/background/notify.js:430`).
+  (`src/runs/background/notify.js:459`).
 - `registerRequiredChildExtensions({ sessionId, extensions: [{ id, path }] })` from
   `pi-subagents/required-child-extensions`; returns `{ dispose() }`; one registration per parent
   session; call at `session_start` with `ctx.sessionManager.getSessionId()`, dispose at
   `session_shutdown`. The e2e child-block test (`loop-guard/e2e.test.ts`) proves an import from this extension shares
-  the module instance pi-subagents itself uses. pi-subagents 0.76.1 fails the child launch closed
+  the module instance pi-subagents itself uses. pi-subagents 0.77.0 fails the child launch closed
   when a required child extension fails to load or throws during startup ("Required child extension
   failed during startup"), so a lane-guard startup error aborts the lane rather than running it unguarded.
-- pi-subagents 0.76.1 appends a row for every launched async child (agent, outcome, duration and a
+- pi-subagents 0.77.0 appends a row for every launched async child (agent, outcome, duration and a
   sha256 `taskHash`; the task text itself is stored as `[redacted]`) to `<agentDir>/run-history.jsonl`
   in the loop-pi home, not the target repository.
 - Non-TTY stdin: pi in `--mode json`/`--print` waits on stdin. Tests close it (`stdio: ["ignore", ...]`
   or `</dev/null`). RPC mode keeps stdin open by design.
 - **Push grant (async single-agent launches):** the root guard overwrites the entire
   `extensionBindings` tool input with `{"loop-pi.guard/1":{"agent":<selected agent>}}` after
-  validating the launch. pi-subagents 0.76.1 delivers it in `PI_SUBAGENT_EXTENSION_BINDINGS`
+  validating the launch, and removes any copy inside `options`. pi-subagents 0.77.0 delivers it in `PI_SUBAGENT_EXTENSION_BINDINGS`
   to the detached child. For directly bound detached children, only `lane-worker-push`,
   `lane-worker-low-push`, `lane-worker-retry-push`, `complex-worker-push`, `super-worker-push`
   and `megasuper-worker-push` may make plain `git push`;
@@ -75,12 +77,12 @@ public statement of those contracts.
   and replacement of model-supplied bindings. This remains an honest-mistake fence, not an
   OS security boundary. **Foreground nested children inherit the detached parent's push
   grant, even when the nested agent is not one of the push agents.** pi-subagents
-  0.76.1 creates foreground children in the parent's process and does not apply per-child
+  0.77.0 creates foreground children in the parent's process and does not apply per-child
   `processEnv` there; the lane extension therefore reads the parent's binding. Denying
   that inheritance requires a supported per-session identity transport, not parsing prompt
   text or mutating shared process environment. A child without a binding denies pushes,
   but a foreground child of a granted parent is not such a child. Lane `subagent` calls
-  that supply any `extensionBindings` are refused before launch; this prevents explicit
+  that supply any `extensionBindings`, at the top level or inside `options`, are refused before launch; this prevents explicit
   binding forgery, not foreground inheritance. Briefs must not treat the guard as enforcing
   a separate no-push right on a granted lane's foreground descendants.
   Installed homes adopt it only after a lock bump.
@@ -482,14 +484,33 @@ paths are exact, bash write detection is best-effort.
   explicitly allowed. Unparseable known-network commands always fail closed, including wildcard
   grants. Granted literal curl/ssh forms and local-only parsing
   remain usable. This is an honest-mistake fence, not a sandbox or a new endpoint permission.
-- **Idle-parent wake (pi-subagents 0.76.1):** a notice to an idle root is appended with
+- **Idle-parent wake (pi-subagents 0.77.0):** a notice to an idle root is appended with
   `triggerTurn: false`, which pi emits to RPC/UI listeners but to no extension `message_start` or
   `message_end`; pi-subagents then starts the turn with the extension-sourced user message
-  `Subagent updates above.` (`source: "extension"`). A busy root still gets the notice as a steer
-  with message events. So: loop-continuation counts that wake input as the push that resets the
-  nudge chain; loop-guard releases a run for `watch_process` on `subagent:async-complete`, never on
-  a notify message; the dispatcher lets the wake prompt through to its idle model; and the lane caps
-  its own return (below).
+  `PARENT_WAKE_TEXT` (`src/shared/parent-wake.js`, not exported; it begins "Inspect subagent
+  updates above." and tells the parent to read saved results and resume, `source: "extension"`).
+  `loop-continuation/state.ts` `isParentWake` accepts that text and 0.76.1's
+  `Subagent updates above.`; `wake.test.ts` pins it against the installed package. A busy root still
+  gets the notice as a steer with message events. So: loop-continuation counts that wake input as
+  the push that resets the nudge chain; loop-guard releases a run for `watch_process` on
+  `subagent:async-complete`, never on a notify message; the dispatcher lets the wake prompt through
+  to its idle model; and the lane caps its own return (below).
+- **Completion reminders (pi-subagents 0.77.0):** when a completion-woken turn ends with no tool call
+  and no text, pi-subagents' own `agent_before_settle` handler appends a
+  `subagent-completion-unanswered` reminder and continues the run once; if that turn is silent too it
+  appends a terminal `subagent-completion-unhandled` notice without continuing
+  (`src/runs/background/notify.js` `handleBeforeSettle`). Neither is a push. The package skips a
+  settle that an earlier handler already continues, and loop-continuation skips its nudge when
+  `continue` is already set, so one silent turn never gets both; after the terminal notice the nudge
+  chain still applies. In the dispatcher every completion therefore costs up to two extra idle-model
+  turns; dispatch, return and close are unaffected.
+- **Subagent `options` (pi-subagents 0.77.0):** a model `subagent` call carries most fields inside
+  one `options` object, which the package flattens to `{...topLevel, ...options}` only inside its
+  execute (`src/extension/subagent-options.js`). Every loop-pi `tool_call` reader of a subagent call
+  (loop-guard root and lane, lane-worktrees, loop-state) reads the merged view from
+  `loop-guard/subagent-view.ts`; a present `options` that is not a plain object is refused by the
+  root guard. A field loop-pi rewrites (`extensionBindings`, `lane`) is removed from `options` and
+  set once at the top level.
 - **Return cap** (lane: loop-guard's lane entry at the child's assistant `message_end`; root:
   loop-state at `message_end`, plus the `context` hook for already-stored messages).
   - Lane: the last non-empty text part of an assistant message with no tool call and no error (the
@@ -527,9 +548,21 @@ paths are exact, bash write detection is best-effort.
     preserve that failure exactly by declining an unsafe cut, and still retain the full copy.
     These deterministic oversized/unsafe-cut fallbacks, like a missing run dir, do not promise
     the byte cap. Malformed or annotated trailing fences that change neither outcome may still cap.
-  - Limit: an idle-wake notify (no root extension can rewrite it) holds one capped lane return in
-    16 KB with its framing, but pi-subagents batches completions that finish together into one
-    notify, which is stored at their sum. The `context` hook still caps what the model sees.
+  - Root preview (pi-subagents 0.77.0): the notify itself keeps only the first 2,000 characters of
+    each child's output inline (cut at a line end), then `…` and `Full output: <path> (<size>,
+    <lines>). Read it if needed.`, where the path is the saved output or the run's artifact file
+    (`src/runs/shared/single-output.js` `capInlineOutput`). Output is left whole only when it is
+    short or no readable file holds it. A capped lane return therefore reaches the root as that
+    preview; the lane's omission line, and so the path of the full text, is inside the pointed-at
+    file. The async-complete payload is not previewed, so the `return` event still parses the
+    lane's whole (lane-capped) output.
+  - Block first: because the root model sees only that preview, every lane's final message puts its
+    one `lane-return` block first and at most a few lines of prose after it (home agent files). The
+    parsers take the last, here the only, block, and both caps keep a block at the start in the
+    head.
+  - Limit: an idle-wake notify (no root extension can rewrite it) holds one previewed lane return
+    with its framing, but pi-subagents batches completions that finish together into one notify,
+    which is stored at the sum of their previews. The `context` hook still caps what the model sees.
 ### loop-closeout
 
 - **Closeout**: `/loop-closeout` (loop-wait) emits `pi.events.emit("loop-closeout", {lines, pending})`

@@ -39,7 +39,10 @@ Acceptance check, Gate, Landing, Stop rule and Escalation, and may add Deadline.
 
 ## Return
 
-Your final message is a few lines of prose, then exactly one block, with nothing after it:
+Your final message starts with exactly one block, then at most a few lines of prose after it. Put
+the block first: the root sees only the first 2,000 characters of a long return.
+
+The block:
 
 ```lane-return
 {"v":2,"lane":"<id>","status":"complete|partial|blocked|failed","sha":"<full>|null","landed":true|false,

@@ -854,6 +854,27 @@ test("subagent deny: gate field set", () => {
   assert.equal(decision.block, true);
 });
 
+test("subagent deny: pi-subagents 0.77.0 `options` carrying acceptance, gate or machine", () => {
+  // The package flattens `options` only inside execute; the guard must see through it.
+  const shapes: Record<string, unknown>[] = [
+    { agent: "lane-worker", task: "x", options: { acceptance: { verify: [{ command: "true" }] } } },
+    { agent: "lane-worker", task: "x", options: { gate: "npm test" } },
+    { agent: "lane-worker", task: "x", options: { machine: "workmac" } },
+  ];
+  for (const input of shapes) {
+    assert.equal(evaluateSubagentCall(input).block, true, JSON.stringify(input));
+  }
+});
+
+test("subagent deny: a present `options` that is not a plain object", () => {
+  for (const options of [null, [], "acceptance", 1]) {
+    const decision = evaluateSubagentCall({ agent: "lane-worker", task: "x", options });
+    assert.equal(decision.block, true, JSON.stringify(options));
+    assert.match(decision.reason ?? "", /options must be a plain object/);
+  }
+  assert.equal(evaluateSubagentCall({ agent: "lane-worker", task: "x", options: { context: "fresh" } }).block, false);
+});
+
 test("subagent deny: named workflow resource field set", () => {
   const decision = evaluateSubagentCall({ workflow: "run-ci", args: { command: "npm test" } });
   assert.equal(decision.block, true);

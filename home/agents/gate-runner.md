@@ -35,8 +35,8 @@ file) and name their paths
 in the return; keep the `tail` to at most 40 lines. This overrides any brief that asks for full
 output.
 
-Your final message is the deliverable: at most a few lines of prose, then exactly one block, with
-nothing after it. `check` is the gate command, `exit` its status, `tail` the failing lines and their
+Your final message is the deliverable: exactly one block first, then at most a few lines of prose
+after it (the root sees only the first 2,000 characters of a long return). `check` is the gate command, `exit` its status, `tail` the failing lines and their
 classification, `sha` the tested SHA and `landed` false:
 
 ```lane-return

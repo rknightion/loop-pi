@@ -27,8 +27,8 @@ file) and name their paths
 in the return; keep the `tail` to at most 40 lines. This overrides any brief that asks for full
 output.
 
-Your final message is the deliverable: at most a few lines of prose, then exactly one block, with
-nothing after it. Your findings are the prose, with `sha`, `ci` and `coderabbit` null and `landed`
+Your final message is the deliverable: exactly one block first, then at most a few lines of prose
+after it (the root sees only the first 2,000 characters of a long return). Your findings are the prose, with `sha`, `ci` and `coderabbit` null and `landed`
 false:
 
 ```lane-return

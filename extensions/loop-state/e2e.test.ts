@@ -372,7 +372,7 @@ sys.exit(result.returncode)
 });
 }
 
-test("S6: a 3.37 MB lane return reaches the root at 16 KB or less with its lane-return block, and the return event keeps its fields", async () => {
+test("S6: a 3.37 MB block-first lane return reaches the root as a short preview holding its lane-return block, and the return event keeps its fields", async () => {
   const s = scaffold();
   const runDir = freshDir("loop-state-e2e-run-");
   mkdirSync(join(s.agentDir, "agents"), { recursive: true });
@@ -386,8 +386,9 @@ test("S6: a 3.37 MB lane return reaches the root at 16 KB or less with its lane-
   );
   const block =
     '```lane-return\n{"v":2,"lane":"L9","status":"complete","sha":null,"landed":false,"base":"b","check":"just check","exit":0,"tail":"ok","ci":null,"coderabbit":null,"questions":[]}\n```';
-  // The block comes first and every gate log after it, as in the oversized return that overflowed a root.
-  const huge = `Finished.\n${block}\n${"gate output line 0123456789 abcdefghijklmnopqrstuvwxyz\n".repeat(62_000)}END_OF_RETURN`;
+  // Lanes put the block first (pi-subagents 0.77.0 shows the root only the first 2,000 characters
+  // of a long return), then prose; here every gate log follows, as in the return that overflowed a root.
+  const huge = `${block}\nFinished.\n${"gate output line 0123456789 abcdefghijklmnopqrstuvwxyz\n".repeat(62_000)}END_OF_RETURN`;
   assert.ok(Buffer.byteLength(huge) > 3_370_000);
   const fauxScript = writeFauxScript([
     { match: "SPAWN_LANE", once: true, toolCalls: [{ name: "subagent", args: { agent: "lane-worker", task: "Lane: L9 · Task: T9 · Tier: routine\nObjective: CHILD_HUGE_MARKER" } }] },
@@ -398,7 +399,7 @@ test("S6: a 3.37 MB lane return reaches the root at 16 KB or less with its lane-
   process.env.LOOP_PI_RUN_DIR = runDir;
   const session = startPiRpc({
     // loop-guard's root registers its lane entry in every child; the lane caps its own return,
-    // since an idle root's notify reaches no extension message_end (pi-subagents 0.76.1).
+    // since an idle root's notify reaches no extension message_end (pi-subagents 0.77.0).
     extensions: [FAUX_EXTENSION, STATE_EXTENSION, GUARD_ROOT_EXTENSION, s.stub],
     fauxScriptPath: fauxScript,
     agentDir: s.agentDir,
@@ -418,10 +419,16 @@ test("S6: a 3.37 MB lane return reaches the root at 16 KB or less with its lane-
     const content = (notify.message as { content: string }).content;
     assert.equal(typeof content, "string");
     assert.ok(Buffer.byteLength(content) <= 16_384, `the root received ${Buffer.byteLength(content)} bytes`);
-    assert.ok(content.includes(block), "the lane-return block is intact");
-    assert.ok(content.includes("END_OF_RETURN"), "the tail is kept");
-    const marker = /^\[\.\.\. (\d+) bytes omitted; full return: (\S+) \.\.\.\]$/m.exec(content);
-    assert.ok(marker, "the marker line names the omitted bytes and the full return");
+    assert.ok(content.includes(block), "the lane-return block is intact in what the root model sees");
+    // pi-subagents 0.77.0 keeps about 2,000 characters inline and points at the saved output; the
+    // lane's own cap marker inside that file names the full return.
+    assert.ok(!content.includes("END_OF_RETURN"), "the root sees a preview, not the tail");
+    const pointer = /^Full output: (\S+) \(/m.exec(content);
+    assert.ok(pointer, "the preview points at the saved output");
+    const saved = readFileSync(pointer[1], "utf8");
+    assert.ok(saved.includes(block), "the saved output keeps the block");
+    const marker = /^\[\.\.\. (\d+) bytes omitted; full return: (\S+) \.\.\.\]$/m.exec(saved);
+    assert.ok(marker, "the lane's marker line names the omitted bytes and the full return");
     const full = readFileSync(marker[2], "utf8");
     assert.ok(full.includes(huge), "the full return is kept on disk");
     assert.ok(marker[2].startsWith(join(runDir, "returns") + "/"), marker[2]);

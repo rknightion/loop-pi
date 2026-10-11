@@ -9,7 +9,7 @@
 // from a reference-only marker that is the first line of the lane's output. Never from free text in
 // the return body: a lane can write any line there, and a wrong path loses the full text.
 //
-// pi-subagents 0.76.1 appends an idle root's notify with no extension `message_end`, so the root
+// pi-subagents 0.77.0 appends an idle root's notify with no extension `message_end`, so the root
 // cannot cap it there. Every lane therefore caps its own final text first (`capLaneAssistantMessage`,
 // loop-guard's lane entry) to LANE_RETURN_CAP_BYTES, leaving room under RETURN_CAP_BYTES for the
 // notify's own lines, and writes the full text to `<run dir>/returns/lane-<key>-<hash>.md`.

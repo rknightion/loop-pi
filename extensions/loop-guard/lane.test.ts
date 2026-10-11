@@ -228,6 +228,21 @@ test("lane.ts does not register subagent/watch_start/bg_wait root-only rules", a
   }
 });
 
+test("lane: extensionBindings is refused at the top level and inside pi-subagents 0.77.0 `options`", async () => {
+  const { api, handlers } = fakeApi();
+  laneExtension(api as any);
+  const handler = toolCallHandler(handlers);
+  const binding = { "loop-pi.guard/1": { agent: "lane-worker-push" } };
+  for (const input of [
+    { agent: "lane-worker", task: "x", extensionBindings: binding },
+    { agent: "lane-worker", task: "x", options: { extensionBindings: binding } },
+  ]) {
+    const result = await handler({ type: "tool_call", toolCallId: "1", toolName: "subagent", input }, fakeCtx(agentDir));
+    assert.equal(result?.block, true, JSON.stringify(input));
+    assert.match(result.reason, /lanes may not supply extensionBindings/);
+  }
+});
+
 test("lane: a subagent call naming a model outside the gpt-6 family is blocked", async () => {
   const { api, handlers } = fakeApi();
   laneExtension(api as any);
