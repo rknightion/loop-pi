@@ -19,6 +19,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { CustomEntry, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -606,6 +607,12 @@ export default function (pi: ExtensionAPI) {
       // the package's full validator (including unknown fields, mode, claims and outputPaths).
       if (declared !== undefined && (!declared || typeof declared !== "object" || Array.isArray(declared) || declared.version !== 1 || typeof declared.key !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(declared.key.trim()))) {
         return { block: true, reason: "lane-worktrees: invalid governed native lane metadata; omit lane or supply a version-1 lane with a valid key." };
+      }
+      // pi-subagents refuses a lane given at the top level and in `options` with different values;
+      // refuse it here too rather than collapse the two into one valid launch.
+      const nested = (input.options as Record<string, unknown> | undefined)?.lane;
+      if (input.lane !== undefined && nested !== undefined && !isDeepStrictEqual(input.lane, nested)) {
+        return { block: true, reason: "lane-worktrees: `lane` is given at the top level and in options with different values; give it once." };
       }
       const key = nativeLaneKey(real(dir), governed.lane, governed.task);
       // One lane, at the top level: a caller's `options.lane` would conflict with the bound key.

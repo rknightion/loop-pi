@@ -16,10 +16,10 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 /** The call's fields with `options` lifted over the top level, as pi-subagents executes them.
- *  A present `options` that is not a plain object is refused: the package rejects it too, and a
- *  guard must never read a shape it cannot see through. */
+ *  A call that is not a plain object, or a present `options` that is not one, is refused: the
+ *  package rejects it too, and a guard must never read a shape it cannot see through. */
 export function subagentCallView(input: unknown): SubagentCallView {
-  if (!isPlainObject(input)) return { ok: true, view: {} };
+  if (!isPlainObject(input)) return { ok: false, reason: "loop-guard: a `subagent` call must be a plain object." };
   const { options, ...topLevel } = input;
   if (options === undefined) return { ok: true, view: topLevel };
   if (!isPlainObject(options)) {
@@ -28,7 +28,7 @@ export function subagentCallView(input: unknown): SubagentCallView {
   return { ok: true, view: { ...topLevel, ...options } };
 }
 
-/** The view, or `{}` when `options` is malformed (callers that only read identity fields). */
+/** The view, or `{}` when the call or its `options` is malformed (callers that only read identity fields). */
 export function subagentFields(input: unknown): Record<string, unknown> {
   const result = subagentCallView(input);
   return result.ok ? result.view : {};

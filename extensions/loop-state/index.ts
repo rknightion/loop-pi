@@ -619,7 +619,7 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
       const brief = parseBrief(input.task);
       if (brief) {
         // A guard-bound ops surface is an explicit identifier, never inferred from an agent name.
-        const bindings = input.extensionBindings as Record<string, unknown> | undefined;
+        const bindings = subagentFields(input).extensionBindings as Record<string, unknown> | undefined;
         const binding = bindings?.["loop-pi.guard/1"] as { surface?: unknown } | undefined;
         const surface = typeof binding?.surface === "string" && binding.surface ? binding.surface : brief.surface;
         briefs.set(event.toolCallId, { ...brief, ...(surface ? { surface } : {}), agent: input.agent });

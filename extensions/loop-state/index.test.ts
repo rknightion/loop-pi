@@ -181,6 +181,21 @@ test("native review dispatch records explicit constituents, admitted tiers and o
   assert.deepEqual(h.notes, []);
 });
 
+test("a dispatch's guard-bound surface is read from pi-subagents 0.77.0 `options` too", async () => {
+  const r = makeRepo();
+  execFileSync(BIN, ["append", r.log, "admit", "task=T1", "source=envelope", "owned=src/x.ts", "accept=ok", "tier=guarded"]);
+  const h = harness({ reportPath: r.report, cwd: r.repo });
+  h.start();
+  h.call("security", { agent: "security-reviewer", task: "Lane: R2 · Task: T1 · Tier: guarded\nSurface: brief-probe",
+    options: { extensionBindings: { "loop-pi.guard/1": { agent: "security-reviewer", surface: "bound-probe" } } } });
+  h.result("security", "", { runId: "security-run" });
+  await h.shutdown();
+  const dispatches = events(r.log).filter((row) => row.ev === "dispatch");
+  assert.equal(dispatches.length, 1);
+  assert.equal(dispatches[0].surface, "bound-probe", "the bound surface wins wherever the call carries it");
+  assert.deepEqual(h.notes, []);
+});
+
 test("a refused resume falls back once and duplicate completions are ignored", async () => {
   const r = makeRepo();
   const h = harness({ reportPath: r.report, cwd: r.repo });

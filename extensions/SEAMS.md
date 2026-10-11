@@ -508,9 +508,10 @@ paths are exact, bash write detection is best-effort.
   one `options` object, which the package flattens to `{...topLevel, ...options}` only inside its
   execute (`src/extension/subagent-options.js`). Every loop-pi `tool_call` reader of a subagent call
   (loop-guard root and lane, lane-worktrees, loop-state) reads the merged view from
-  `loop-guard/subagent-view.ts`; a present `options` that is not a plain object is refused by the
-  root guard. A field loop-pi rewrites (`extensionBindings`, `lane`) is removed from `options` and
-  set once at the top level.
+  `loop-guard/subagent-view.ts`; a call, or a present `options`, that is not a plain object is
+  refused by the root guard. A field loop-pi rewrites (`extensionBindings`, `lane`) is removed from
+  `options` and set once at the top level; lane-worktrees refuses a `lane` given in both places with
+  different values, as the package does.
 - **Return cap** (lane: loop-guard's lane entry at the child's assistant `message_end`; root:
   loop-state at `message_end`, plus the `context` hook for already-stored messages).
   - Lane: the last non-empty text part of an assistant message with no tool call and no error (the

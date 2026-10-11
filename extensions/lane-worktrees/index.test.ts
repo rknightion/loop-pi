@@ -810,6 +810,23 @@ test("native naming reads lane metadata from pi-subagents 0.77.0 `options` and l
   } finally { s.restore(); }
 });
 
+test("native naming refuses a top-level lane and a different options.lane, as pi-subagents does", async () => {
+  const s = setup();
+  const text = "Lane: N1 · Task: T1 · Tier: guarded\nObjective: x";
+  try {
+    const top = { version: 1, key: "one" };
+    const inner = { version: 1, key: "two" };
+    const conflict = await s.launch(text, { worktree: true, lane: top, options: { lane: inner } });
+    assert.equal(conflict.result?.block, true);
+    assert.match(String(conflict.result?.reason), /lane/);
+    assert.deepEqual(conflict.input.lane, top, "a refused input must not be healed");
+    assert.deepEqual(conflict.input.options, { lane: inner }, "a refused input must not be healed");
+    const same = await s.launch(text, { worktree: true, lane: { ...top }, options: { lane: { ...top } } });
+    assert.equal(same.result, undefined, "equal values in both places are one lane, as the package accepts");
+    assert.equal((same.input.lane as Record<string, unknown>).key, nativeLaneKey(realpathSync(s.runDir), "N1", "T1"));
+  } finally { s.restore(); }
+});
+
 test("native naming never repairs malformed lane metadata or changes explicit shared-cwd requests", async () => {
   const s = setup();
   const text = "Lane: N1 · Task: T1 · Tier: guarded\nObjective: x";

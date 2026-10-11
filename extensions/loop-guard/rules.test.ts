@@ -875,6 +875,14 @@ test("subagent deny: a present `options` that is not a plain object", () => {
   assert.equal(evaluateSubagentCall({ agent: "lane-worker", task: "x", options: { context: "fresh" } }).block, false);
 });
 
+test("subagent deny: a call whose input is not a plain object fails closed", () => {
+  class Shaped { agent = "lane-worker"; task = "x"; acceptance = { verify: [{ command: "true" }] }; }
+  for (const input of [null, [], "lane-worker", 1, new Shaped()]) {
+    const decision = evaluateSubagentCall(input as never);
+    assert.equal(decision.block, true, String(input));
+  }
+});
+
 test("subagent deny: named workflow resource field set", () => {
   const decision = evaluateSubagentCall({ workflow: "run-ci", args: { command: "npm test" } });
   assert.equal(decision.block, true);
