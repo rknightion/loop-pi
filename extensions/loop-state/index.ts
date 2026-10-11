@@ -11,7 +11,7 @@
 // session another way (an older session, a delivery path without `message_end`). The `return` event
 // is parsed from the async-complete payload, which holds the full text and is never rewritten.
 
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { basename, isAbsolute, join, resolve } from "node:path";
@@ -225,6 +225,23 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
     return runCli(cliBin(), ["append", log, "--by", "ext"], JSON.stringify(event));
   }
 
+  // A recovery's final return and its session `done` entry must be published in one
+  // event-loop turn. With execFile, the CLI writes the row before its exit callback:
+  // RPC readers can then see both returns but still read a pending recovery. Keep
+  // only this closing append synchronous (with the same bound); all other CLI work
+  // stays asynchronous. Never publish `done` before the CLI confirms the append.
+  function appendRecoveryReturn(event: Record<string, unknown>, log: string): CliResult {
+    const result = spawnSync(cliBin(), ["append", log, "--by", "ext"], {
+      input: JSON.stringify(event), timeout: CLI_TIMEOUT_MS, maxBuffer: 1024 * 1024,
+      encoding: "utf8",
+    });
+    return {
+      code: result.status ?? -1,
+      stdout: result.stdout ?? "",
+      stderr: result.error ? result.error.message : result.stderr ?? "",
+    };
+  }
+
   async function gitHead(): Promise<string> {
     const r = await new Promise<CliResult>((done) => {
       execFile("git", ["rev-parse", "HEAD"], { cwd, timeout: 5_000 }, (error, stdout, stderr) =>
@@ -349,11 +366,14 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
       }
     }
     const event = returnEvent(info.lane, runId, runFailed(data) ? failedRunBlock(block) : block);
-    let result = await append(event, log);
+    const writeReturn = resumeAttempted.has(runId)
+      ? (row: Record<string, unknown>) => appendRecoveryReturn(row, log)
+      : (row: Record<string, unknown>) => append(row, log);
+    let result = await writeReturn(event);
     if (result.code === 2) {
       // The parsed block did not validate; keep the fact of the return.
       warn(`return for run ${runId} reduced to its status: ${result.stderr.trim()}`);
-      result = await append({ ev: "return", lane: info.lane, run: runId, status: event.status }, log);
+      result = await writeReturn({ ev: "return", lane: info.lane, run: runId, status: event.status });
     }
     if (result.code !== 0) warn(`return for run ${runId} not recorded: ${result.stderr.trim()}`);
     else {

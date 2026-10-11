@@ -34,15 +34,38 @@ const sha = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
 after(() => cleanupAll());
 
 /** A repo, an agent home with the real package and a lane-worker, and an observer extension. */
-function scaffold(observer: (repo: string) => string = () => "") {
+function scaffold(observer: (repo: string) => string = () => "", delayClosingAppend = false) {
   const repo = freshDir("loop-state-repair-repo-");
   const agentDir = freshDir("loop-state-repair-agent-");
   mkdirSync(join(repo, "codex"));
   mkdirSync(join(agentDir, "bin"));
   mkdirSync(join(agentDir, "agents"));
-  symlinkSync(BIN, join(agentDir, "bin", "loop-state"));
   const report = join(repo, "codex", "report-camp-loop1.md");
   const log = join(repo, "codex", "state-camp-loop1.jsonl");
+  if (delayClosingAppend) {
+    // Enlarge the real write-to-exit window, not the test's wait: the real CLI has
+    // committed the original run's return but its caller has not received exit yet.
+    // An async append lets get_entries overtake `done`; an atomic close cannot.
+    writeFileSync(join(agentDir, "bin", "loop-state"), `#!/usr/bin/env node
+      const { spawnSync } = require("node:child_process");
+      const { readFileSync, writeFileSync } = require("node:fs");
+      const input = readFileSync(0, "utf8");
+      const result = spawnSync(${JSON.stringify(BIN)}, process.argv.slice(2), { input, encoding: "utf8", timeout: 10000 });
+      if (result.status === 0 && process.argv[2] === "append") {
+        const event = JSON.parse(input);
+        if (event.ev === "return") {
+          const rows = readFileSync(${JSON.stringify(log)}, "utf8").trim().split("\\n").map(JSON.parse);
+          if (rows.filter(r => r.ev === "return").length === 2) {
+            writeFileSync(${JSON.stringify(join(repo, "closing-append.json"))}, JSON.stringify({ run: event.run, returns: 2 }));
+            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 3000);
+          }
+        }
+      }
+      process.stdout.write(result.stdout || "");
+      process.stderr.write(result.stderr || "");
+      process.exit(result.status ?? 1);
+    `, { mode: 0o755 });
+  } else symlinkSync(BIN, join(agentDir, "bin", "loop-state"));
   const requests = join(repo, "rpc.jsonl");
   const extDir = freshDir("loop-state-repair-ext-");
   const stub = join(extDir, "launch-stub.ts");
@@ -154,8 +177,9 @@ test("a revived lane's bound report stays byte-identical and the repair block la
   }
 });
 
-test("a root restarted into a fresh launcher run dir still records the repair outcome", { timeout: 120_000 }, async () => {
-  const s = scaffold();
+for (const delayClosingAppend of [false, true]) {
+test(`a root restarted into a fresh launcher run dir still records the repair outcome${delayClosingAppend ? " while the closing CLI exit is delayed" : ""}`, { timeout: 120_000 }, async () => {
+  const s = scaffold(() => "", delayClosingAppend);
   const firstRunDir = freshDir("loop-state-repair-run-");
   const bound = join(s.repo, "lane-report.md");
   const expected = Buffer.from(REPORT);
@@ -194,10 +218,16 @@ test("a root restarted into a fresh launcher run dir still records the repair ou
     const done = (await recoveryEntries(session, "done")).at(-1);
     assert.equal(done.phase, "done");
     assert.equal(done.originalIntact, true);
+    if (delayClosingAppend) {
+      assert.deepEqual(JSON.parse(readFileSync(join(s.repo, "closing-append.json"), "utf8")), { run: original.run, returns: 2 },
+        "the real CLI committed the closing return before delaying its exit");
+    }
   } finally {
     await session.close();
   }
 });
+
+}
 
 test("a completion with a missing or non-string session never admits the repair", { timeout: 90_000 }, async () => {
   const forged = "FORGED_UNSCOPED";
