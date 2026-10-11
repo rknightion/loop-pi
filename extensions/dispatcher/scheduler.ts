@@ -1,4 +1,4 @@
-// The dispatcher's scheduling core (SEAMS.md S7). No pi, git or process calls: everything outside
+// The dispatcher's scheduling core (SEAMS.md, Names and paths: Dispatcher). No pi, git or process calls: everything outside
 // goes through Ports, so tests drive it with fakes.
 //
 // Rules:

@@ -1,4 +1,4 @@
-// Goal and LOOP.md parsing, and the planner predicate for a dispatcher root (SEAMS.md S4, S5, S7).
+// Goal and LOOP.md parsing, and the planner predicate for a dispatcher root (SEAMS.md, Names and paths: Dispatcher).
 //
 // The goal format is the campaign's frozen one:
 //

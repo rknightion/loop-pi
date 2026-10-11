@@ -1,6 +1,6 @@
-// loop-pi dispatcher (SEAMS.md S7): a pi session that runs a loop without an LLM root.
+// loop-pi dispatcher (SEAMS.md, Names and paths: Dispatcher): a pi session that runs a loop without an LLM root.
 //
-// Started in print mode with the S1 launch message (or a launch file path) as the prompt. The
+// Started in print mode with the launch message (or a launch file path) as the prompt. The
 // `input` handler runs the whole loop and returns `handled`, so the prompt never reaches a model and
 // the process lives exactly as long as the loop. pi-subagents still asks for a turn on each
 // completion: while the loop runs the session is idle, so it appends the notice and sends its

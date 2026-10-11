@@ -1,4 +1,4 @@
-// Lane briefs (SEAMS.md S3) built from the Envelope, and the two blocks the dispatcher reads back:
+// Lane briefs (SEAMS.md, Names and paths) built from the Envelope, and the two blocks the dispatcher reads back:
 // a lane's `lane-return` (v2) and a triager's `triage` decision.
 
 import { splitList, type TaskSpec } from "./goal.ts";
