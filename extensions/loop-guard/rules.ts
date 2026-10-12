@@ -2382,6 +2382,19 @@ export function evaluateSubagentCall(raw: SubagentInput): Decision {
   if (input.machine !== undefined) {
     return block("loop-guard: `subagent` calls may not set `machine` (root rule, C4 item 4).");
   }
+  const policy = evaluateSubagentPolicyFields(input);
+  if (policy.block) return policy;
+  if (isSubagentLaunch(input) && typeof input.agent === "string" && !C3_AGENTS.has(input.agent)) {
+    return block(`loop-guard: '${input.agent}' is outside the C3 agent set the root may spawn.`);
+  }
+  return allow();
+}
+
+/** Shared host-execution policy only. Native child role/depth/allowlists stay native-owned. */
+export function evaluateSubagentPolicyFields(raw: SubagentInput): Decision {
+  const merged = subagentCallView(raw);
+  if (!merged.ok) return block(merged.reason);
+  const input = merged.view;
   if (input.acceptance !== undefined) {
     return block("loop-guard: `subagent` calls may not carry `acceptance` (spawns a shell in the host process).");
   }
@@ -2407,9 +2420,6 @@ export function evaluateSubagentCall(raw: SubagentInput): Decision {
   }
   if (input.workflow !== undefined) {
     return block("loop-guard: `subagent` calls may not carry a `workflow` (it runs host commands or children outside Appendix C).");
-  }
-  if (isSubagentLaunch(input) && typeof input.agent === "string" && !C3_AGENTS.has(input.agent)) {
-    return block(`loop-guard: '${input.agent}' is outside the C3 agent set the root may spawn.`);
   }
   return allow();
 }

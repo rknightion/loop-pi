@@ -15,7 +15,7 @@ import { hookScriptsToRun, runHookScripts } from "./hooks.ts";
 import { installModelFamily, subagentOverrideBlock } from "./model-family.ts";
 import { hasSubagentField } from "./subagent-view.ts";
 import { installRequestCeiling, installRetryBackoff } from "../request-ceiling/index.ts";
-import { evaluateBashCommand, wrappedGateCommands, bindGateExecution } from "./rules.ts";
+import { evaluateBashCommand, evaluateSubagentPolicyFields, wrappedGateCommands, bindGateExecution } from "./rules.ts";
 import { loadGateDeclarations } from "./gates.ts";
 import { hasLanePushGrant } from "./push-grant.ts";
 import { parseLaneBinding } from "./ops.ts";
@@ -176,7 +176,11 @@ export default function (pi: ExtensionAPI) {
       if (hasSubagentField(event.input, "extensionBindings")) {
         return { block: true, reason: "loop-guard: lanes may not supply extensionBindings; only the root binds lane identity." };
       }
-      return subagentOverrideBlock(event.input);
+      const override = subagentOverrideBlock(event.input);
+      if (override) return override;
+      const policy = evaluateSubagentPolicyFields(event.input);
+      if (policy.block) return { block: true, reason: policy.reason };
+      return;
     }
 
     if (event.toolName === "edit" || event.toolName === "write") {
