@@ -1,5 +1,6 @@
 {
   "waitTool": false,
+  "runnerLaunchers": { "nopush": ["{{HOME}}/bin/loop-pi-nopush"] },
   "forceTopLevelAsync": true,
   "defaultSubagentContext": "fresh",
   "maxSubagentDepth": 2,

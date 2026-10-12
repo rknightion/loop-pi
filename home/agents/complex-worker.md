@@ -11,10 +11,11 @@ defaultContext: fresh
 inheritProjectContext: true
 inheritGlobalContext: false
 inheritSkills: false
+launcher: nopush
 async: true
 timeoutMs: 14400000
 allowedAgents: mapper, mapper-deep, gate-runner, lane-worker, lane-worker-low, lane-worker-retry, reviewer
-maxSubagentDepth: 1
+maxSubagentDepth: 2
 ---
 
 You are a judgement-heavy implementation lane in a fan-out campaign.

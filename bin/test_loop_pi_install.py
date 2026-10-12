@@ -42,6 +42,501 @@ def apply(prefix: Path, tgt, node: str = "/usr/bin/node") -> None:
         m.atomic_write(path, data, mode)
 
 
+class NopushTests(unittest.TestCase):
+    def test_wrapper_denies_all_network_push_protocols_but_keeps_local_git(self):
+        import sys
+        with tempfile.TemporaryDirectory(prefix="loop-pi-nopush-test-") as temporary:
+            root = Path(temporary)
+            env = {key: os.environ[key] for key in ("PATH", "TMPDIR") if key in os.environ}
+            env.update(HOME=str(root), GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+            def git(*args, wrapped=False):
+                command = ([str(HERE / "loop-pi-nopush")] if wrapped else []) + ["git", *args]
+                return subprocess.run(command, cwd=root, env=env, text=True,
+                                      capture_output=True, timeout=15)
+            def ok(*args, **kwargs):
+                result = git(*args, **kwargs)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                return result.stdout.strip()
+            ok("init", "-b", "main")
+            ok("config", "user.name", "export")
+            ok("config", "user.email", "export@example.com")
+            ok("-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "fixture")
+            for url in ("https://127.0.0.1:9/canary.git", "http://127.0.0.1:9/canary.git",
+                        "ssh://127.0.0.1:9/canary.git", "git@127.0.0.1:canary.git",
+                        "git://127.0.0.1:9/canary.git"):
+                with self.subTest(url=url):
+                    ok("remote", "add", "origin", url)
+                    for destination in ("origin", url):
+                        result = git("push", destination, "HEAD:refs/heads/main", wrapped=True)
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn("remote-loop-pi-push-denied", result.stderr)
+                        self.assertNotIn("loop-guard", result.stderr)
+                    ok("remote", "remove", "origin")
+            remote = root / "remote.git"
+            ok("init", "--bare", str(remote))
+            ok("remote", "add", "local", str(remote))
+            ok("push", "local", "main", wrapped=True)
+            ok("fetch", "local", wrapped=True)
+            self.assertEqual(ok("--git-dir", str(remote), "rev-parse", "main"), ok("rev-parse", "HEAD"))
+            # Exec preserves arguments, exit status, and disables prompts; no shell string joining.
+            result = subprocess.run([str(HERE / "loop-pi-nopush"), sys.executable, "-c",
+                                     "import os,sys; assert os.environ['GIT_TERMINAL_PROMPT']=='0'; "
+                                     "assert sys.argv[1:]==['a b', ';']; sys.exit(23)", "a b", ";"],
+                                    env=env, capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 23, result.stderr)
+
+    def test_installed_wrapper_config_agent_set_and_drift_in_subprocess(self):
+        import sys
+        with tempfile.TemporaryDirectory(prefix="loop-pi-nopush-install-") as temporary:
+            root = Path(temporary).resolve()
+            env = {key: os.environ[key] for key in ("PATH", "TMPDIR") if key in os.environ}
+            env.update(HOME=str(root), GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+            (root / "sentinel").write_text("untouched")
+            # Prebuild only the file-copy part in a fenced subprocess. The full candidate canary
+            # separately drives npm ci, validation and the native runner on a scratch install.
+            driver = '''
+import importlib.machinery, importlib.util, json, shutil, sys
+from pathlib import Path
+loader = importlib.machinery.SourceFileLoader("installer", sys.argv[1])
+spec = importlib.util.spec_from_loader(loader.name, loader)
+m = importlib.util.module_from_spec(spec); loader.exec_module(m)
+files = m.source_files(); label = m.build_label(files, m.pins(), "the loop-pi home templates\\0loop-pi-install")
+prefix = Path.home() / "data" / label
+for rel, source in files:
+    destination = prefix / rel; destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, destination)
+m.render_policy(prefix, "the loop-pi home templates")
+(prefix / m.BUILD_MANIFEST).write_text(json.dumps({"label": label, "missing_extensions": []}))
+'''
+            result = subprocess.run([sys.executable, "-c", driver, str(HERE / "loop-pi-install")],
+                                    env=env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            home = root / "pi"
+            args = [sys.executable, str(HERE / "loop-pi-install"), "--candidate-source", "--scratch-root", str(root),
+                    "--home", str(home), "--data", str(root / "data"), "--bin", str(root / "bin"),
+                    "--launcher", "loop-pi-test"]
+            def install(*extra, expected=0):
+                result = subprocess.run([*args, *extra], env=env, text=True, capture_output=True, timeout=30)
+                self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+                return result
+            install()
+            wrapper = home / "bin/loop-pi-nopush"
+            self.assertEqual(wrapper.read_bytes(), (HERE / "loop-pi-nopush").read_bytes())
+            self.assertEqual(wrapper.stat().st_mode & 0o777, 0o755)
+            receipt = json.loads((home / m.HOME_MANIFEST).read_text())
+            self.assertIn("bin/loop-pi-nopush", receipt["files"])
+            config = json.loads((home / "extensions/subagent/config.json").read_text())
+            self.assertEqual(config["runnerLaunchers"], {"nopush": [str(wrapper)]})
+            for path in (home / "agents").glob("*.md"):
+                front = path.read_text().split("---", 2)[1].splitlines()
+                expected = not path.stem.endswith("-push") and path.stem not in ("ops", "ops-probe")
+                self.assertEqual("launcher: nopush" in front, expected, path.name)
+            install("--check")
+            wrapper.write_text("drift\n")
+            self.assertIn(str(wrapper), install("--check", expected=1).stdout)
+            install()
+            wrapper.chmod(0o644)
+            self.assertIn(str(wrapper), install("--check", expected=1).stdout)
+            install()
+            install("--check")
+            install("--bin", str(root.parent / "outside"), expected=2)
+            self.assertEqual((root / "sentinel").read_text(), "untouched")
+
+
+class ScratchContainmentTests(unittest.TestCase):
+    """Public CLI negatives; every escape target still belongs to this disposable fixture."""
+
+    def escape_fixture(self, location):
+        import hashlib
+        import sys
+        retained = os.environ.get("LOOP_PI_SCRATCH_EVIDENCE")
+        temporary = tempfile.TemporaryDirectory(prefix="scratch-containment-", dir=retained)
+        parent = Path(temporary.name).resolve()
+        if retained:
+            temporary._finalizer.detach()
+        scratch, outside = parent / "scratch", parent / "outside"
+        scratch.mkdir(); outside.mkdir()
+        env = {key: os.environ[key] for key in ("PATH", "TMPDIR") if key in os.environ}
+        env.update(HOME=str(scratch), XDG_CONFIG_HOME=str(scratch / "config"),
+                   GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
+                   PI_OFFLINE="1", PI_SKIP_VERSION_CHECK="1", PI_TELEMETRY="0")
+        for directory in (scratch, outside):
+            (directory / "sentinel").write_text("untouched")
+        # Only prepare copied source/manifest bytes in a fenced child, as in NopushTests.
+        # Installation/refusal itself always goes through the actual public CLI subprocess.
+        prepare = r'''
+import importlib.machinery, importlib.util, json, shutil, sys
+from pathlib import Path
+loader = importlib.machinery.SourceFileLoader("installer", sys.argv[1])
+spec = importlib.util.spec_from_loader(loader.name, loader)
+m = importlib.util.module_from_spec(spec); loader.exec_module(m)
+files = m.source_files(); label = m.build_label(files, m.pins(), "the loop-pi home templates\0loop-pi-install")
+if sys.argv[2] != "staging":
+    prefix = Path.home() / "data" / label
+    for rel, source in files:
+        target = prefix / rel; target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+    m.render_policy(prefix, "the loop-pi home templates")
+    (prefix / m.BUILD_MANIFEST).write_text(json.dumps({"label": label, "missing_extensions": []}))
+print(label)
+'''
+        result = subprocess.run([sys.executable, "-c", prepare, str(HERE / "loop-pi-install"), location],
+                                cwd=parent, env=env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        label = result.stdout.strip()
+        escape = outside / "redirected"
+        escape.mkdir()
+        # Every negative prevents npm/network even if containment regresses.
+        tools = scratch / "tools"
+        tools.mkdir()
+        npm = tools / "npm"
+        npm.write_text('#!/bin/sh\necho called > "$HOME/npm-called"\nexit 91\n')
+        npm.chmod(0o755)
+        env["PATH"] = str(tools) + os.pathsep + env.get("PATH", "")
+        home = scratch / "pi"
+        home.mkdir()
+        if location == "staging":
+            link = scratch / "data" / f".staging-{label}"
+            self.assertFalse((scratch / "data" / label).exists())
+        elif location == "ancestor":
+            link = scratch / "planned"
+            home = link / "missing" / "pi"
+        else:
+            link = home / ("agents" if location in ("broken", "unreadable") else location)
+            name = "lane-worker.md" if location == "agents" else "loop-pi-nopush"
+            (escape / name).write_text("outside managed sentinel")
+        link.parent.mkdir(parents=True, exist_ok=True)
+        if location == "unreadable":
+            link.mkdir(mode=0o000)
+        else:
+            link.symlink_to(scratch / "missing-target" if location == "broken" else escape,
+                            target_is_directory=True)
+        def hashes(directory):
+            # Whole inventory without following links: files, directory modes and link targets.
+            inventory = {}
+            def walk_error(error):
+                inventory[str(Path(error.filename).relative_to(directory)) + "/error"] = error.errno
+            for current, dirs, files in os.walk(directory, followlinks=False, onerror=walk_error):
+                for name in dirs + files:
+                    p = Path(current) / name
+                    value = {"mode": oct(p.lstat().st_mode)}
+                    if p.is_symlink():
+                        value["link"] = os.readlink(p)
+                    elif p.is_file():
+                        value["sha256"] = hashlib.sha256(p.read_bytes()).hexdigest()
+                    inventory[str(p.relative_to(directory))] = value
+            return inventory
+        before, before_inside = hashes(outside), hashes(scratch)
+        sentinels = {str(p): hashlib.sha256(p.read_bytes()).hexdigest()
+                     for p in (scratch / "sentinel", outside / "sentinel")}
+        args = [sys.executable, str(HERE / "loop-pi-install"), "--candidate-source", "--scratch-root", str(scratch),
+                "--home", str(home), "--data", str(scratch / "data"), "--bin", str(scratch / "bin"),
+                "--launcher", "loop-pi-test"]
+        result = subprocess.run(args, cwd=parent, env=env, capture_output=True, text=True, timeout=30)
+        after, after_inside = hashes(outside), hashes(scratch)
+        proof = {"location": location, "command": args, "exit": result.returncode,
+                 "stdout": result.stdout, "stderr": result.stderr, "beforeOutside": before,
+                 "afterOutside": after, "beforeInside": before_inside, "afterInside": after_inside,
+                 "targetedBoundary": str(link), "homeExistsBeforeCLI": location != "ancestor",
+                 "sentinelHashes": sentinels,
+                 "sentinelsIntact": all(hashlib.sha256(Path(p).read_bytes()).hexdigest() == h
+                                       for p, h in sentinels.items()),
+                 "npmCalled": (scratch / "npm-called").exists(), "hostedModelCalls": 0,
+                 "networkCalls": 0}
+        (parent / "proof.json").write_text(json.dumps(proof, indent=2) + "\n")
+        try:
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            if location in ("broken", "unreadable"):
+                self.assertIn("candidate destination topology cannot be checked", result.stderr)
+                self.assertIn("[Errno 2]" if location == "broken" else "[Errno 13]", result.stderr)
+                self.assertIn(str(scratch / "missing-target") if location == "broken" else str(link),
+                              result.stderr)
+            else:
+                self.assertIn(f"candidate destination {link} escapes --scratch-root", result.stderr)
+            self.assertEqual(after_inside, before_inside, "inside fixture inventory must not change")
+            self.assertEqual(after, before, "outside fixture bytes must not change")
+            self.assertTrue(proof["sentinelsIntact"])
+            self.assertFalse(proof["npmCalled"], "refuse before npm side effects")
+            self.assertFalse((scratch / "pi/tmp").exists(), "refuse before home setup")
+        finally:
+            if location == "unreadable":
+                link.chmod(0o700)
+            if not retained:
+                temporary.cleanup()
+
+    def test_interior_home_agents_escape_is_refused_before_writes(self):
+        self.escape_fixture("agents")
+
+    def test_interior_home_bin_escape_is_refused_before_writes(self):
+        self.escape_fixture("bin")
+
+    def test_derived_build_staging_escape_is_refused_before_copies(self):
+        self.escape_fixture("staging")
+
+    def test_missing_descendants_of_escaping_ancestor_are_refused(self):
+        self.escape_fixture("ancestor")
+
+    def test_broken_contained_link_is_not_a_planned_directory(self):
+        self.escape_fixture("broken")
+
+    def test_permission_error_is_not_ignored(self):
+        self.escape_fixture("unreadable")
+
+
+class NopushNativeCanary(unittest.TestCase):
+    """No hosted model or mutable network remote: installed native runners against faux.
+
+    Set LOOP_PI_NOPUSH_EVIDENCE to retain the scratch install and complete RPC/session
+    transcript. The only attempted network push is the unreachable loopback control.
+    """
+
+    def test_scratch_installed_native_canary(self):
+        import sys
+        import time
+        from bin.test_loop_smoke import Rpc
+        retained = os.environ.get("LOOP_PI_NOPUSH_EVIDENCE")
+        temporary = tempfile.TemporaryDirectory(prefix="nopush-canary-", dir=retained)
+        root = Path(temporary.name).resolve()
+        if retained:
+            # Detach the cleanup finalizer only for explicitly retained evidence.
+            temporary._finalizer.detach()
+        home, data, bins, repo, run_dir, overlay = [root / name for name in
+                                                  ("planned/homes/pi", "planned/builds/data", "planned/tools/bin",
+                                                   "repo", "run", "overlay")]
+        repo.mkdir(); run_dir.mkdir()
+        (root / "sentinel").write_text("untouched")
+        env = {key: os.environ[key] for key in ("PATH", "TMPDIR") if key in os.environ}
+        env.update(HOME=str(root), XDG_CONFIG_HOME=str(root / "config"),
+                   GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
+                   PI_OFFLINE="1", PI_SKIP_VERSION_CHECK="1", PI_TELEMETRY="0")
+        transcript = root / "commands.log"
+        def command(*args, cwd=repo, expected=0, timeout=30):
+            result = subprocess.run(args, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout)
+            with transcript.open("a") as log:
+                log.write(json.dumps(list(args)) + f"\nexit={result.returncode}\n" + result.stdout + result.stderr + "\n")
+            if expected is not None:
+                self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+            return result
+        def git(*args, **kwargs):
+            return command("git", *args, **kwargs).stdout.strip()
+        faux = HERE.parent / "extensions/test-support/faux-extension.ts"
+        agents = overlay / "home/agents"
+        agents.mkdir(parents=True)
+        for name in ("lane-worker", "complex-worker-push", "lane-worker-push"):
+            text = (HERE.parent / "home/agents" / f"{name}.md").read_text()
+            text = text.replace("model: openai/gpt-6.1-sol", "model: faux/faux-1")
+            text = text.replace("extensions:\n", f"extensions: []\nsubagentOnlyExtensions: {faux}\n")
+            (agents / f"{name}.md").write_text(text)
+        # The remaining agents also need to pass the installer's family check, but are never run.
+        for path in (HERE.parent / "home/agents").glob("*.md"):
+            if not (agents / path.name).exists():
+                import re
+                (agents / path.name).write_text(re.sub(r"(?m)^model: .*", "model: faux/faux-1", path.read_text()))
+        (overlay / "home/settings.json").write_text(json.dumps({
+            "enabledModels": ["faux/faux-1"], "subagents": {"agentExcludeDirs": ["~/.agents"]},
+            "loopPi": {"modelFamily": {"provider": "faux", "pattern": "^faux-1$", "name": "faux"},
+                       "rootRoute": {"provider": "faux", "model": "faux-1", "thinking": "off"}}}))
+        git("init", "-b", "main")
+        git("config", "user.name", "export"); git("config", "user.email", "export@example.com")
+        git("config", "commit.gpgsign", "false")
+        (repo / "push.sh").write_text("#!/bin/sh\nexec git push origin HEAD:refs/heads/main\n")
+        (repo / "local.sh").write_text("#!/bin/sh\nset -eu\ngit fetch local\ngit push local HEAD:refs/heads/wrapped\n")
+        for name in ("push.sh", "local.sh"):
+            (repo / name).chmod(0o755)
+        git("add", "--", "push.sh", "local.sh"); git("commit", "-m", "fixture")
+        sha = git("rev-parse", "HEAD")
+        git("remote", "add", "origin", "https://127.0.0.1:9/canary.git")
+        local = root / "local.git"
+        git("init", "--bare", str(local))
+        git("remote", "add", "local", str(local))
+        git("push", "local", "main")
+        # Real subprocess install, including npm ci and the original runtime validations.
+        command(sys.executable, str(HERE / "loop-pi-install"), "--candidate-source", "--scratch-root", str(root),
+                "--home", str(home), "--data", str(data), "--bin", str(bins), "--launcher", "loop-pi-canary",
+                "--overlay", str(overlay), cwd=HERE.parent, timeout=240)
+        # Recheck the genuine npm-built tree too: its internal .bin file links are legitimate.
+        command(sys.executable, str(HERE / "loop-pi-install"), "--candidate-source", "--scratch-root", str(root),
+                "--home", str(home), "--data", str(data), "--bin", str(bins), "--launcher", "loop-pi-canary",
+                "--overlay", str(overlay), "--check", cwd=HERE.parent)
+        prefix = data / json.loads((home / m.HOME_MANIFEST).read_text())["label"]
+        (run_dir / "loop-pi-proto").write_text("2\n")
+        env.update(PI_CODING_AGENT_DIR=str(home), PI_SUBAGENTS_TEMP_ROOT=str(home / "tmp"),
+                   LOOP_PI_RUN_DIR=str(run_dir), LOOP_PI_REPO=str(repo))
+        script = root / "script.json"
+        env["LOOP_PI_FAUX_SCRIPT"] = str(script)
+        def tool(name, **args):
+            return {"name": name, "args": args}
+        def spawn(agent, task, **options):
+            return tool("subagent", agent=agent, task=task, **{"async": True, "worktree": False, **options})
+        script.write_text(json.dumps({"rules": [
+            {"match": "^CONTROL_ROOT$", "once": True, "toolCalls": [tool("bash", command="./push.sh", timeout=15)]},
+            {"match": "^WRAPPED_ROOT$", "once": True, "toolCalls": [spawn("lane-worker", "WRAPPED_CHILD\nLanding: returns candidate")]},
+            {"match": "^Task: WRAPPED_CHILD", "once": True, "toolCalls": [tool("bash", command="./push.sh", timeout=15)]},
+            {"match": "^LOCAL_ROOT$", "once": True, "toolCalls": [spawn("lane-worker", "LOCAL_CHILD\nLanding: returns candidate")]},
+            {"match": "^Task: LOCAL_CHILD", "once": True, "toolCalls": [tool("bash", command="./local.sh", timeout=15)]},
+            {"match": "^GUARD_ROOT$", "once": True, "toolCalls": [spawn("lane-worker", "GUARD_CHILD\nLanding: returns candidate")]},
+            {"match": "^Task: GUARD_CHILD", "once": True, "toolCalls": [tool("bash", command="git push local HEAD:refs/heads/forbidden", timeout=15)]},
+            {"match": "^FOREGROUND_ROOT$", "once": True, "toolCalls": [spawn("complex-worker-push", "FOREGROUND_PARENT\nLanding: returns candidate\nDelegation: one local faux child")]},
+            {"match": "^Task: FOREGROUND_PARENT", "once": True, "toolCalls": [spawn("lane-worker", "FOREGROUND_CHILD\nLanding: returns candidate", **{"async": False})]},
+            {"match": "^ASYNC_ROOT$", "once": True, "toolCalls": [spawn("complex-worker-push", "ASYNC_PARENT\nLanding: returns candidate\nDelegation: one local faux child")]},
+            {"match": "^Task: ASYNC_PARENT", "once": True, "toolCalls": [spawn("lane-worker", "NESTED_CHILD\nLanding: returns candidate")]},
+            {"match": "^Task: NESTED_CHILD", "once": True, "toolCalls": [tool("bash", command="./push.sh", timeout=15)]},
+            {"match": "^PUSH_ROOT$", "once": True, "toolCalls": [spawn("lane-worker-push", "PUSH_CHILD\nLanding: returns candidate")]},
+            {"match": "^Task: PUSH_CHILD", "once": True, "toolCalls": [tool("bash", command="git push local HEAD:refs/heads/granted", timeout=15)]},
+            {"match": ".*", "text": "faux done"},
+        ]}))
+        node = m.node_binary()
+        rpc = Rpc([node, str(prefix / m.PI_CLI), "--mode", "rpc", "--provider", "faux", "--model", "faux-1",
+                   "--extension", str(faux), "--extension", str(prefix / "extensions/loop-guard/root.ts"),
+                   "--exclude-tools", "subagents_enable,bg_wait"], repo, env)
+        def prompt(marker):
+            start = len(rpc.events)
+            rpc.send(type="prompt", message=marker)
+            end = rpc.wait(lambda e: e.get("type") == "tool_execution_end", marker, start)
+            rpc.wait(lambda e: e.get("type") == "agent_settled", marker + " settle", start)
+            return end
+        def child_result(marker, tool_name="bash"):
+            deadline = time.monotonic() + 40
+            while time.monotonic() < deadline:
+                for path in (home / "sessions").rglob("session.jsonl"):
+                    text = path.read_text()
+                    if marker not in text:
+                        continue
+                    for line in text.splitlines():
+                        try:
+                            message = json.loads(line).get("message", {})
+                        except ValueError:
+                            continue
+                        if message.get("role") == "toolResult" and message.get("toolName") == tool_name:
+                            return path, message
+                time.sleep(.1)
+            self.fail(f"native child result missing: {marker}")
+        def terminal_runs():
+            deadline = time.monotonic() + 40
+            while time.monotonic() < deadline:
+                statuses = [json.loads(p.read_text()) for p in (home / "tmp").rglob("status.json")]
+                if statuses and all(s.get("state") in ("complete", "failed", "partial", "stopped", "rejected") for s in statuses):
+                    return statuses
+                time.sleep(.1)
+            self.fail("native runs did not reach terminal states")
+        def run_for_session(session):
+            matches = [(p, json.loads(p.read_text())) for p in (home / "tmp").rglob("status.json")
+                       if json.loads(p.read_text()).get("sessionFile") == str(session)]
+            self.assertEqual(len(matches), 1, [str(p) for p, _ in matches])
+            return matches[0]
+        try:
+            control = prompt("CONTROL_ROOT")
+            control_text = json.dumps(control)
+            self.assertTrue(control.get("isError"), control)
+            self.assertRegex(control_text.lower(), "couldn't connect|connection refused|failed to connect")
+            self.assertNotIn("loop-guard:", control_text)
+            self.assertNotIn("remote-loop-pi-push-denied", control_text)
+            print("CONTROL: committed ./push.sh reached unreachable loopback endpoint, not guard", flush=True)
+            launch = prompt("WRAPPED_ROOT")
+            self.assertFalse(launch.get("isError", False), launch)
+            path, result = child_result("WRAPPED_CHILD")
+            self.assertTrue(result.get("isError"), result)
+            self.assertIn("remote-loop-pi-push-denied", json.dumps(result))
+            statuses = terminal_runs()
+            wrapped = [s for s in statuses if s.get("steps", [{}])[0].get("agent") == "lane-worker"]
+            self.assertTrue(wrapped, statuses)
+            self.assertTrue(all(s.get("launcher", {}).get("name") == "nopush" for s in wrapped), wrapped)
+            print("WRAPPED: unknown helper denial; native status launcher.name=nopush", flush=True)
+            prompt("LOCAL_ROOT")
+            _, result = child_result("LOCAL_CHILD")
+            self.assertFalse(result.get("isError"), result)
+            self.assertEqual(git("--git-dir", str(local), "rev-parse", "wrapped"), sha)
+            terminal_runs()
+            print("LOCAL: wrapped child's script fetched and pushed local bare ref, exact SHA", flush=True)
+            prompt("GUARD_ROOT")
+            _, result = child_result("GUARD_CHILD")
+            self.assertTrue(result.get("isError"), result)
+            self.assertIn("push requires a push-granted lane identity", json.dumps(result))
+            self.assertNotEqual(command("git", "--git-dir", str(local), "rev-parse", "forbidden", expected=None).returncode, 0)
+            terminal_runs()
+            print("REQUIRED GUARD: wrapped child explicit push refused by required lane guard", flush=True)
+            prompt("FOREGROUND_ROOT")
+            parent_session, result = child_result("FOREGROUND_PARENT", "subagent")
+            self.assertIn("wraps the background runner only", json.dumps(result))
+            self.assertIn("launcher 'nopush'", json.dumps(result))
+            self.assertNotIn("Nested subagent call blocked", json.dumps(result))
+            self.assertNotIn("loop-guard:", json.dumps(result))
+            self.assertTrue(result.get("isError"), result)
+            terminal_runs()
+            parent_status_path, _ = run_for_session(parent_session)
+            parent_recovery = json.loads((parent_status_path.parent / "recovery-descriptor.json").read_text())
+            self.assertEqual(parent_recovery["agent"], "complex-worker-push")
+            self.assertEqual(parent_recovery["maxSubagentDepth"], 2)
+            print("NESTED FOREGROUND: complex-worker-push async:false lane-worker refused by native producer", flush=True)
+            prompt("ASYNC_ROOT")
+            parent_session, nested_launch = child_result("ASYNC_PARENT", "subagent")
+            self.assertFalse(nested_launch.get("isError", False), nested_launch)
+            nested_session, result = child_result("NESTED_CHILD")
+            self.assertTrue(result.get("isError"), result)
+            self.assertIn("remote-loop-pi-push-denied", json.dumps(result))
+            self.assertNotIn("loop-guard:", json.dumps(result))
+            statuses = terminal_runs()
+            self.assertTrue(any(s.get("launcher", {}).get("name") == "nopush" for s in statuses))
+            parent_status_path, parent_status = run_for_session(parent_session)
+            parent_recovery = json.loads((parent_status_path.parent / "recovery-descriptor.json").read_text())
+            self.assertEqual(parent_recovery["agent"], "complex-worker-push")
+            self.assertEqual(parent_recovery["maxSubagentDepth"], 2)
+            nested_status_path, nested_status = run_for_session(nested_session)
+            self.assertEqual(nested_status_path.parent.parent.parent.name, "nested-subagent-runs")
+            # Native 0.77 creates the route and sessionRoot from the launch runId;
+            # executeAsyncSingle uses a separate ID for the outer async status.
+            # Read the scope from the parent's recovery producer, never the child path.
+            parent_session_root = Path(parent_recovery["sessionDir"]).parent
+            parent_route_id = parent_session_root.name
+            self.assertEqual(Path(parent_recovery["sessionFile"]), parent_session)
+            self.assertEqual(parent_session.parent.parent, parent_session_root)
+            def assert_nested_scope(route_id):
+                self.assertEqual(nested_status_path, home / "tmp/nested-subagent-runs" /
+                                 route_id / nested_status["runId"] / "status.json")
+            assert_nested_scope(parent_route_id)
+            # The former (wrong) outer-status identity and an unrelated root must fail.
+            for wrong_id in (parent_status["runId"], "wrong-parent-root"):
+                with self.assertRaises(AssertionError):
+                    assert_nested_scope(wrong_id)
+            with nested_session.open() as session_file:
+                nested_header = json.loads(session_file.readline())
+            self.assertEqual(nested_header["type"], "session")
+            self.assertEqual(nested_header["parentSession"], str(parent_session))
+            nested_recovery = json.loads((nested_status_path.parent / "recovery-descriptor.json").read_text())
+            self.assertEqual(nested_recovery["maxSubagentDepth"], 2)
+            self.assertEqual(nested_recovery["capabilityCeiling"]["allowedAgents"], parent_recovery["allowedAgents"])
+            self.assertEqual(nested_status["steps"][0]["agent"], "lane-worker")
+            self.assertEqual(nested_status["launcher"]["name"], "nopush")
+            print("NESTED ASYNC: fresh nested lane-worker wrapper denied script push", flush=True)
+            prompt("PUSH_ROOT")
+            _, result = child_result("PUSH_CHILD")
+            self.assertFalse(result.get("isError"), result)
+            self.assertEqual(git("--git-dir", str(local), "rev-parse", "granted"), sha)
+            statuses = terminal_runs()
+            receipts = [json.loads(line) for line in (run_dir / "push-log.jsonl").read_text().splitlines()]
+            self.assertTrue(any(r.get("agent") == "lane-worker-push" and r.get("new") == sha
+                                and r.get("ref") == "refs/heads/granted" for r in receipts), receipts)
+            self.assertTrue(all("launcher" not in s for s in statuses if s.get("steps", [{}])[0].get("agent") == "lane-worker-push"))
+            self.assertEqual((root / "sentinel").read_text(), "untouched")
+            (root / "canary-receipt.json").write_text(json.dumps({"base": m.source_commit(HERE.parent),
+                "fixtureSha": sha, "prefix": str(prefix), "statuses": statuses, "pushReceipts": receipts,
+                "provider": "faux/faux-1", "networkOrigin": "https://127.0.0.1:9/canary.git",
+                "sentinelIntact": True, "complexParentMaxDepth": parent_recovery["maxSubagentDepth"],
+                "nestedParentRunId": parent_status["runId"], "nestedChildRunId": nested_status["runId"],
+                "nestedParentRouteId": parent_route_id, "nestedParentSession": str(parent_session),
+                "wrongParentIdentityControlsRejected": True,
+                "nestedStatusPath": str(nested_status_path)}, indent=2) + "\n")
+            print("PUSH REGRESSION: lane-worker-push real local-bare push receipt matches fixture SHA", flush=True)
+            print(f"CANARY PASS: scratch install, full transcripts and receipt at {root}", flush=True)
+        finally:
+            code = rpc.close()
+            (root / "rpc.jsonl").write_text("".join(json.dumps(e) + "\n" for e in rpc.events))
+            (root / "rpc-stderr.log").write_text("".join(rpc.errors))
+            print(f"native RPC exit={code}; scratch={root}", flush=True)
+            if not retained:
+                temporary.cleanup()
+
+
 class GateCliTests(unittest.TestCase):
     def test_gate_wrapper_is_copied_installed_executable_and_drift_checked(self):
         self.assertIn("loop-gate-lock", m.CLI_TOOLS)

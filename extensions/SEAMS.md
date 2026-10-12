@@ -75,7 +75,7 @@ public statement of those contracts.
   existing parser's wrappers, aliases and fallback scan. Force pushes remain blocked for all.
   The real-CLI faux-provider test proves denial, a push to a disposable local bare remote,
   and replacement of model-supplied bindings. This remains an honest-mistake fence, not an
-  OS security boundary. **Foreground nested children inherit the detached parent's push
+  OS security boundary. **Unwrapped foreground nested children inherit the detached parent's push
   grant, even when the nested agent is not one of the push agents.** pi-subagents
   0.77.0 creates foreground children in the parent's process and does not apply per-child
   `processEnv` there; the lane extension therefore reads the parent's binding. Denying
@@ -86,6 +86,44 @@ public statement of those contracts.
   binding forgery, not foreground inheritance. Briefs must not treat the guard as enforcing
   a separate no-push right on a granted lane's foreground descendants.
   Installed homes adopt it only after a lock bump.
+- **Non-push launcher (pi-subagents 0.77.0):** all shipped non-push agents except `ops` and
+  `ops-probe` name `launcher: nopush`. The user subagent config maps `runnerLaunchers.nopush`
+  to `<agentDir>/bin/loop-pi-nopush`, managed by the installer. The wrapper sets Git environment
+  `pushInsteadOf` rewrites for HTTPS, HTTP, SSH, `git@` and `git://` to an unknown helper scheme,
+  disables terminal credential prompts, then execs the background runner's argv. Fetch and local
+  bare pushes are unaffected. This is a script/task-runner honest-mistake fence, not an OS boundary:
+  explicit remote push URLs, environment scrubbing, Git libraries ignoring that configuration and
+  API writes remain outside it. Native required child extensions and identity bindings still load.
+  Each nested async launch gets fresh Git routing environment, so its own agent must name the
+  launcher. The native producer refuses launcher agents with explicit `async:false`, `clarify` or
+  `foregroundOnly`; losing foreground non-push children of push lanes is intentional. Agents in
+  one background runner must use the same launcher or none. **The name `nopush` is frozen:**
+  native resume uses the recorded launcher name (including recorded absence), not the current agent
+  file; removing the name refuses resumes, and runs launched before adoption remain unwrapped.
+
+## Scratch candidate installation
+
+The installer's paired `--candidate-source --scratch-root` flags require a disposable HOME
+and install roots strictly inside it. Before invoking build/runtime tools or writing managed
+files, candidate mode checks the existing home, bin and data trees without following directory
+links, including build/staging descendants. Directory symlinks in those trees are refused;
+file symlinks must resolve to existing targets inside scratch (npm's internal executable
+links remain valid). Planned absent roots are allowed only beneath a validated existing directory
+inside scratch, with a plain missing suffix; broken links and traversal errors are refused.
+The scratch root itself is canonicalised (a symlink alias selects its target); existing destination
+ancestors are checked against that canonical boundary before accepting missing descendants.
+This is a static-topology mistake fence, not protection against adversarial same-account races
+or an OS sandbox. Ordinary installations without the paired flags keep their existing behavior.
+
+## Complex lane nesting
+
+`complex-worker` and `complex-worker-push` set `maxSubagentDepth: 2`, matching the home's
+existing global maximum of 2. pi-subagents 0.77.0 counts the root at depth 0, its lane at
+1 and that lane's child at 2; it intersects the parent's maximum with the selected agent's
+maximum. A lane maximum of 1 therefore prevents any child launch from that lane. The complex
+pair's metadata preserves the already-approved depth-2 delegation shape, not a higher global
+cap or new delegation authority. Both retain their existing `allowedAgents`, tools and models;
+delegation still requires an explicit brief grant and the existing seven-slot reserve.
 
 ## Role by entry point
 

@@ -28,6 +28,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -56,7 +57,7 @@ LANE_EXTENSIONS = ("loop-guard/lane.ts", "loop-wait/lane.ts", "call-timing/index
 # Operator and root CLIs from bin/, installed next to the launcher.
 CLI_TOOLS = ("loop-pi-preflight", "loop-pi-audit", "loop-gate-lock")
 # Installed into <home>/bin/ (not next to the launcher) when the source carries it.
-HOME_TOOLS = ("loop-state",)
+HOME_TOOLS = ("loop-state", "loop-pi-nopush")
 LANE_POLICY = "lane-policy.md"
 LANE_POLICY_MARKER = "<!-- lane-policy -->"
 NEVER_MANAGED = {"auth.json"}
@@ -622,7 +623,8 @@ def drift(prefix: Path, target: Target, node: str,
             data = keep_runtime_settings(data, path)
             if same_json(path, data):
                 continue
-        if not path.is_file() or path.read_bytes() != data:
+        if (not path.is_file() or path.read_bytes() != data
+                or (rel == "bin/loop-pi-nopush" and path.stat().st_mode & 0o777 != mode)):
             changes.append((path, data, mode))
     receipt = {"label": manifest["label"], "files": sorted(set(plan) | set(target.external))}
     if target.variant:
@@ -664,6 +666,66 @@ def parse_vars(items: List[str]) -> Dict[str, str]:
     return variables
 
 
+def check_candidate_destinations(scratch: Path, destinations: Tuple[Path, ...]) -> None:
+    """Fence existing topology before any candidate build/home side effects.
+
+    Never descend directory symlinks: even contained links could hide another escaping link.
+    Internal file links (notably npm's node_modules/.bin entries) are safe to retain. This
+    preflight is not a defense against concurrent same-account filesystem replacement.
+    """
+    def walk_error(error: OSError) -> None:
+        raise error
+
+    try:
+        for destination in destinations:
+            requested = destination.expanduser().absolute()
+            if ".." in requested.parts:
+                raise InstallError(f"candidate destination {destination} must have a plain path suffix")
+            ancestor = requested
+            missing = []
+            while True:
+                try:
+                    ancestor.lstat()
+                    break
+                except FileNotFoundError:
+                    # Only absent planned components are allowed, never a broken link or a
+                    # walk error. lstat stops at links; strict resolution below checks them.
+                    missing.append(ancestor.name)
+                    ancestor = ancestor.parent
+            existing = ancestor.resolve(strict=True)
+            if existing != scratch and scratch not in existing.parents:
+                raise InstallError(f"candidate destination {ancestor} escapes --scratch-root")
+            resolved = existing.joinpath(*reversed(missing))
+            if resolved == scratch:
+                raise InstallError(f"candidate destination {destination} must be strictly inside --scratch-root")
+            # Check every existing ancestor as well, not only a final link that could re-enter
+            # scratch after an earlier escaping directory. Scratch's own alias is canonical.
+            cursor = ancestor
+            while True:
+                actual = cursor.resolve(strict=True)
+                if actual != scratch and scratch not in actual.parents:
+                    raise InstallError(f"candidate destination {cursor} escapes --scratch-root")
+                if not stat.S_ISDIR(cursor.stat().st_mode):
+                    raise InstallError(f"candidate destination {cursor} must be a directory")
+                if actual == scratch:
+                    break
+                cursor = cursor.parent
+            if missing:
+                continue
+            for directory, dirs, files in os.walk(resolved, followlinks=False, onerror=walk_error):
+                for name in dirs + files:
+                    path = Path(directory) / name
+                    if not stat.S_ISLNK(path.lstat().st_mode):
+                        continue
+                    actual = path.resolve(strict=True)
+                    if actual == scratch or scratch not in actual.parents:
+                        raise InstallError(f"candidate destination {path} escapes --scratch-root")
+                    if stat.S_ISDIR(path.stat().st_mode):
+                        raise InstallError(f"candidate destination {path} must not be a directory symlink")
+    except (OSError, RuntimeError) as error:
+        raise InstallError(f"candidate destination topology cannot be checked: {error}") from error
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--home", type=Path, required=True, help="the pi home to install (PI_CODING_AGENT_DIR)")
@@ -681,11 +743,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--source-repo", default="", help="recorded in the build manifest")
     parser.add_argument("--overlay-commit", default="", help="recorded in the build manifest")
     parser.add_argument("--node", help="absolute node executable (overrides LOOP_PI_NODE and recorded node)")
+    parser.add_argument("--candidate-source", action="store_true",
+                        help="validate this source candidate only under --scratch-root")
+    parser.add_argument("--scratch-root", type=Path,
+                        help="candidate fence: HOME and all install destinations must be inside this root")
     parser.add_argument("--check", action="store_true", help="report drift, write nothing")
     parser.add_argument("--allow-missing-extensions", action="store_true",
                         help="bootstrap only: install a build whose launcher runs --version and nothing else")
     args = parser.parse_args(argv)
     try:
+        if args.candidate_source != (args.scratch_root is not None):
+            raise InstallError("--candidate-source and --scratch-root must be supplied together")
+        if args.candidate_source:
+            scratch = args.scratch_root.expanduser().resolve()
+            if not scratch.is_dir() or scratch == Path(scratch.anchor) or scratch != USER_HOME.resolve():
+                raise InstallError("--scratch-root must be an existing throwaway HOME, not the filesystem root")
+            check_candidate_destinations(scratch, (args.home, args.bin, args.data))
         if not re.fullmatch(r"[A-Za-z0-9._-]+", args.launcher):
             raise InstallError("--launcher must be a plain file name")
         if args.variant and not re.fullmatch(r"[A-Za-z0-9._-]+", args.variant):
@@ -716,6 +789,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         provenance = {"source_repo": args.source_repo, "source_commit": source_commit(SRC),
                       "overlay_commit": args.overlay_commit}
         prefix = build(data, label, files, pin, node, args.allow_missing_extensions, args.policy_source, provenance)
+        if args.candidate_source:
+            check_candidate_destinations(scratch, (target.home, target.bin_dir, data))
         target.home.mkdir(mode=0o700, parents=True, exist_ok=True)
         (target.home / "tmp").mkdir(mode=0o700, exist_ok=True)
         stale = stale_managed(target.home, set(home_plan(prefix, target.home, variables)), target.external)

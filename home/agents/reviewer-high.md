@@ -11,6 +11,7 @@ defaultContext: fresh
 inheritProjectContext: true
 inheritGlobalContext: false
 inheritSkills: false
+launcher: nopush
 async: true
 timeoutMs: 7200000
 ---

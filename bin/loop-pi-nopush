@@ -1,0 +1,17 @@
+#!/bin/sh
+# Honest-mistake fence for network Git pushes from a background runner and its tools.
+# Not an OS boundary: explicit pushurl, scrubbed env, Git libraries and API writes bypass it.
+set -eu
+export GIT_CONFIG_COUNT=5
+export GIT_CONFIG_KEY_0='url.loop-pi-push-denied::.pushInsteadOf'
+export GIT_CONFIG_VALUE_0='https://'
+export GIT_CONFIG_KEY_1='url.loop-pi-push-denied::.pushInsteadOf'
+export GIT_CONFIG_VALUE_1='http://'
+export GIT_CONFIG_KEY_2='url.loop-pi-push-denied::.pushInsteadOf'
+export GIT_CONFIG_VALUE_2='ssh://'
+export GIT_CONFIG_KEY_3='url.loop-pi-push-denied::.pushInsteadOf'
+export GIT_CONFIG_VALUE_3='git@'
+export GIT_CONFIG_KEY_4='url.loop-pi-push-denied::.pushInsteadOf'
+export GIT_CONFIG_VALUE_4='git://'
+export GIT_TERMINAL_PROMPT=0
+exec "$@"

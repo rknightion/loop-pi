@@ -11,6 +11,7 @@ defaultContext: fresh
 inheritProjectContext: true
 inheritGlobalContext: false
 inheritSkills: false
+launcher: nopush
 async: true
 timeoutMs: 14400000
 allowedAgents: mapper, mapper-deep, gate-runner, lane-worker, lane-worker-low, lane-worker-retry, reviewer
