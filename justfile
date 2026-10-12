@@ -63,3 +63,34 @@ leak:
     done
     python3 bin/leak-scan --path .
     python3 bin/leak-scan --history
+
+# Print the newest request-progress checkpoint in a pi home: field names, counts and times only
+[group('dev')]
+verify-pi-progress home=(home_directory() / ".loop-pi-personal"):
+    #!/usr/bin/env bash
+    set -euo pipefail
+    python3 - {{ quote(home) }} <<'PY'
+    import json, pathlib, sys, time
+    directory = pathlib.Path(sys.argv[1]) / "progress"
+    files = sorted(directory.glob("*.json"), key=lambda p: p.stat().st_mtime) if directory.is_dir() else []
+    if not files:
+        print(f"no checkpoint found under {directory}")
+        sys.exit(1)
+    record = json.loads(files[-1].read_text())
+    def show(prefix, value):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                show(f"{prefix}{key}.", child)
+            return
+        name = prefix[:-1]
+        if value is None:
+            print(f"{name}: null")
+        elif isinstance(value, bool) or not isinstance(value, (int, float)):
+            print(f"{name}: <{type(value).__name__}>")
+        else:
+            print(f"{name}: {value}")
+    show("", record)
+    written = record.get("writtenAt")
+    if isinstance(written, (int, float)) and not isinstance(written, bool):
+        print(f"freshness_ms: {int(time.time() * 1000 - written)}")
+    PY

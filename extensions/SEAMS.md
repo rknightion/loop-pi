@@ -173,6 +173,73 @@ child extension (including children declaring `extensions: []`).
   agent's serialized turn, not arbitrary nested model calls or idle cache warming. Providers that
   do not implement pi's instrumentation hooks yield missing headers, not invented values.
 
+## Request progress seam
+
+`extensions/call-timing/progress.ts` (wired by `call-timing/index.ts`, so the root and every child
+carry it) records content-free progress for each model request: one record per agent-loop turn,
+from `turn_start` to the assistant `message_end` (a pi agent-level retry is a new turn, so a new
+record). The record is version `v: 1`; a consumer refuses any other `v`. It is written to a live
+checkpoint and, at `message_end`, retained on the assistant message as `loopPiProgress`, beside
+and independent of `loopPiTiming`, whose fields and `firstTokenAt` semantics are unchanged.
+
+Fields. Times are local `Date.now()` epoch ms at the moment the extension observed the event;
+"null" always means not observed (or not supported by the provider), never zero.
+
+- Correlation: `session` (pi session id, null without a session context), `request` (a random
+  UUID per record), `turn` (1-based ordinal of the turn in this session in this process), `pid`
+  (the writing pi process), `provider` / `model` / `api` (the selected model's identifiers).
+  `providerResponses` counts `after_provider_response` events in the record (a provider-internal
+  retry that reaches headers again increments it; it is an observation, not an attempt count);
+  `firstResponseAt` is the first of them; `providerRequestId` is the latest response's
+  `x-request-id`, or null.
+- Lifecycle: `state` is `active` while the request runs, `ended` at the assistant `message_end`
+  (`stopReason` is then pi's stop reason, e.g. `stop`, `toolUse`, `length`, `error`, `aborted`),
+  or `abandoned` when a turn or session boundary arrives first (`stopReason` null). `startedAt`
+  is `turn_start`; `endedAt` is null until the end; `writtenAt` is the time the snapshot was
+  taken (the freshness stamp); `ageMs` is `(endedAt ?? writtenAt) - startedAt`.
+- Model progress, from pi's normalized `message_update` stream (every pi provider emits it):
+  a model event is the start or end of a reasoning (`thinking_*`), text (`text_*`) or tool-call
+  (`toolcall_*`) block, or a nonempty delta of one. `modelEvents` counts them;
+  `firstModelEventAt` / `lastModelEventAt` bound them. `reasoning`, `text` and `toolCalls` each
+  hold `{started, deltas, completed, firstAt, lastAt}` for their block kind. An encrypted-only
+  reasoning item is visible as one `started` and one `completed` with no deltas, so
+  `reasoning.completed` is the completed reasoning-item count; `reasoning.deltas` counts visible
+  summary or reasoning text deltas. Counters start at 0 at `turn_start` and count what the stream
+  delivered; nothing is reconstructed from the final message. Stream start and empty deltas are
+  not model events. These are observations of activity, not a measure of useful work.
+- Transport, from the raw `provider_stream_event` hook (parsed provider events before
+  normalization; providers that do not call `onProviderStreamEvent` never fire it):
+  `providerEvents` / `lastProviderEventAt` count every raw event, and `keepalives` /
+  `lastKeepaliveAt` the recognised keepalives: `type` `keepalive` for the `openai-responses`,
+  `azure-openai-responses` and `openai-codex-responses` APIs, `ping` for `anthropic-messages`.
+  All four stay null until the first raw event, so a silent stream and a provider without the hook
+  both read null. For any other API the keepalive pair stays null for the whole request: its
+  keepalives cannot be recognised, so none is unknown, not zero. Raw events, response headers and
+  keepalives never count as model progress. SSE comment lines never reach the hook. Only an event's
+  `type` is compared, never stored.
+
+Never recorded: prompts, reasoning or summary text, encrypted reasoning, output text, tool names,
+arguments or results, request payloads, header values other than `x-request-id`, credentials.
+
+Checkpoint: `<agentDir>/progress/<sessionId>.json` (`getAgentDir()`, so a child writes beside
+its root under its own session id), one JSON record per session holding its latest request,
+replaced atomically (an unpredictable temp name created exclusively, then renamed; mode 0600).
+The first checkpoint of a session in a process removes that session's leftover
+`<sessionId>.json.*.tmp` files. No file is written when the session id is
+unknown or not `[A-Za-z0-9._-]{1,128}`. Write failures are ignored.
+
+Cadence bound: one write at `turn_start`, one at the first model event, one at the end
+(`ended` or `abandoned`), and one per `loopPi.progress.checkpointIntervalMs` while the request is
+active (an integer 250 to 60000, default 5000; anything else is the default). So a request of age
+A ms writes at most `3 + floor(A / interval)` times, whatever its event volume. The periodic write
+refreshes `writtenAt` and `ageMs` even when the stream is silent.
+
+Reading it: a record with `state: active` whose `writtenAt` is older than a few intervals, or
+whose `pid` is gone, was interrupted (a killed process cannot write its end). Last-event times
+exist only for requests run with this producer; they cannot be reconstructed for older ones.
+`just verify-pi-progress [home]` prints the newest checkpoint's field names with only its
+numbers (counts and times); every other value prints only as its type, such as `<str>`.
+
 ## Request ceiling
 
 `extensions/request-ceiling/` is installed by both loop-guard entries (`installRequestCeiling`), so
