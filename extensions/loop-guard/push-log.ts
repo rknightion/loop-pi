@@ -589,7 +589,15 @@ export interface PushExecutionEvidence {
 
 const shellQuote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
 
+// Derive from the running installation, never PATH, a shell variable or mutable home config.
+// execPath is physical for Homebrew, so retain only its stable keg spelling in the command.
+// This matches the installer's stable_node contract on either Homebrew prefix, including
+// versioned formulae; ordinary explicit absolute installations keep their selected executable.
 export function capturePushExecutions(command: string, plans: PlannedPush[]): PushExecutionEvidence {
+  const node = process.execPath.replace(/^(\/.+)\/Cellar\/([^/]+)\/[^/]+\/bin\/node$/, "$1/opt/$2/bin/node");
+  const major = process.versions.node.split(".")[0];
+  const environmentScript = shellQuote(`if (process.versions.node.split(".")[0] !== ${JSON.stringify(major)}) process.exit(127); process.stdout.write(${ENVIRONMENT_CAPTURE})`);
+  const receiptNode = `command ${shellQuote(node)} -e ${environmentScript}`;
   const dir = mkdtempSync(join(tmpdir(), "loop-push-execution-"));
   const outputs = new Map<PlannedGitPush, string>();
   const invocations = new Map<string, string>();
@@ -618,17 +626,20 @@ export function capturePushExecutions(command: string, plans: PlannedPush[]): Pu
         ...queries.slice(0, side === "before" ? 4 : 3).map((query, i) =>
           `command git ${[...contextArgs, ...query].map(shellQuote).join(" ")} > ${shellQuote(`${output}.${side}-${i}`)}`,
         ),
-        `command ${shellQuote(process.execPath)} -e ${shellQuote(`process.stdout.write(${ENVIRONMENT_CAPTURE})`)} > ${shellQuote(`${output}.${side}-env`)}`,
+        `${receiptNode} > ${shellQuote(`${output}.${side}-env`)}`,
       ].join(" && ");
       branches.push([
         `if ${matches.join(" && ")}; then`,
-        "  local status context_ok=0",
-        `  if ${captureContext("before")}; then context_ok=1; fi`,
+        "  local status",
+        `  if ! { ${captureContext("before")}; }; then printf '%s\\n' 'loop-guard: push refused: receipt context capture unavailable (requires a stable node executable)' >&2; return 127; fi`,
         `  if command git ${porcelainArgs.map(shellQuote).join(" ")} > ${pending}; then status=0; else status=$?; fi`,
         `  command cat ${pending} || :`,
         // Up-to-date output is saved too, but cannot confirm a moved ref. Failed push output is
         // never promoted, even if another writer publishes the very same local source later.
-        `  if [ "$status" -eq 0 ] && [ "$context_ok" -eq 1 ] && ${captureContext("after")}; then command mv ${pending} ${shellQuote(output)} || :; fi`,
+        `  if [ "$status" -eq 0 ]; then`,
+        `    if ! { ${captureContext("after")}; }; then printf '%s\\n' 'loop-guard: push succeeded but receipt context capture failed (requires a stable node executable)' >&2; return 127; fi`,
+        `    command mv ${pending} ${shellQuote(output)} || return $?`,
+        "  fi",
         "  return \"$status\"",
         "fi",
       ].join("\n"));

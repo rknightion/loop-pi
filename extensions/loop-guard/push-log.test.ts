@@ -4,12 +4,12 @@
 // remote before the push. A failed push, or a run without the protocol marker, writes nothing.
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
 import laneExtension from "./lane.ts";
-import { hiddenPush, planPushes, recordPushes, unloggedPushRefusal } from "./push-log.ts";
+import { capturePushExecutions, hiddenPush, planPushes, recordPushes, unloggedPushRefusal } from "./push-log.ts";
 import {
   FAUX_EXTENSION,
   PI_SUBAGENTS_PACKAGE_DIR,
@@ -46,6 +46,84 @@ function readLog(path: string): Record<string, unknown>[] {
     .split("\n")
     .filter((line) => line.trim())
     .map((line) => JSON.parse(line));
+}
+
+test("root push log: receipts survive moving the pinned Cellar node directory mid-run", { timeout: 60_000 }, async () => {
+  const { repo, remote, runDir, log } = fixture();
+  const pinnedDir = join(freshDir("push-log-node-"), "Cellar", "node", "old", "bin");
+  mkdirSync(pinnedDir, { recursive: true });
+  const pinnedNode = join(pinnedDir, "node");
+  // Simulate the physical executable retained by an already-running Node process.
+  writeFileSync(pinnedNode, `#!/bin/sh\nexec '${process.execPath.replace(/'/g, `'\\''`)}' "$@"\n`);
+  chmodSync(pinnedNode, 0o755);
+  const stableDir = join(pinnedDir, "../../../../opt/node/bin");
+  mkdirSync(stableDir, { recursive: true });
+  writeFileSync(join(stableDir, "node"), readFileSync(pinnedNode));
+  chmodSync(join(stableDir, "node"), 0o755);
+  const command = "git push origin main";
+  const plans = await planPushes(command, repo, runDir);
+  const original = Object.getOwnPropertyDescriptor(process, "execPath")!;
+  let evidence: ReturnType<typeof capturePushExecutions>;
+  try {
+    Object.defineProperty(process, "execPath", { ...original, value: pinnedNode });
+    evidence = capturePushExecutions(command, plans);
+  } finally {
+    Object.defineProperty(process, "execPath", original);
+  }
+  renameSync(pinnedDir, `${pinnedDir}.retired`);
+  try {
+    const result = spawnSync("bash", ["-c", evidence.command], { cwd: repo, encoding: "utf8", timeout: 30_000 });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    const tip = git(repo, "rev-parse", "HEAD");
+    assert.equal(git(remote, "rev-parse", "refs/heads/main"), tip);
+    assert.equal(await recordPushes(plans, { runDir, actor: "root", agent: null, lane: null }, evidence), 1,
+      "the successful local push must produce its trusted receipt after the executable directory moves");
+    assert.deepEqual({ ...readLog(log)[0], ts: "" }, {
+      v: 1, ts: "", actor: "root", agent: null, lane: null, repo: realpathSync(repo),
+      remote: "origin", ref: "refs/heads/main", old: null, new: tip,
+    });
+  } finally {
+    evidence.dispose();
+  }
+});
+
+for (const [platform, selected] of [["darwin", "usr/local/bin/node"], ["linux", "custom/bin/node"]]) {
+  test(`root push log: selected ${platform} runtime works without node on PATH`, { timeout: 60_000 }, async () => {
+    const { repo, runDir } = fixture();
+    const scratch = freshDir("push-selected-node-");
+    const node = join(scratch, selected);
+    const witness = join(scratch, "called");
+    mkdirSync(join(node, ".."), { recursive: true });
+    const quote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+    writeFileSync(node, `#!/bin/sh\nprintf '%s\\n' called >> ${quote(witness)}\nexec ${quote(process.execPath)} "$@"\n`);
+    chmodSync(node, 0o755);
+    const originalPath = process.env.PATH;
+    process.env.PATH = "/usr/bin:/bin";
+    const plans = await planPushes("git push origin main", repo, runDir);
+    const original = Object.getOwnPropertyDescriptor(process, "execPath")!;
+    const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    let evidence: ReturnType<typeof capturePushExecutions>;
+    try {
+      Object.defineProperty(process, "execPath", { ...original, value: node });
+      Object.defineProperty(process, "platform", { ...originalPlatform, value: platform });
+      evidence = capturePushExecutions("git push origin main", plans);
+    } finally {
+      Object.defineProperty(process, "execPath", original);
+      Object.defineProperty(process, "platform", originalPlatform);
+    }
+    try {
+      const result = spawnSync("/bin/bash", ["-c", evidence.command], {
+        cwd: repo, encoding: "utf8", timeout: 30_000, env: { ...process.env, PATH: "/usr/bin:/bin" },
+      });
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      assert.ok(existsSync(witness), "receipt must use the selected runtime, not a platform default");
+      assert.equal(await recordPushes(plans, { runDir, actor: "root", agent: null, lane: null }, evidence), 1);
+    } finally {
+      evidence.dispose();
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+    }
+  });
 }
 
 const ISO_SECONDS = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/;

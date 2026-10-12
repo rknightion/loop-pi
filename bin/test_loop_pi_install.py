@@ -629,6 +629,59 @@ print("PASS: PATH-invariant check/reinstall; explicit override; version drift; m
             print(result.stdout, end="")
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_cellar_node_without_matching_stable_link_refuses_install(self):
+        import sys
+        for mode in ("absent", "mismatched"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory(prefix="loop-pi-node-refusal-") as tmp:
+                root = Path(tmp).resolve()
+                env = {key: os.environ[key] for key in ("PATH", "TMPDIR") if key in os.environ}
+                env.update(HOME=str(root), GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+                (root / "sentinel").write_text("untouched")
+                node = root / "brew/Cellar/node/26.10.0_1/bin/node"
+                node.parent.mkdir(parents=True)
+                node.write_text("#!/bin/sh\necho v26.10.0\n")
+                node.chmod(0o755)
+                if mode == "mismatched":
+                    other = root / "brew/Cellar/node/26.10.0_2/bin/node"
+                    other.parent.mkdir(parents=True)
+                    other.write_bytes(node.read_bytes())
+                    other.chmod(0o755)
+                    link = root / "brew/opt/node"
+                    link.parent.mkdir(parents=True)
+                    link.symlink_to(other.parent.parent)
+                prepare = r'''
+import importlib.machinery, importlib.util, json, shutil, sys
+from pathlib import Path
+loader = importlib.machinery.SourceFileLoader("installer", sys.argv[1])
+spec = importlib.util.spec_from_loader(loader.name, loader)
+m = importlib.util.module_from_spec(spec); loader.exec_module(m)
+files = m.source_files(); label = m.build_label(files, m.pins(), "the loop-pi home templates\0loop-pi-install")
+prefix = Path.home() / "data" / label
+for rel, source in files:
+    destination = prefix / rel; destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, destination)
+m.render_policy(prefix, "the loop-pi home templates")
+(prefix / m.BUILD_MANIFEST).write_text(json.dumps({"label": label, "missing_extensions": []}))
+'''
+                setup = subprocess.run([sys.executable, "-I", "-c", prepare, str(HERE / "loop-pi-install")],
+                                       cwd=root, env=env, capture_output=True, text=True, timeout=30)
+                self.assertEqual(setup.returncode, 0, setup.stdout + setup.stderr)
+                home, bins = root / "pi", root / "bin"
+                result = subprocess.run([
+                    sys.executable, "-I", str(HERE / "loop-pi-install"), "--candidate-source",
+                    "--scratch-root", str(root), "--home", str(home), "--data", str(root / "data"),
+                    "--bin", str(bins), "--launcher", "loop-pi-test", "--node", str(node),
+                ], cwd=root, env=env, capture_output=True, text=True, timeout=30)
+                # Include any unsafe receipt in the fail-first output, not just the exit status.
+                receipt = home / ".loop-pi-managed.json"
+                stored = receipt.read_text() if receipt.exists() else "no receipt"
+                print(f"stable-link={mode} exit={result.returncode} receipt={stored}", flush=True)
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn("stable Homebrew node", result.stderr)
+                self.assertFalse(home.exists(), "refusal must happen before writing the home")
+                self.assertFalse(bins.exists(), "refusal must happen before writing launchers")
+                self.assertEqual((root / "sentinel").read_text(), "untouched")
+
     def test_homebrew_node_survives_a_keg_revision_upgrade(self):
         # A Homebrew revision bump (26.10.0_1 -> _2) plus cleanup deletes the old Cellar path;
         # launchers must keep working, and only a same-major replacement may be adopted.

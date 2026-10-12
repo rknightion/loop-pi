@@ -227,8 +227,10 @@ def keg_link(cellar_path: str) -> Optional[Path]:
 def stable_node(path: Path) -> str:
     resolved = path.resolve()
     link = keg_link(str(resolved))
-    if link is not None and link.is_file() and link.resolve() == resolved:
-        return str(link)
+    if link is not None:
+        if link.is_file() and link.resolve() == resolved:
+            return str(link)
+        raise InstallError("stable Homebrew node link is missing or does not match the selected executable")
     return str(resolved)
 
 
