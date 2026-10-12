@@ -8,6 +8,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSyn
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
+import { hermeticFixtureEnv, hermeticPiEnv } from "../test-support/hermetic-env.ts";
 import laneExtension from "./lane.ts";
 import { capturePushExecutions, hiddenPush, planPushes, recordPushes, unloggedPushRefusal } from "./push-log.ts";
 import {
@@ -24,8 +25,25 @@ import {
 after(cleanupAll);
 
 const git = (cwd: string, ...args: string[]): string =>
-  execFileSync("git", args, { cwd, encoding: "utf8", timeout: 10_000, stdio: ["ignore", "pipe", "pipe"] }).trim();
+  execFileSync("git", args, { cwd, env: hermeticFixtureEnv(), encoding: "utf8", timeout: 10_000, stdio: ["ignore", "pipe", "pipe"] }).trim();
 const IDENTITY = ["-c", "user.name=fixture", "-c", "user.email=fixture@example.com"];
+
+test("fixture environments isolate inherited Git config without changing the runner's lane fence", () => {
+  const before = { ...process.env };
+  const fixtureEnv = hermeticFixtureEnv();
+  const piEnv = hermeticPiEnv({ PI_OFFLINE: "1" });
+  for (const key of Object.keys(before)) {
+    if (/^GIT_CONFIG_(?:COUNT|KEY_\d+|VALUE_\d+|PARAMETERS)$/.test(key)) {
+      assert.equal(fixtureEnv[key], undefined, key);
+      assert.equal(piEnv[key], undefined, key);
+    } else {
+      assert.equal(fixtureEnv[key], before[key], key);
+    }
+    if (/^PI_SUBAGENTS?_/.test(key)) assert.equal(piEnv[key], undefined, key);
+  }
+  assert.equal(hermeticFixtureEnv({ GIT_CONFIG_COUNT: "0" }).GIT_CONFIG_COUNT, "0");
+  assert.deepEqual({ ...process.env }, before, "the actual lane's environment remains intact");
+});
 
 /** A repository with one commit and a bare `origin`, plus a run dir (with the marker unless legacy). */
 function fixture(legacy = false) {
@@ -563,7 +581,7 @@ function runAudit(runDir: string, ...args: string[]): { status: number; output: 
   const result = spawnSync("python3", [AUDIT, ...args, "--run-dir", runDir], {
     encoding: "utf8",
     timeout: 30_000,
-    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, LOOP_PI_RUN_DIR: runDir },
+    env: hermeticFixtureEnv({ PATH: `${bin}:${process.env.PATH}`, LOOP_PI_RUN_DIR: runDir }),
   });
   return { status: result.status ?? -1, output: `${result.stdout}${result.stderr}` };
 }
