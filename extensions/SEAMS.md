@@ -228,6 +228,26 @@ The first checkpoint of a session in a process removes that session's leftover
 `<sessionId>.json.*.tmp` files. No file is written when the session id is
 unknown or not `[A-Za-z0-9._-]{1,128}`. Write failures are ignored.
 
+Retention: a checkpoint older than 14 days is deleted (no archive). The sweep runs inside
+`writeCheckpoint`, after a successful write, at most once per hour per directory per process
+(the first write in a process sweeps), so no separate timer or hook exists. A file is removed
+only when all hold: it is a regular file named exactly `<sessionId>.json` in the producer's own
+`progress/` directory (the directory itself is not a symlink, and each file is opened with
+`O_NOFOLLOW|O_NONBLOCK`, so a symlink is never followed or removed and a FIFO, socket, device or
+directory named like a checkpoint is skipped without blocking); it is not the writing session's
+own checkpoint; it parses as a `v: 1` record whose `session` equals the file stem and whose
+`writtenAt` is a finite number; its `pid` is a positive integer for which `process.kill(pid, 0)`
+reports no such process (a live pid, `EPERM` included, keeps the file however old; pid reuse can
+cause a false keep, never a false delete); both `writtenAt` and the file's mtime are more than 14 days
+before now (a recently touched file is a live writer however old its record, and a future stamp
+is not an age); and it is unchanged between the check and the unlink. Anything whose identity or
+age cannot be established (unparseable, empty, another version, no or non-finite `writtenAt`,
+missing or malformed `pid`, mismatched or null `session`, over 16 KB, not a regular file) is kept, never treated as expired.
+Temp files, other extensions, transcripts, credentials and other homes are never touched. One
+sweep opens at most 100 files and rotates its starting point, so a large directory is cleared
+over successive sweeps. A writer that renames a fresh checkpoint over a 14-day-old file in the
+instant between the final check and the unlink would lose it; its next write recreates it.
+
 Cadence bound: one write at `turn_start`, one at the first model event, one at the end
 (`ended` or `abandoned`), and one per `loopPi.progress.checkpointIntervalMs` while the request is
 active (an integer 250 to 60000, default 5000; anything else is the default). So a request of age

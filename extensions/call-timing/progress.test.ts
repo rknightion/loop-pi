@@ -4,16 +4,19 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { after, test } from "node:test";
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   cleanupAll, freshDir, PI_SUBAGENTS_PACKAGE_DIR, type PiRpcSession, ROOT_EXTENSION, startPiRpc, waitForCondition,
 } from "../loop-guard/rpc-test-helpers.ts";
 import { type Step, startResponsesServer } from "./test-support/responses-server.ts";
 import install from "./index.ts";
-import { checkpointPath, newProgress, observeProviderEvent, removeOrphanTemps } from "./progress.ts";
+import { checkpointPath, newProgress, observeProviderEvent, removeOrphanTemps, snapshot, writeCheckpoint } from "./progress.ts";
+// Namespace import: the retention API is exercised through it so each retention test fails on its own.
+import * as progressApi from "./progress.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ENTRY = join(HERE, "index.ts");
@@ -466,4 +469,216 @@ test("keepalives stay unknown for an API whose keepalives cannot be recognised",
   assert.deepEqual([responses.providerEvents, responses.keepalives], [3, 1], "only the family's own keepalive type counts");
   const anthropic = run("anthropic-messages");
   assert.deepEqual([anthropic.providerEvents, anthropic.keepalives], [3, 1]);
+});
+
+// Cross-session retention (SEAMS.md "Request progress seam", Retention). Synthetic fixtures with an
+// injected clock: every sweep takes `now`, so nothing here depends on the wall clock.
+const DAY = 86_400_000;
+const NOW = Date.UTC(2026, 9, 13);
+const sweep = (dir: string, current: string, state?: { cursor: number }) =>
+  (progressApi as any).sweepExpiredCheckpoints(dir, current, NOW, state) as { examined: number; removed: number };
+
+/** A pid that existed and has exited: the writer of an abandoned checkpoint. */
+const DEAD_PID = (() => {
+  const child = spawnSync(process.execPath, ["-e", ""]);
+  assert.ok(child.pid && child.status === 0);
+  return child.pid;
+})();
+
+/** A serialized v1 record for `session`, last written `writtenAgeMs` before NOW by `pid` (null: no pid field). */
+function record(session: string | null, writtenAgeMs: number, pid: number | null = DEAD_PID, over: object = {}) {
+  const p = newProgress({ session, request: "fixture", turn: 1, provider: null, model: null, api: null }, NOW - writtenAgeMs - 10, pid ?? 0);
+  return JSON.stringify({ ...snapshot(p, NOW - writtenAgeMs), ...(pid === null ? { pid: undefined } : {}), ...over });
+}
+
+/** Writes `<dir>/<session>.json` as the producer would have, stamped `writtenAgeMs` ago, with mtime `mtimeAgeMs` ago. */
+function plant(dir: string, session: string, writtenAgeMs: number, mtimeAgeMs = writtenAgeMs, pid: number = DEAD_PID) {
+  const path = join(dir, `${session}.json`);
+  writeFileSync(path, `${record(session, writtenAgeMs, pid)}\n`);
+  utimesSync(path, (NOW - mtimeAgeMs) / 1000, (NOW - mtimeAgeMs) / 1000);
+  return path;
+}
+
+test("retention removes a checkpoint older than 14 days and keeps a 13-day one", () => {
+  const dir = freshDir("call-progress-retention-");
+  const expired = plant(dir, "expired", 15 * DAY);
+  const justExpired = plant(dir, "just-expired", 14 * DAY + 1);
+  const exactly = plant(dir, "exactly-14", 14 * DAY);
+  const young = plant(dir, "young", 13 * DAY);
+  const current = plant(dir, "current", 20 * DAY);
+  const result = sweep(dir, "current.json");
+  assert.ok(!existsSync(expired) && !existsSync(justExpired), "older than 14 days is deleted, not archived");
+  assert.ok(existsSync(exactly), "exactly 14 days is not yet older than 14 days");
+  assert.ok(existsSync(young), "13 days is kept");
+  assert.ok(existsSync(current), "the current session's checkpoint is never removed, however old");
+  assert.deepEqual(readdirSync(dir).sort(), ["current.json", "exactly-14.json", "young.json"]);
+  assert.equal(result.removed, 2);
+});
+
+test("retention keeps a checkpoint whose writer may still be active", () => {
+  const dir = freshDir("call-progress-active-");
+  // Old stamp inside, but the file itself was touched an hour ago: a live writer, whatever it recorded.
+  const touchedRecently = plant(dir, "touched-recently", 30 * DAY, 3_600_000);
+  // Fresh stamp inside but an ancient mtime (clock skew or a restored copy): still not provably dead.
+  const freshStamp = plant(dir, "fresh-stamp", 60_000, 30 * DAY);
+  // A stamp from the future is not an age at all.
+  const future = plant(dir, "future", -30 * DAY, 30 * DAY);
+  sweep(dir, "other.json");
+  for (const path of [touchedRecently, freshStamp, future]) assert.ok(existsSync(path), `${path} is kept`);
+});
+
+test("retention keeps every checkpoint whose identity or age cannot be established", () => {
+  const dir = freshDir("call-progress-unknown-");
+  const old = (NOW - 40 * DAY) / 1000;
+  const body = (over: object) => record("x", 40 * DAY, DEAD_PID, over);
+  const cases: Record<string, string> = {
+    "garbage": "not json at all",
+    "empty": "",
+    "array": "[]",
+    "null": "null",
+    "wrong-version": body({ v: 2, session: "wrong-version" }),
+    "no-version": body({ v: undefined, session: "no-version" }),
+    "no-stamp": body({ writtenAt: null, session: "no-stamp" }),
+    "string-stamp": body({ writtenAt: "2020-01-01", session: "string-stamp" }),
+    "nan-stamp": `{"v":1,"session":"nan-stamp","writtenAt":1e999}`,
+    "other-session": body({ session: "someone-else" }),
+    "no-session": body({ session: null }),
+    "huge": `${body({ session: "huge" }).slice(0, -1)},"pad":"${"x".repeat(1 << 20)}"}`,
+  };
+  for (const [name, text] of Object.entries(cases)) {
+    const path = join(dir, `${name}.json`);
+    writeFileSync(path, text);
+    utimesSync(path, old, old);
+  }
+  mkdirSync(join(dir, "a-directory.json"));
+  const result = sweep(dir, "other.json");
+  assert.equal(result.removed, 0);
+  assert.deepEqual(readdirSync(dir).sort(), [...Object.keys(cases).map((n) => `${n}.json`), "a-directory.json"].sort());
+});
+
+test("retention touches only regular files matching the checkpoint name, never a symlink", () => {
+  const dir = freshDir("call-progress-scope-");
+  const outside = freshDir("call-progress-outside-");
+  // Every planted record is expired, from a dead writer, and names the stem a looser name or open
+  // rule would extract, so only the name pattern and O_NOFOLLOW keep these files.
+  const victim = plant(outside, "victim", 40 * DAY);
+  const victimBefore = readFileSync(victim, "utf8");
+  symlinkSync(victim, join(dir, "victim.json"));
+  symlinkSync(outside, join(dir, "dirlink.json"));
+  symlinkSync(join(outside, "missing.json"), join(dir, "dangling.json"));
+  const stray = ["note.txt", "x.json.bak", "x.JSON", "x.json.tmp", `x.json.${randomUUID()}.tmp`, ".json", "bad name.json", `${"a".repeat(129)}.json`];
+  for (const name of stray) {
+    const path = join(dir, name);
+    const stem = name.replace(/\.(json|JSON)(\..*)?$/, "");
+    writeFileSync(path, record(stem, 40 * DAY));
+    utimesSync(path, (NOW - 40 * DAY) / 1000, (NOW - 40 * DAY) / 1000);
+  }
+  const real = plant(dir, "real", 40 * DAY);
+  sweep(dir, "other.json");
+  assert.ok(!existsSync(real), "a matching expired regular file is removed");
+  assert.equal(readFileSync(victim, "utf8"), victimBefore, "a symlink's target is never touched");
+  assert.deepEqual(readdirSync(outside), ["victim.json"]);
+  assert.ok(lstatSync(join(dir, "victim.json")).isSymbolicLink(), "an expired-looking symlink is not followed or removed");
+  for (const name of ["dirlink.json", "dangling.json", ...stray]) {
+    assert.ok(readdirSync(dir).includes(name), `${name} is left in place`);
+  }
+  // A symlinked checkpoint directory is not swept at all.
+  const linked = join(freshDir("call-progress-linkdir-"), "progress");
+  symlinkSync(outside, linked);
+  assert.deepEqual((progressApi as any).sweepExpiredCheckpoints(linked, "other.json", NOW), { examined: 0, removed: 0 });
+  assert.ok(existsSync(victim));
+});
+
+test("retention keeps a checkpoint whose writer process is still alive, whatever its age", () => {
+  const dir = freshDir("call-progress-pid-");
+  const alive = plant(dir, "alive", 40 * DAY, 40 * DAY, process.pid);
+  // pid 1 always exists and cannot be signalled by an unprivileged user: EPERM still means alive.
+  const unsignalable = plant(dir, "unsignalable", 40 * DAY, 40 * DAY, 1);
+  // A record whose writer cannot be established is unknown, so kept.
+  const noPid = join(dir, "no-pid.json");
+  writeFileSync(noPid, record("no-pid", 40 * DAY, null));
+  const badPid = join(dir, "bad-pid.json");
+  writeFileSync(badPid, record("bad-pid", 40 * DAY, DEAD_PID, { pid: "1234" }));
+  const zeroPid = join(dir, "zero-pid.json");
+  writeFileSync(zeroPid, record("zero-pid", 40 * DAY, DEAD_PID, { pid: 0 }));
+  for (const path of [noPid, badPid, zeroPid]) utimesSync(path, (NOW - 40 * DAY) / 1000, (NOW - 40 * DAY) / 1000);
+  const gone = plant(dir, "gone", 40 * DAY);
+  sweep(dir, "other.json");
+  assert.ok(!existsSync(gone), "the same record from an exited writer is removed");
+  for (const path of [alive, unsignalable, noPid, badPid, zeroPid]) assert.ok(existsSync(path), `${path} is kept`);
+});
+
+test("retention never blocks on a FIFO named like a checkpoint", (t) => {
+  const dir = freshDir("call-progress-fifo-");
+  try {
+    execFileSync("mkfifo", [join(dir, "zz.json")]);
+  } catch {
+    t.skip("no mkfifo on this platform");
+    return;
+  }
+  plant(dir, "gone", 40 * DAY);
+  const module = pathToFileURL(join(HERE, "progress.ts")).href;
+  const code = `import { sweepExpiredCheckpoints } from ${JSON.stringify(module)};`
+    + `console.log(JSON.stringify(sweepExpiredCheckpoints(process.argv[1], "other.json", ${NOW})));`;
+  // A sweep that opens the FIFO blocks its whole process in the kernel, so it runs in a child.
+  const out = execFileSync(process.execPath, ["--input-type=module", "-e", code, dir], { timeout: 20_000, killSignal: "SIGKILL" });
+  assert.equal(JSON.parse(out.toString()).removed, 1);
+  assert.deepEqual(readdirSync(dir), ["zz.json"], "the real expired file is removed and the FIFO left in place");
+  assert.ok(lstatSync(join(dir, "zz.json")).isFIFO());
+});
+
+test("one sweep opens a bounded number of files and later sweeps finish the job", () => {
+  const dir = freshDir("call-progress-cap-");
+  const cap = (progressApi as any).CHECKPOINT_SWEEP_MAX_EXAMINED as number;
+  assert.ok(Number.isInteger(cap) && cap > 0 && cap <= 500, "the cap is a modest integer");
+  const total = cap + 40;
+  for (let i = 0; i < total; i++) plant(dir, `old-${i}`, 30 * DAY);
+  plant(dir, "keep", DAY);
+  const state = { cursor: 0 };
+  const first = sweep(dir, "other.json", state);
+  assert.ok(first.examined <= cap, "a sweep examines at most the cap");
+  assert.ok(first.removed > 0 && first.removed <= cap);
+  const left = readdirSync(dir).length;
+  assert.ok(left > 1, "the first sweep leaves work for later");
+  for (let i = 0; i < 4; i++) sweep(dir, "other.json", state);
+  assert.deepEqual(readdirSync(dir), ["keep.json"], "repeated sweeps rotate through the whole directory");
+});
+
+test("the cursor rotates so expired files behind more than a cap of kept ones are reached", () => {
+  const dir = freshDir("call-progress-rotate-");
+  const cap = (progressApi as any).CHECKPOINT_SWEEP_MAX_EXAMINED as number;
+  const kept = 2 * cap + 30;
+  const expired = 20;
+  for (let i = 0; i < kept; i++) plant(dir, `young-${i}`, DAY);
+  for (let i = 0; i < expired; i++) plant(dir, `old-${i}`, 30 * DAY);
+  const state = { cursor: 0 };
+  const sweeps = Math.ceil((kept + expired) / cap) + 1;
+  for (let i = 0; i < sweeps; i++) sweep(dir, "other.json", state);
+  assert.equal(readdirSync(dir).filter((n) => n.startsWith("old-")).length, 0, `expired files go within ${sweeps} sweeps`);
+  assert.equal(readdirSync(dir).length, kept, "every young checkpoint is kept");
+});
+
+test("the sweep is throttled per directory and runs when a checkpoint is written", () => {
+  const dir = freshDir("call-progress-throttle-");
+  const interval = (progressApi as any).CHECKPOINT_SWEEP_INTERVAL_MS as number;
+  assert.ok(interval >= 60_000, "never sweeps on every write");
+  const progress = snapshot(newProgress({ session: "s", request: "fixture", turn: 1, provider: null, model: null, api: null }, NOW), NOW);
+  const path = join(dir, "s.json");
+  const write = (at: number) => assert.equal((writeCheckpoint as any)(path, progress, at), true);
+  const first = plant(dir, "expired-one", 30 * DAY);
+  write(NOW);
+  assert.ok(!existsSync(first), "the first write in a process sweeps");
+  const second = plant(dir, "expired-two", 30 * DAY);
+  for (let i = 1; i <= 50; i++) write(NOW + i * 1000);
+  assert.ok(existsSync(second), "writes inside the interval do not sweep");
+  write(NOW + interval - 1);
+  assert.ok(existsSync(second), "still inside the interval");
+  write(NOW + interval);
+  assert.ok(!existsSync(second), "the next write after the interval sweeps again");
+  assert.ok(existsSync(path), "the writer's own checkpoint is never swept");
+  // Another directory has its own throttle.
+  const other = freshDir("call-progress-throttle-other-");
+  const stale = plant(other, "expired", 30 * DAY);
+  assert.equal((writeCheckpoint as any)(join(other, "s.json"), progress, NOW + 1), true);
+  assert.ok(!existsSync(stale));
 });
