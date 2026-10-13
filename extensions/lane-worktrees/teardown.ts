@@ -12,6 +12,7 @@
 // fences, not an OS sandbox against a concurrent adversarial rename by the same account.
 import { randomUUID } from "node:crypto";
 import { closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeSync } from "node:fs";
+import { lstat, readdir } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { confinedRoot, type GitProbe } from "./identity.ts";
 
@@ -136,11 +137,22 @@ function protectedReason(path: string, runRoot: string, protect: string[]): stri
   return null;
 }
 
-/** A directory that is itself (no symbolic link) at its canonical path. */
+/** A directory with no symbolic link in any component; spelling is not object identity. */
 function directoryId(path: string): { dev: number; ino: number } {
   const s = lstatSync(path);
   if (s.isSymbolicLink() || !s.isDirectory()) throw new Error("not a directory, or a symbolic link");
-  if (realpath(path) !== path) throw new Error("a path component is a symbolic link or the path is not canonical");
+  if (realpath(path) !== path) {
+    // A native realpath mismatch can be casing alone. Prove the requested walk is link-free
+    // rather than rejecting that spelling or treating a different object as equivalent.
+    let current = dirname(path);
+    for (;;) {
+      const parent = lstatSync(current);
+      if (parent.isSymbolicLink() || !parent.isDirectory()) throw new Error("a path component is a symbolic link or not a directory");
+      const next = dirname(current);
+      if (next === current) break;
+      current = next;
+    }
+  }
   return { dev: s.dev, ino: s.ino };
 }
 
@@ -288,6 +300,75 @@ function sameObject(path: string, entry: LedgerEntry): boolean {
   }
 }
 
+/** False only when nothing, not even a dangling link, exists at the path. */
+function pathOccupied(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ENOENT";
+  }
+}
+
+/** Locate registered objects moved beneath disposable ledger roots, without following links.
+ * This is safety/receipt evidence only: a new location never grants permission to remove it.
+ * There is deliberately no search outside the directories this run could otherwise delete.
+ */
+async function movedLocations(entries: LedgerEntry[]): Promise<Map<LedgerEntry, string>> {
+  const missing = new Map<string, LedgerEntry[]>();
+  for (const entry of entries) {
+    if (sameObject(entry.path, entry)) continue;
+    const id = idOf(entry);
+    missing.set(id, [...(missing.get(id) ?? []), entry]);
+  }
+  const found = new Map<LedgerEntry, string>();
+  if (!missing.size) return found;
+  const visited = new Set<string>();
+  const stack = entries.filter((e) => e.type === "dir" && e.disposable && sameObject(e.path, e)).map((e) => ({ path: e.path, dev: e.dev }));
+  // Exact receipt locations must be established before any scratch removal. Bound both
+  // directories and entries, with asynchronous I/O so large caches do not block the event loop.
+  const maxDirectories = 10_000;
+  const maxEntries = 100_000;
+  let inspectedEntries = 0;
+  while (stack.length && missing.size) {
+    const { path, dev } = stack.pop()!;
+    if (visited.has(path)) continue;
+    if (visited.size >= maxDirectories) throw new Error("relocation discovery directory budget exhausted; no scratch paths removed or receipt written");
+    visited.add(path);
+    try {
+      for (const item of await readdir(path, { withFileTypes: true })) {
+        if (++inspectedEntries > maxEntries) throw new Error("relocation discovery entry budget exhausted; no scratch paths removed or receipt written");
+        if (item.name === ".git" || !item.isDirectory()) continue;
+        const child = join(path, item.name);
+        const s = await lstat(child);
+        if (s.isSymbolicLink() || !s.isDirectory() || s.dev !== dev) continue;
+        const id = idOf(s);
+        const matches = missing.get(id) ?? [];
+        for (const entry of matches) {
+          if (sameObject(child, entry)) found.set(entry, child);
+        }
+        if (matches.length && matches.every((e) => found.has(e))) missing.delete(id);
+        if (!missing.size) break;
+        stack.push({ path: child, dev });
+      }
+    } catch (error) {
+      throw new Error(`could not inspect relocation candidates at ${path}: ${(error as Error).message}`);
+    }
+  }
+  for (const unresolved of missing.values()) {
+    for (const entry of unresolved) {
+      // Nothing at the registered spelling and nowhere under a disposable root: no removal in
+      // this run can reach it (removed by an earlier closeout, deleted by the root, or moved
+      // outside scratch). It is reported absent, and its identity stays in the deletion fence.
+      if (!pathOccupied(entry.path)) continue;
+      // A replacement proves only that the old spelling is occupied, not where the registered
+      // identity survives. Never attribute its keep flag to foreign state or proceed without it.
+      throw new Error(`registered directory location unresolved for ${entry.path}; no scratch paths removed or receipt written`);
+    }
+  }
+  return found;
+}
+
 async function worktreeOutcome(entry: LedgerEntry, ctx: Context): Promise<Omit<ReceiptEntry, "path" | "source" | "kind">> {
   const kept = (reason: string) => ({ outcome: "kept" as const, reason });
   const path = entry.path;
@@ -407,27 +488,21 @@ async function dirOutcome(entry: LedgerEntry, ctx: Context, blocking: Set<string
  * `survivors`: every other registered or lane-worktrees path that is not removed in this pass.
  * A path holding one is kept, whatever else holds, so removing it cannot take the survivor too.
  */
-async function ledgerOutcome(entry: LedgerEntry, runRoot: string, ctx: Context, survivors: string[]): Promise<ReceiptEntry> {
-  const base = { path: entry.path, source: "ledger" as const, kind: entry.kind };
+async function ledgerOutcome(entry: LedgerEntry, runRoot: string, ctx: Context, survivors: string[], blocking: Set<string>, location = entry.path): Promise<ReceiptEntry> {
+  const base = { path: location, source: "ledger" as const, kind: entry.kind };
+  if (location !== entry.path) return { ...base, outcome: "kept", reason: `${entry.keep ? "keep flag set at registration; " : "registered directory "}moved from ${entry.path}` };
+  // The receipt lists only what survives: a path with nothing at it is absent, keep flag or not.
+  try {
+    lstatSync(entry.path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { ...base, outcome: "absent", reason: "already absent: nothing at the registered path and its identity is not under any disposable root" };
+    return { ...base, outcome: "kept", reason: `could not inspect: ${(error as Error).message}` };
+  }
   if (entry.keep) return { ...base, outcome: "kept", reason: "keep flag set at registration" };
   const guard = protectedReason(entry.path, runRoot, ctx.protect);
   if (guard) return { ...base, outcome: "kept", reason: guard };
   const nested = survivors.filter((other) => other !== entry.path && within(entry.path, other));
   if (nested.length) return { ...base, outcome: "kept", reason: `holds a registered path that is not removed: ${nested.join(", ")}` };
-  const blocking = new Set<string>();
-  for (const other of survivors) {
-    try {
-      blocking.add(idOf(lstatSync(other)));
-    } catch {
-      // An absent survivor cannot be removed with this path.
-    }
-  }
-  try {
-    lstatSync(entry.path);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { ...base, outcome: "absent", reason: "already absent" };
-    return { ...base, outcome: "kept", reason: `could not inspect: ${(error as Error).message}` };
-  }
   if (!sameObject(entry.path, entry)) return { ...base, outcome: "kept", reason: "the path is not the directory registered (replaced, moved or now a link)" };
   try {
     return { ...base, ...(entry.type === "worktree" ? await worktreeOutcome(entry, ctx) : await dirOutcome(entry, ctx, blocking)) };
@@ -484,23 +559,46 @@ export interface TeardownInput extends Context {
 export async function teardown(input: TeardownInput): Promise<{ receipt: Receipt; file: string }> {
   const runRoot = runRootOf(input.runDir);
   const { entries, warnings } = readLedger(runRoot);
+  // Last registration wins only for the same path. Across a move, two paths can record
+  // conflicting intent for one object; neither relocation nor deletion can disambiguate it.
+  const identities = new Map<string, string>();
+  for (const entry of entries) {
+    const id = idOf(entry);
+    const previous = identities.get(id);
+    if (previous !== undefined && previous !== entry.path) {
+      throw new Error(`scratch ledger contains multiple paths for filesystem identity ${id}; no scratch paths removed or receipt written`);
+    }
+    identities.set(id, entry.path);
+  }
   const results: ReceiptEntry[] = [...input.recorded];
   // lane-worktrees' own allocations are reported by its sweep alone, never handled twice.
   const lane = new Set<string>([...input.recordedPaths, ...input.recorded.map((r) => r.path)].map(canonical));
   const owned = entries.filter((e) => !lane.has(e.path));
-  // Deepest first, so a parent is decided after everything registered inside it.
+  const moved = await movedLocations(owned);
+  const location = (entry: LedgerEntry) => moved.get(entry) ?? entry.path;
+  // Deepest first, so a parent is decided after everything registered inside it, including moves.
   const depth = (path: string) => path.split(sep).length;
-  const ordered = [...owned].sort((x, y) => depth(y.path) - depth(x.path));
+  const ordered = [...owned].sort((x, y) => depth(location(y)) - depth(location(x)));
   const laneSurvivors = [...input.recordedPaths, ...input.recorded.filter((r) => r.outcome !== "removed").map((r) => r.path)].map(canonical);
   const decided = new Map<string, ReceiptEntry["outcome"]>();
   for (const entry of ordered) {
-    // Undecided entries are no deeper, so only a decided, not-removed entry can lie inside this one.
-    const survivors = [...laneSurvivors, ...ordered.filter((e) => e !== entry && !["removed", "absent"].includes(decided.get(e.path) ?? "")).map((e) => e.path)];
-    const result = await ledgerOutcome(entry, runRoot, input, survivors);
+    const survivingEntries = ordered.filter((e) => e !== entry && decided.get(e.path) !== "removed");
+    const survivors = [...laneSurvivors, ...survivingEntries.filter((e) => decided.get(e.path) !== "absent").map(location)];
+    // An absent registration spelling does not prove the object is gone: it may have moved.
+    // Keep its recorded identity in the final deletion fence until removal was actually proved.
+    const blocking = new Set(survivingEntries.map(idOf));
+    for (const path of laneSurvivors) {
+      try {
+        blocking.add(idOf(lstatSync(path)));
+      } catch {
+        // No filesystem identity available for this lane path.
+      }
+    }
+    const result = await ledgerOutcome(entry, runRoot, input, survivors, blocking, location(entry));
     decided.set(entry.path, result.outcome);
     results.push(result);
   }
-  const known = new Set<string>([...entries.map((e) => e.path), ...lane]);
+  const known = new Set<string>([...entries.map((e) => e.path), ...moved.values(), ...lane]);
   const repos = new Set<string>();
   for (const entry of entries) if (entry.commonDir) repos.add(entry.commonDir);
   const root = await input.git(input.cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);

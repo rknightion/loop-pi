@@ -4,7 +4,7 @@
 // is listed with its reason in <run dir>/teardown.json.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { appendFileSync, lstatSync } from "node:fs";
 import { join } from "node:path";
@@ -142,9 +142,6 @@ test("closeout removes only clean landed registered worktrees and disposable dir
   wt(a, kept);
   const unregistered = join(scratch, "unregistered-loop27");
   wt(a, unregistered);
-  // Registered as A's worktree, then replaced by a same-named worktree of B.
-  const swapped = join(scratch, "swap-loop27");
-  wt(a, swapped);
 
   const cache = join(scratch, "cache-loop27");
   mkdirSync(join(cache, "nested"), { recursive: true });
@@ -164,13 +161,10 @@ test("closeout removes only clean landed registered worktrees and disposable dir
     await h.register({ path: dirty, kind: "worktree" });
     await h.register({ path: unlanded, kind: "worktree" });
     await h.register({ path: kept, kind: "gate", keep: true });
-    await h.register({ path: swapped, kind: "worktree" });
     await h.register({ path: cache, kind: "cache", disposable: true });
     await h.register({ path: gate, kind: "gate" });
     await h.register({ path: grew, kind: "cache", disposable: true });
 
-    git(a, "worktree", "remove", swapped);
-    wt(b, swapped);
     wt(b, join(grew, "inner")); // A worktree appeared inside a disposable dir after registration.
 
     const { value: lines, calls } = await recordingGit(() => h.closeout());
@@ -179,12 +173,11 @@ test("closeout removes only clean landed registered worktrees and disposable dir
     assert.doesNotMatch(git(a, "worktree", "list"), /worktrees-loop27/);
     assert.equal(existsSync(cache), false, "a registered disposable dir is removed");
     assert.equal(readFileSync(join(outside, "sentinel"), "utf8"), "must survive", "a link inside a disposable dir is not followed");
-    for (const path of [dirty, unlanded, kept, unregistered, swapped, other, gate, grew, join(grew, "inner")]) {
+    for (const path of [dirty, unlanded, kept, unregistered, other, gate, grew, join(grew, "inner")]) {
       assert.equal(existsSync(path), true, `${path} survives`);
     }
     assert.equal(readFileSync(join(dirty, "notes.txt"), "utf8"), "work in progress");
     assert.equal(git(unlanded, "log", "-1", "--format=%s"), "unpushed");
-    assert.equal(git(swapped, "rev-parse", "--path-format=absolute", "--git-common-dir"), realpathSync(join(b, ".git")));
 
     const removes = calls.filter((c) => c.includes("worktree remove"));
     assert.ok(removes.length >= 1, "removal goes through git worktree remove");
@@ -204,7 +197,6 @@ test("closeout removes only clean landed registered worktrees and disposable dir
     expect(dirty, "kept", /^dirty: uncommitted changes or untracked files$/);
     expect(unlanded, "kept", /^unlanded: HEAD [0-9a-f]{12} is not on refs\/remotes\/origin\/main$/);
     expect(kept, "kept", /^keep flag set at registration$/);
-    expect(swapped, "kept", /^(the path is not the directory registered \(replaced, moved or now a link\)|belongs to a different repository \(.*\) than the one registered)$/);
     expect(gate, "kept", /^not marked disposable at registration$/);
     expect(grew, "kept", /^holds Git data at inner\/\.git$/);
     expect(unregistered, "kept", /^unregistered: not in this run's ledger; left for a human decision$/, "discovered");
@@ -212,6 +204,48 @@ test("closeout removes only clean landed registered worktrees and disposable dir
     assert.deepEqual(receipt.counts, { removed: 2, kept: receipt.entries.length - 2, absent: 0 });
     assert.equal(lines.length, 1, "teardown extends the sweep's single closeout line");
     assert.match(lines[0], /^lane-worktrees: removed 0 worktree\(s\).*; teardown removed 2, kept \d+, absent 0 \(receipt .*teardown\.json\)$/);
+  } finally {
+    h.restore();
+  }
+});
+
+test("closeout fails closed when a registered worktree was deleted and replaced by another repository", { timeout: 30_000 }, async () => {
+  const base = fresh("td-deleted-replacement-");
+  const a = cloned(base, "a");
+  const b = cloned(base, "b");
+  const swapped = join(base, "swapped");
+  const replacement = join(base, "replacement");
+  const clean = join(base, "clean");
+  const cache = join(base, "cache");
+  git(a, "worktree", "add", "-q", "--detach", swapped, "origin/main");
+  git(a, "worktree", "add", "-q", "--detach", clean, "origin/main");
+  mkdirSync(cache);
+  writeFileSync(join(cache, "sentinel"), "must survive");
+  const h = harness(b);
+  try {
+    await h.register({ path: swapped, kind: "worktree" });
+    await h.register({ path: clean, kind: "worktree" });
+    await h.register({ path: cache, kind: "cache", disposable: true });
+    const registered = lstatSync(swapped);
+    // Create the foreign object before deleting the registered one, preventing inode reuse
+    // from accidentally making this an identity match instead of a replacement fixture.
+    git(b, "worktree", "add", "-q", "--detach", replacement, "origin/main");
+    git(a, "worktree", "remove", swapped);
+    git(b, "worktree", "move", replacement, swapped);
+    assert.notEqual(lstatSync(swapped).ino, registered.ino);
+    const paths = [swapped, clean, cache];
+    const before = paths.map((path) => lstatSync(path).ino);
+    const ledger = readFileSync(join(h.runDir, "scratch-ledger.jsonl"), "utf8");
+
+    const { value: lines, calls } = await recordingGit(() => h.closeout());
+
+    assert.match(lines[0], /teardown failed, nothing further removed: .*registered directory location unresolved.*no teardown\.json written/);
+    assert.equal(existsSync(join(h.runDir, "teardown.json")), false, "unknown original identity cannot yield a success receipt");
+    assert.deepEqual(paths.map((path) => lstatSync(path).ino), before, "replacement and unrelated removable objects survive unchanged");
+    assert.equal(readFileSync(join(cache, "sentinel"), "utf8"), "must survive");
+    assert.equal(git(swapped, "rev-parse", "--path-format=absolute", "--git-common-dir"), realpathSync(join(b, ".git")));
+    assert.equal(calls.some((call) => call.includes("worktree remove")), false, "failure precedes unrelated worktree removal");
+    assert.equal(readFileSync(join(h.runDir, "scratch-ledger.jsonl"), "utf8"), ledger);
   } finally {
     h.restore();
   }
@@ -281,6 +315,299 @@ test("a keep-flagged or non-disposable registered dir inside a disposable regist
   }
 });
 
+test("a kept directory moved into a disposable registered parent keeps both and lists only surviving paths", async () => {
+  const base = fresh("td-moved-");
+  const session = join(base, "session");
+  mkdirSync(session);
+  const h = harness(session);
+  try {
+    const original = join(base, "evidence");
+    const parent = join(base, "cache");
+    const moved = join(parent, "nested", "evidence");
+    mkdirSync(original);
+    mkdirSync(join(parent, "nested"), { recursive: true });
+    writeFileSync(join(original, "proof.log"), "only copy");
+    await h.register({ path: original, kind: "gate", keep: true });
+    await h.register({ path: parent, kind: "cache", disposable: true });
+    renameSync(original, moved);
+
+    await h.closeout();
+
+    assert.equal(existsSync(parent), true, "the disposable parent survives");
+    assert.equal(readFileSync(join(moved, "proof.log"), "utf8"), "only copy", "the moved kept directory survives");
+    assert.equal(existsSync(original), false, "the registered spelling is no longer a surviving path");
+    const receipt = h.receipt();
+    assert.deepEqual(receipt.counts, { removed: 0, kept: 2, absent: 0 });
+    assert.deepEqual(receipt.entries.sort((a: any, b: any) => a.path.localeCompare(b.path)), [
+      { path: parent, source: "ledger", kind: "cache", outcome: "kept", reason: `holds a registered path that is not removed: ${moved}` },
+      { path: moved, source: "ledger", kind: "gate", outcome: "kept", reason: `keep flag set at registration; moved from ${original}` },
+    ].sort((a, b) => a.path.localeCompare(b.path)), "receipt lists exactly the surviving paths and why each was kept");
+    assert.deepEqual(receipt.warnings, []);
+  } finally {
+    h.restore();
+  }
+});
+
+for (const inside of [true, false]) {
+  test(`duplicate filesystem identities fail closed before relocation (inside search=${inside})`, { timeout: 30_000 }, async () => {
+    const base = fresh("td-duplicate-identity-");
+    const session = join(base, "session");
+    const original = join(base, "evidence");
+    const parent = join(base, "cache");
+    const disposable = join(base, "disposable");
+    const moved = join(inside ? parent : base, "moved");
+    for (const path of [session, original, parent, disposable]) mkdirSync(path);
+    writeFileSync(join(original, "proof.log"), "only copy");
+    writeFileSync(join(disposable, "sentinel"), "must survive");
+    const h = harness(session);
+    try {
+      await h.register({ path: original, kind: "gate", keep: true });
+      await h.register({ path: parent, kind: "cache", disposable: true });
+      await h.register({ path: disposable, kind: "cache", disposable: true });
+      renameSync(original, moved);
+      // Two legitimate registrations across a move can name one object with conflicting intent.
+      await h.register({ path: moved, kind: "cache", disposable: true });
+      const ledgerPath = join(h.runDir, "scratch-ledger.jsonl");
+      const ledger = readFileSync(ledgerPath, "utf8");
+      const entries = ledger.trim().split("\n").map((line) => JSON.parse(line));
+      assert.notEqual(entries[0].path, entries[3].path);
+      assert.deepEqual([entries[0].dev, entries[0].ino], [entries[3].dev, entries[3].ino]);
+      const paths = [parent, moved, disposable];
+      const before = paths.map((path) => [lstatSync(path).dev, lstatSync(path).ino]);
+      const names = readdirSync(base);
+      const receiptPath = join(h.runDir, "teardown.json");
+      if (!inside) writeFileSync(receiptPath, "prior receipt\n");
+
+      const lines = await h.closeout();
+
+      assert.match(lines[0], /teardown failed, nothing further removed: .*multiple paths for filesystem identity.*no teardown\.json written/, "duplicate identity is rejected even before an unresolved relocation can fail");
+      assert.deepEqual(paths.map((path) => [lstatSync(path).dev, lstatSync(path).ino]), before);
+      assert.deepEqual(readdirSync(base), names, "no scratch directory was moved aside");
+      assert.equal(existsSync(original), false);
+      assert.equal(readFileSync(join(moved, "proof.log"), "utf8"), "only copy");
+      assert.equal(readFileSync(join(disposable, "sentinel"), "utf8"), "must survive");
+      assert.equal(readFileSync(ledgerPath, "utf8"), ledger);
+      if (inside) assert.equal(existsSync(receiptPath), false, "no ambiguous receipt is created");
+      else assert.equal(readFileSync(receiptPath, "utf8"), "prior receipt\n", "no old receipt is overwritten");
+    } finally {
+      h.restore();
+    }
+  });
+}
+
+test("exhausted relocation discovery fails before scratch mutation or a misleading receipt", { timeout: 60_000 }, async () => {
+  const base = fresh("td-budget-");
+  const session = join(base, "session");
+  mkdirSync(session);
+  const h = harness(session);
+  try {
+    const original = join(base, "evidence");
+    const parent = join(base, "cache");
+    const disposable = join(base, "disposable");
+    mkdirSync(original);
+    mkdirSync(parent);
+    mkdirSync(disposable);
+    writeFileSync(join(original, "proof.log"), "only copy");
+    writeFileSync(join(disposable, "sentinel"), "must not be removed");
+    await h.register({ path: original, kind: "gate", keep: true });
+    await h.register({ path: parent, kind: "cache", disposable: true });
+    await h.register({ path: disposable, kind: "cache", disposable: true });
+    // The depth-first search pushes these siblings in readdir order, visiting the first last.
+    // Place the kept object beyond its real 10000-directory limit, not a mocked/test-only budget.
+    for (let i = 0; i < 10_001; i++) mkdirSync(join(parent, `slot-${String(i).padStart(5, "0")}`));
+    const moved = join(parent, readdirSync(parent)[0], "evidence");
+    renameSync(original, moved);
+    const ledger = readFileSync(join(h.runDir, "scratch-ledger.jsonl"), "utf8");
+    const before = readdirSync(base);
+
+    const lines = await h.closeout();
+
+    assert.match(lines[0], /teardown failed, nothing further removed: .*relocation discovery directory budget exhausted.*no teardown\.json written/, "unknown location must not be reported as kept at the missing original path");
+    assert.equal(existsSync(join(h.runDir, "teardown.json")), false, "no successful receipt is written");
+    assert.equal(existsSync(original), false);
+    assert.equal(existsSync(parent), true);
+    assert.equal(readFileSync(join(moved, "proof.log"), "utf8"), "only copy");
+    assert.equal(readFileSync(join(disposable, "sentinel"), "utf8"), "must not be removed", "failure precedes even unrelated disposable deletion");
+    assert.deepEqual(readdirSync(base), before, "nothing was renamed aside");
+    assert.equal(readFileSync(join(h.runDir, "scratch-ledger.jsonl"), "utf8"), ledger);
+  } finally {
+    h.restore();
+  }
+});
+
+test("a kept registration moved outside every disposable root is reported absent and never touched", async () => {
+  const base = fresh("td-unresolved-");
+  const session = join(base, "session");
+  mkdirSync(session);
+  const h = harness(session);
+  try {
+    const original = join(base, "evidence");
+    const moved = join(base, "outside-search");
+    const disposable = join(base, "disposable");
+    mkdirSync(original);
+    mkdirSync(disposable);
+    writeFileSync(join(original, "proof.log"), "only copy");
+    writeFileSync(join(disposable, "sentinel"), "must not be removed");
+    await h.register({ path: original, kind: "gate", keep: true });
+    await h.register({ path: disposable, kind: "cache", disposable: true });
+    renameSync(original, moved);
+    await h.closeout();
+    const entries = h.receipt().entries;
+    assert.equal(entries.find((e: { path: string }) => e.path === original)?.outcome, "absent");
+    assert.equal(entries.find((e: { path: string }) => e.path === disposable)?.outcome, "removed");
+    assert.equal(readFileSync(join(moved, "proof.log"), "utf8"), "only copy");
+  } finally {
+    h.restore();
+  }
+});
+
+test("a second closeout reports what the first removed as absent and still tears down later registrations", async () => {
+  const base = fresh("td-repeat-");
+  const session = join(base, "session");
+  mkdirSync(session);
+  const h = harness(session);
+  try {
+    const first = join(base, "first-cache");
+    const later = join(base, "later-cache");
+    const kept = join(base, "evidence");
+    mkdirSync(first);
+    mkdirSync(kept);
+    writeFileSync(join(kept, "proof.log"), "only copy");
+    await h.register({ path: first, kind: "cache", disposable: true });
+    await h.register({ path: kept, kind: "gate", keep: true });
+    await h.closeout();
+    assert.equal(existsSync(first), false);
+    mkdirSync(later);
+    await h.register({ path: later, kind: "cache", disposable: true });
+    await h.closeout();
+    const entries = h.receipt().entries;
+    assert.equal(entries.find((e: { path: string }) => e.path === first)?.outcome, "absent");
+    assert.equal(entries.find((e: { path: string }) => e.path === later)?.outcome, "removed");
+    assert.equal(entries.find((e: { path: string }) => e.path === kept)?.outcome, "kept");
+    assert.equal(readFileSync(join(kept, "proof.log"), "utf8"), "only copy");
+  } finally {
+    h.restore();
+  }
+});
+
+for (const keep of [false, true]) {
+  test(`an unresolved registered identity fails closed despite an old-path replacement (keep=${keep})`, { timeout: 30_000 }, async () => {
+    const base = fresh("td-unresolved-replacement-");
+    const session = join(base, "session");
+    mkdirSync(session);
+    const h = harness(session);
+    try {
+      const original = join(base, "evidence");
+      const parent = join(base, "cache");
+      const moved = join(parent, ".git", "evidence");
+      const disposable = join(base, "disposable");
+      mkdirSync(original);
+      mkdirSync(parent);
+      mkdirSync(disposable);
+      writeFileSync(join(original, "proof.log"), "only copy");
+      writeFileSync(join(disposable, "sentinel"), "must not be removed");
+      await h.register({ path: original, kind: "gate", keep });
+      await h.register({ path: parent, kind: "cache", disposable: true });
+      await h.register({ path: disposable, kind: "cache", disposable: true });
+      const registeredId = lstatSync(original).ino;
+      // Discovery deliberately does not enter Git data. The replacement must not stand in for
+      // the still-existing registered identity whose actual location cannot be established.
+      mkdirSync(join(parent, ".git"));
+      renameSync(original, moved);
+      mkdirSync(original);
+      writeFileSync(join(original, "foreign.log"), "replacement must survive");
+      assert.equal(lstatSync(moved).ino, registeredId);
+      assert.notEqual(lstatSync(original).ino, registeredId, "old spelling is a distinct replacement");
+      const paths = [original, parent, moved, disposable];
+      const beforeIds = paths.map((path) => lstatSync(path).ino);
+      const beforeNames = readdirSync(base);
+      const ledger = readFileSync(join(h.runDir, "scratch-ledger.jsonl"), "utf8");
+      const receiptPath = join(h.runDir, "teardown.json");
+      // Both a fresh closeout and a retry with an older receipt must fail without writing success.
+      if (keep) writeFileSync(receiptPath, "prior receipt\n");
+
+      const lines = await h.closeout();
+
+      assert.match(lines[0], /teardown failed, nothing further removed: .*registered directory location unresolved.*no teardown\.json written/);
+      if (keep) assert.equal(readFileSync(receiptPath, "utf8"), "prior receipt\n", "existing receipt is not overwritten");
+      else assert.equal(existsSync(receiptPath), false, "no new successful receipt is written");
+      assert.deepEqual(paths.map((path) => lstatSync(path).ino), beforeIds, "all registered objects and the foreign replacement survive unchanged");
+      assert.deepEqual(readdirSync(base), beforeNames, "no scratch path was renamed aside");
+      assert.equal(readFileSync(join(moved, "proof.log"), "utf8"), "only copy");
+      assert.equal(readFileSync(join(original, "foreign.log"), "utf8"), "replacement must survive");
+      assert.equal(readFileSync(join(disposable, "sentinel"), "utf8"), "must not be removed", "failure precedes unrelated scratch deletion");
+      assert.equal(readFileSync(join(h.runDir, "scratch-ledger.jsonl"), "utf8"), ledger);
+    } finally {
+      h.restore();
+    }
+  });
+}
+
+test("resolved relocation reports the registered identity, not a foreign old-path replacement", { timeout: 30_000 }, async () => {
+  const base = fresh("td-resolved-replacement-");
+  const session = join(base, "session");
+  mkdirSync(session);
+  const h = harness(session);
+  try {
+    const original = join(base, "evidence");
+    const parent = join(base, "cache");
+    const moved = join(parent, "evidence");
+    mkdirSync(original);
+    mkdirSync(parent);
+    writeFileSync(join(original, "proof.log"), "only copy");
+    await h.register({ path: original, kind: "gate", keep: true });
+    await h.register({ path: parent, kind: "cache", disposable: true });
+    renameSync(original, moved);
+    mkdirSync(original);
+    writeFileSync(join(original, "foreign.log"), "replacement must survive");
+    const replacementId = lstatSync(original).ino;
+    assert.notEqual(replacementId, lstatSync(moved).ino);
+
+    await h.closeout();
+
+    assert.equal(lstatSync(original).ino, replacementId, "foreign replacement is never deleted");
+    assert.equal(readFileSync(join(original, "foreign.log"), "utf8"), "replacement must survive");
+    assert.equal(readFileSync(join(moved, "proof.log"), "utf8"), "only copy");
+    assert.equal(existsSync(parent), true);
+    const receipt = h.receipt();
+    assert.deepEqual(receipt.counts, { removed: 0, kept: 2, absent: 0 });
+    assert.deepEqual(receipt.entries.sort((a: any, b: any) => a.path.localeCompare(b.path)), [
+      { path: parent, source: "ledger", kind: "cache", outcome: "kept", reason: `holds a registered path that is not removed: ${moved}` },
+      { path: moved, source: "ledger", kind: "gate", outcome: "kept", reason: `keep flag set at registration; moved from ${original}` },
+    ].sort((a, b) => a.path.localeCompare(b.path)), "only actual surviving registered identities receive ledger outcomes");
+    assert.deepEqual(receipt.warnings, []);
+  } finally {
+    h.restore();
+  }
+});
+
+test("a registered kept worktree moved into a disposable parent is not rediscovered as unregistered", async () => {
+  const base = fresh("td-moved-wt-");
+  const repo = cloned(base, "a");
+  const original = join(base, "worktree");
+  const parent = join(base, "cache");
+  const moved = join(parent, "worktree");
+  mkdirSync(parent);
+  git(repo, "worktree", "add", "-q", "--detach", original, "origin/main");
+  const h = harness(repo);
+  try {
+    await h.register({ path: original, kind: "worktree", keep: true });
+    await h.register({ path: parent, kind: "cache", disposable: true });
+    git(repo, "worktree", "move", original, moved);
+    await h.closeout();
+    assert.equal(existsSync(parent), true);
+    assert.equal(readFileSync(join(moved, "README"), "utf8"), "a\n");
+    const receipt = h.receipt();
+    assert.deepEqual(receipt.counts, { removed: 0, kept: 2, absent: 0 });
+    assert.deepEqual(receipt.entries.sort((a: any, b: any) => a.path.localeCompare(b.path)), [
+      { path: parent, source: "ledger", kind: "cache", outcome: "kept", reason: `holds a registered path that is not removed: ${moved}` },
+      { path: moved, source: "ledger", kind: "worktree", outcome: "kept", reason: `keep flag set at registration; moved from ${original}` },
+    ].sort((a, b) => a.path.localeCompare(b.path)));
+  } finally {
+    h.restore();
+  }
+});
+
 test("a case-variant spelling of a protected path is never registered or removed", async (t) => {
   const base = fresh("td-case-");
   const session = join(base, "session");
@@ -304,6 +631,38 @@ test("a case-variant spelling of a protected path is never registered or removed
     await h.closeout();
     assert.equal(readFileSync(join(evidence, "gate.log"), "utf8"), "evidence");
     assert.equal(entry(h.receipt(), variant).outcome, "kept");
+  } finally {
+    h.restore();
+  }
+});
+
+test("a case-variant ledger spelling never collapses distinct directory identities", async () => {
+  const base = fresh("td-case-identity-");
+  const session = join(base, "session");
+  const occupied = join(base, "cache");
+  const variant = join(base, "CACHE");
+  const registered = join(base, "evidence");
+  mkdirSync(session);
+  mkdirSync(occupied);
+  if (!existsSync(variant)) mkdirSync(variant); // Distinct casing is also possible on a sensitive FS.
+  mkdirSync(registered);
+  writeFileSync(join(variant, "sentinel"), "foreign object");
+  const h = harness(session);
+  try {
+    const original = lstatSync(registered);
+    const foreign = lstatSync(variant);
+    assert.notEqual(foreign.ino, original.ino, "variant names a different actual object");
+    appendFileSync(join(h.runDir, "scratch-ledger.jsonl"), `${JSON.stringify({ v: 1, at: "2026-10-08T00:00:00.000Z", path: variant, kind: "gate", type: "dir", keep: true, disposable: false, dev: original.dev, ino: original.ino })}\n`);
+    await h.register({ path: occupied, kind: "cache", disposable: true });
+
+    const lines = await h.closeout();
+
+    assert.match(lines[0], /teardown failed, nothing further removed: .*registered directory location unresolved.*no teardown\.json written/);
+    assert.equal(existsSync(join(h.runDir, "teardown.json")), false);
+    assert.equal(lstatSync(variant).ino, foreign.ino);
+    assert.equal(lstatSync(registered).ino, original.ino);
+    assert.equal(readFileSync(join(variant, "sentinel"), "utf8"), "foreign object");
+    assert.equal(existsSync(occupied), true, "casing never licenses unrelated deletion");
   } finally {
     h.restore();
   }

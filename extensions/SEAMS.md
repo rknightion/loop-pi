@@ -811,7 +811,14 @@ paths are exact, bash write detection is best-effort.
   - Receipt `<run dir>/teardown.json`: `{v: 1, at, runDir, ledger, counts: {removed, kept,
     absent}, entries: [{path, source: ledger|lane-worktrees|discovered, kind?, outcome:
     removed|kept|absent, reason, ignored?}], warnings}`, written through a temp file and rename and
-    rewritten at each closeout. Linked worktrees of the registered repositories and the session
+    rewritten at each closeout. A registered directory no longer at its registered path is
+    searched for by dev/ino beneath the disposable roots (not following links, bounded to 10,000
+    directories and 100,000 entries) before anything is removed. Found: it is kept and reported at
+    its new location with `moved from <path>`, and every directory holding it is kept. Nothing at
+    the registered path and not found: `absent`, with its identity still fencing every removal.
+    Teardown fails before any removal and writes no receipt when the registered path holds
+    something else and the identity is not found, when two ledger paths record one dev/ino, or when
+    the search budget runs out. Linked worktrees of the registered repositories and the session
     repository that nobody registered are listed with source `discovered` and never touched.
 - **loop-guard, root**: refuses `loop-state` with `--by ext|daemon|dispatcher`, a `by=` field other
   than `root`, `--run-dir`, a stdin `by` field or an `append` event on stdin from a file (`< file`),
