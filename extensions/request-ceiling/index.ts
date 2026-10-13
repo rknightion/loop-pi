@@ -19,7 +19,7 @@ import { join } from "node:path";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { isContextOverflow, isRetryableAssistantError, retryDelayMs } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { installRecovery } from "./recovery.ts";
 import { backoffConfig, classifyRetryError, extraRetryDelayMs, retryPolicy } from "./backoff.ts";
 import {
@@ -33,7 +33,13 @@ import {
   writeRequestIncident,
 } from "./core.ts";
 
-function readSettings(): unknown {
+function readSettings(ctx?: ExtensionContext): unknown {
+  if (ctx) {
+    const settings = SettingsManager.create(ctx.cwd, getAgentDir(), { projectTrusted: ctx.isProjectTrusted() });
+    // Unknown effective retry configuration cannot authorize unobservable HTTP retries.
+    if (settings.drainErrors().length) return { ...settings.getGlobalSettings(), retry: { provider: { maxRetries: "unknown" } } };
+    return settings.getSettings();
+  }
   try {
     return JSON.parse(readFileSync(join(getAgentDir(), "settings.json"), "utf8"));
   } catch {
@@ -115,15 +121,23 @@ export function installRequestCeiling(pi: ExtensionAPI, config: CeilingConfig = 
     consecutive++;
     let recoveryAllowsFollowUp = true;
     pi.events.emit("loop-recovery:may-follow-up", { reply: (allowed: boolean) => { recoveryAllowsFollowUp = allowed; } });
-    const continuing = recoveryAllowsFollowUp && consecutive <= config.maxFollowUps;
+    let decision = { managed: false, allowed: recoveryAllowsFollowUp, attempts: 0, maxAttempts: 0 };
+    pi.events.emit("loop-recovery:ceiling-decision", {
+      consecutive, maxFollowUps: config.maxFollowUps,
+      reply: (value: typeof decision) => { decision = value; },
+    });
+    const continuing = recoveryAllowsFollowUp && decision.allowed && consecutive <= config.maxFollowUps;
     const attempt = continuing ? consecutive : config.maxFollowUps;
-    writeRequestIncident(getAgentDir(), sessionId, ctx.cwd, incident, consecutive, !continuing);
+    writeRequestIncident(getAgentDir(), sessionId, ctx.cwd, incident, decision.managed ? decision.attempts : consecutive, !continuing);
+    // Managed denial/exhaustion owns its one actionable notice. Still retain the
+    // incident file, but do not double-report it or accidentally trigger a turn.
+    if (decision.managed && !continuing) return;
     pi.sendMessage(
       {
         customType: INCIDENT_CUSTOM_TYPE,
-        content: incidentText(incident, attempt, config.maxFollowUps, continuing),
+        content: incidentText(incident, attempt, config.maxFollowUps, continuing, decision.managed ? { attempts: decision.attempts, maxAttempts: decision.maxAttempts } : undefined),
         display: true,
-        details: { kind: incident.kind, attempt: consecutive, exhausted: !continuing, elapsedMs: incident.elapsedMs },
+        details: { kind: incident.kind, attempt: decision.managed ? decision.attempts : consecutive, exhausted: !continuing, elapsedMs: incident.elapsedMs },
       },
       { triggerTurn: continuing },
     );
@@ -144,7 +158,7 @@ export function installRequestCeiling(pi: ExtensionAPI, config: CeilingConfig = 
  * retryable error (not a context overflow) while attempts remain, resets on any non-error
  * assistant message, and is always back at zero once the run settles.
  */
-export function installRetryBackoff(pi: ExtensionAPI, loadSettings: () => unknown = readSettings): void {
+export function installRetryBackoff(pi: ExtensionAPI, loadSettings: (ctx?: ExtensionContext) => unknown = readSettings): void {
   installRecovery(pi, loadSettings);
   let attempt = 0;
 
@@ -166,7 +180,7 @@ export function installRetryBackoff(pi: ExtensionAPI, loadSettings: () => unknow
       | AssistantMessage
       | undefined;
     if (!last || last.stopReason !== "error") return;
-    const settings = loadSettings();
+    const settings = loadSettings(ctx);
     const policy = retryPolicy(settings);
     if (!policy.enabled) return;
     if (!isRetryableAssistantError(last) || isContextOverflow(last, ctx.model?.contextWindow ?? 0)) return;

@@ -259,15 +259,30 @@ set per model in the home's `models.json` `modelOverrides`.
   `stopReason: "error"` with `EMPTY_LENGTH_ERROR`, which matches neither pi's retryable nor its
   context-overflow patterns: no identical retry, no compaction, and loop-continuation skips the
   error outcome instead of nudging.
-- At `agent_settled` either incident sends one `loop-request-incident` message with
+- At `agent_settled` either incident sends one `loop-request-incident` custom message with
   `triggerTurn: true`, up to `maxFollowUps` in a row; any `stop` or `toolUse` response resets the
-  chain. Past the limit the message is appended without a turn and the `-exhausted` incident is
-  written; the session then stops for the watchdog to see.
+  chain. For opted recovery providers, the recovery safety authorizer and shared failure/episode
+  budget additionally gate this continuation. A portable local-tool Responses timeout may continue
+  after partial output only when the pinned failed-response boundary proves its tools never ran.
+  Denied or exhausted managed recovery emits only the recovery controller's cause-specific notice,
+  not a second actionable incident notice. Incident files are still retained. Other providers keep
+  the existing bounded incident behavior.
 
 ## Retry recovery episode
 
 The request-ceiling entries install a retry episode controller. `loopPi.retryRecovery`
-accepts `episodeMs` (default 1200000) and `providerIds` (default empty). The episode and
+accepts `episodeMs` (default 1200000), `providerIds` (default empty), and `maxAttempts`
+(integer 1 through 5, default 5, counting the original failed attempt). The effective attempt limit
+is also bounded by native `retry.maxRetries + 1` (native default 3 retries means 4 attempts);
+`retry.enabled: false` means one attempt. Ceiling continuations also honor `maxFollowUps`.
+Native retries and ceiling continuations consume the same consecutive-failure counter, not nested
+budgets. Provider-internal retries must be disabled (`retry.provider.maxRetries` absent or zero,
+which is the pinned Responses default): their attempts and classifications are not exposed at the
+extension boundary, so configured internal retries refuse the opted request before dispatch.
+CLI admission reads the supported SettingsManager merge of home and trusted project settings;
+SDK adapters supplying settings must supply their effective runtime settings. Unknown settings
+refuse configured managed admission rather than assuming zero hidden retries.
+The episode and
 proxy classification are enabled only for those provider ids; other providers retain their
 existing retry policy. An episode starts at
 its first failed assistant attempt, counts that attempt's duration, and includes subsequent waits and requests. Successful
@@ -277,7 +292,15 @@ follow-ups do not. Settlement disarms the active timer but retains its deadline;
 aborts active work and refuses synthetic restart, without starting a replacement turn.
 A denied protected or ambiguous attempt latches recovery off until idle genuine input or session/model
 reset. `loop-recovery:may-follow-up` synchronously gates the per-request ceiling's synthetic
-continuation; a timeout never authorizes replay after output or with protected context.
+continuation; a timeout authorizes replay after output only for positively established portable
+local-tool Responses requests whose failed-response tools did not run. Protected context, hosted
+or ambiguous output, authentication and policy refusals never authorize replay.
+The ceiling additionally queries `loop-recovery:ceiling-decision` synchronously with
+`{consecutive, maxFollowUps, reply({managed, allowed, attempts, maxAttempts})}`. Only the ceiling
+uses this richer response; the existing boolean wake query is unchanged. A managed refusal owns
+its stop/exhaustion notice, and the ceiling records its incident without sending a duplicate.
+`attempts` counts admitted Agent and native summary stream invocations at the surviving header
+boundary exactly once, not payload callbacks or locally refused stale turns. The attempt cap can decrease but cannot increase during an active episode.
 While halted or expired, extension-sourced input is handled without starting a model turn.
 Child notices already appended to the transcript remain available. The loop-wait delivery adapter
 uses the same synchronous query to append fired notices without triggering a refused turn.
@@ -294,7 +317,14 @@ Only explicitly configured provider ids receive structured proxy classification 
 `x-client-request-id` headers. Stable session affinity is unchanged. Classification observes
 parsed provider errors before normalization; bounded status/code metadata is retained on the
 assistant message, together with bounded `reason`, `outputObserved`, `requestPortable` and
-`toolsExecuted` fields. Stop messages name the reason and ask the operator to inspect saved work
+`toolsExecuted` fields. Sanitized upstream classification/type/status/request correlation is
+separate from the recovery disposition; known policy refusals (including `cyber_policy`) and
+authentication refusals remain distinct and nonretryable, even if their body mentions a transient
+error or context overflow. The visible stop includes its allowlisted upstream code. Server
+correlation stays null when the pinned HTTP-error path exposes no response-header event; the
+unique client request id remains available separately. Recovery metadata and stop notices never
+retain error bodies or credentials; the existing native compaction diagnostic is unchanged.
+Stop messages name the reason and ask the operator to inspect saved work
 before resuming; one non-triggering `loop-recovery-required` notice surfaces the stop.
 
 For the pinned pi Responses runtime, a failed assistant response exits the agent loop before
@@ -305,13 +335,41 @@ even after partial text, reasoning or tool-call output. No local tool may have s
 request, and observed hosted/unknown output items refuse replay. Input with unresolved or duplicate tool
 calls/results, hosted items, bound files or explicit anchors is protected. Unknown structured errors,
 authentication errors, unclassified nonretryable failures and explicit continuity refusals stop.
-No-output errors recognized by pi as transient retain native retry behavior. For portable Responses requests without output, context-window
-overflow remains unchanged for native compaction, without latching recovery off or resetting
-the episode; an expired episode still stops it. The request ceiling also retains its existing
+No-output errors recognized by pi as transient retain native retry behavior. For portable Responses requests without output, context-window overflow remains available to
+native compaction. During an active opted-in episode, only the first static single-call native
+summary is admitted, on positively known physical standard Responses routing with zero effective
+provider retries and remaining shared count/deadline. Positive route provenance currently means
+a static non-builtin compatibility registration exposed by the public registry, without native
+provider replacement, custom streaming, OAuth or dynamic model refresh. The selected physical
+model must match the registry route; free-form model sampling overrides are also declined because
+they can inject hosted tools or bound state into an unobserved summary. Builtin/inherited and
+models-file-only provenance is conservatively unknown here, not rerouted or silently trusted.
+As with the Agent payload authorizer, arbitrary extensions replacing the global API implementation
+or the route after this check need a separate compatibility proof; shipped extensions do not.
+Two-call split-turn preparation and
+unknown, virtual, custom-stream or auth-rerouted routes are conservatively declined before
+summary dispatch. This deliberately declines some otherwise successful split compactions;
+ordinary compaction outside recovery is unchanged, and eligible single-summary overflow still
+succeeds. Subsequent opaque summary invocations are denied at the supported header boundary:
+the local safety stop is latched before `loop-recovery:abort` and `ctx.abort()`. No summary
+payload/response/raw-stream/message-end hooks are available, so the local notice reports
+`opaque-summary-retry-not-authorized` with unknown/null upstream code/type/status/server id
+and only the actual admitted client correlation, never a guessed refusal. Summary completion
+clears only operation scope, not the episode counter or deadline. Cache warming is stopped by
+the public decision hook during managed work and retained failed episodes. Supported abort
+cancels the root operation, not the session or detached children; retained notifications and
+stale-wake refusal still apply. An expired episode stops compaction as well. The request ceiling also retains its existing
 bounded follow-up for an empty answer (including reasoning-only output), only with portable
-local-tool context and no text or tool calls. Neither controller restarts the recovery budget. Ordinary cancellation and partial
-request-ceiling timeouts are not converted into retryable upstream errors. Native retry/backoff
-and the same episode deadline govern every retry; no synthetic user resume resets that deadline.
+local-tool context and no text or tool calls. Neither controller restarts the recovery budget.
+Genuine operator cancellation remains aborted and latches automatic recovery off without posting
+an upstream-failure notice. Harness-attributed timeouts use the existing custom incident continuation:
+`ctx.abort()` is terminal in the pinned native retry machine, so rewriting an aborted assistant as
+retryable cannot restart it. The Responses converter omits failed/aborted response tools and retains
+earlier completed history. This continuation adds no fake user message and never resets the shared
+attempt counter or original episode deadline. Native retry/backoff handles transport/server errors.
+Count or elapsed-time exhaustion emits one non-triggering actionable notice naming its cause;
+successful `stop` or `toolUse` completion resets the consecutive budget. Stale automatic input
+cannot reopen a halted or exhausted episode.
 This is broader transient recovery, not an exactly-once guarantee for upstream hosted operations
 or external work whose execution cannot be established. The portability check observes the
 request-ceiling payload hook; shipped extensions do not subsequently replace it with bound or

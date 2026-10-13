@@ -73,7 +73,8 @@ export interface Incident {
 }
 
 /** The follow-up message body. `attempt` counts follow-ups in the current unbroken chain. */
-export function incidentText(incident: Incident, attempt: number, maxFollowUps: number, continuing: boolean): string {
+export function incidentText(incident: Incident, attempt: number, maxFollowUps: number, continuing: boolean,
+  recovery?: { attempts: number; maxAttempts: number }): string {
   const seconds = Math.round(incident.elapsedMs / 1000);
   const what =
     incident.kind === "wall-clock"
@@ -94,7 +95,8 @@ export function incidentText(incident: Incident, attempt: number, maxFollowUps: 
   const next = continuing
     ? [
         "",
-        `This is follow-up ${attempt} of at most ${maxFollowUps} in a row. Continue the run from where you were: ` +
+        (recovery ? `The next request is recovery attempt ${recovery.attempts + 1} of at most ${recovery.maxAttempts}, including the original failure. `
+          : `This is follow-up ${attempt} of at most ${maxFollowUps} in a row. `) + "Continue the run from where you were: " +
           "take a smaller next step with less deliberation (one tool call, or split the decision). If the same step " +
           "keeps failing this way, record it as an incident in your run notes and report, then move on to work that " +
           "does not depend on it.",
