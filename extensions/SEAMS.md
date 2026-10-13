@@ -863,7 +863,13 @@ paths are exact, bash write detection is best-effort.
   `before..after` lies in a push-log `old..new` range for that repo and ref, touches only
   `backlog/`, or lies in a range a declared `bot_actors` login (`<login>[bot]`) itself pushed or
   merged, per GitHub's activity API; commit metadata grants nothing. A default-branch grant entry is
-  ignored with a warning.
+  ignored with a warning. Another snapshotted remote whose unchanged URL is byte-identical to the
+  canonical repository's (no scheme, user, host-case or path normalisation) receives only that
+  canonical's exact `actor: root` `old..new` ranges, never its bot actors or grants. Only absolute
+  URLs qualify (`scheme://`, scp-like `host:path`, absolute local path); a relative URL such as
+  `../up.git` never transfers. A push the log
+  never saw (watcher, subprocess, script) is UNGRANTED; author, committer and current SHA are never
+  backfilled. Refusing such pushes before mutation in loop-guard was deliberately not chosen.
 
 ## Declared heavy gates
 

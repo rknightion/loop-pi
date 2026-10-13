@@ -58,6 +58,20 @@ Releases API must return that exact tag with an `author.login` matching the gran
 Missing/unreadable evidence grants nothing. Existing release authors never authorize retags
 or deletions. This attribution is independent of protocol 2 and never covers branches.
 
+Endpoint-equivalent aliases: a push-log line whose `actor` is `root`, whose `old` is an exact SHA
+and whose `repo` is itself a snapshot key, with that remote's URL unchanged between snapshots, also
+covers the same ref in any other snapshotted remote whose unchanged URL is byte-identical. No URL
+normalisation: a different scheme, SSH user, host case or path spelling is a different endpoint.
+Only absolute URLs qualify (scheme://, scp-like host:path, absolute local path); a relative URL
+such as `../up.git` never transfers.
+An alias receives only those exact `old..new` ranges, never the canonical's bot actors, grants,
+current SHA or commit metadata, and a note names the canonical receipt source.
+
+A push the log never saw (a watcher, a subprocess, a script) is UNGRANTED: Git author, committer,
+a checkout's current SHA and the remote's final state are never evidence of a root push. This
+audit-side fail-closed report is deliberate; refusing such pushes before mutation in loop-guard was
+considered and not chosen.
+
 Anything else is UNGRANTED and named in a `note:` line. The fast-forward check still applies. A
 derived `HEAD` move follows the default branch's verdict. Other refs, tags and releases are
 unchanged. Legacy snapshots without protocol evidence keep the old behaviour. Protocol 2 is retained in the
@@ -1063,10 +1077,62 @@ def touches_only_backlog(repo: str, sha: str) -> bool:
     return result.returncode == 0 and bool(paths) and all(p.startswith("backlog/") for p in paths)
 
 
+def stable_endpoint(b: dict, a: dict) -> str | None:
+    """The remote URL both snapshots read, byte for byte, or None. No normalisation."""
+    url = b.get("url")
+    if (b.get("available") and a.get("available") and isinstance(url, str) and url
+            and url == a.get("url") and not re.search(r"[\r\n\x00]", url)):
+        return url
+    return None
+
+
+def absolute_endpoint(url: str) -> bool:
+    """A URL whose text names one endpoint wherever it is read: scheme://..., scp-like
+    [user@]host:path, or an absolute local path. Relative paths resolve per checkout, and so
+    may a remote helper's <transport>::<address>, so neither is absolute."""
+    if "::" in url:
+        return False
+    return bool(re.match(r"[A-Za-z][A-Za-z0-9+.-]*://", url) or re.match(r"[^/:]+:", url)
+                or os.path.isabs(url))
+
+
+def endpoint_receipts(before_repos: dict, after_repos: dict, push_log: list[dict]) -> dict[str, list[dict]]:
+    """Root push receipts that endpoint-equivalent aliases may spend, keyed by exact endpoint URL.
+
+    A receipt qualifies only when its actor is the root, it names an exact `old` (never a creation,
+    whose range would be all history), and its `repo` is itself a snapshot key whose named remote
+    read the same URL before and after the run. An alias is endpoint-equivalent only when its own
+    remote URL is byte-identical to that one: no scheme, user, host-case, port or path normalisation,
+    so a different SSH user, scheme or `.git` spelling is a different endpoint and fails closed.
+    Only absolute URLs qualify (scheme://, scp-like host:path or an absolute local path): the same
+    relative text such as `../up.git` names a different repository in each checkout. Aliases receive only these exact `old..new` ranges: never the canonical's bot actors, backlog
+    rule outcome, ref grants, current SHA or commit authorship."""
+    keys = {os.path.realpath(key): key for key in set(before_repos) & set(after_repos)}
+    receipts: dict[str, list[dict]] = {}
+    for entry in push_log:
+        if entry.get("actor") != "root" or not isinstance(entry.get("old"), str):
+            continue
+        key = keys.get(os.path.realpath(entry["repo"]))
+        if key is None:
+            continue
+        url = stable_endpoint(before_repos[key].get("remotes", {}).get(entry["remote"], {}),
+                              after_repos[key].get("remotes", {}).get(entry["remote"], {}))
+        if url is not None and absolute_endpoint(url):
+            receipts.setdefault(url, []).append({**entry, "canonical": key})
+    return receipts
+
+
 def default_move_verdict(repo: str, remote: str, ref: str, before_sha: str, after_sha: str,
                          push_log: list[dict], bot_logins: list[str],
-                         times: tuple[str, str] = ("", "")) -> tuple[bool, list[str]]:
-    """Protocol 2: is every commit in before..after accounted for? Returns (covered, notes)."""
+                         times: tuple[str, str] = ("", ""),
+                         alias_receipts: list[dict] | None = None) -> tuple[bool, list[str]]:
+    """Protocol 2: is every commit in before..after accounted for? Returns (covered, notes).
+
+    Only a journaled successful push counts as a push. A push made by a watcher, subprocess or any
+    other path the push log never saw is UNGRANTED here: it is never inferred from Git author or
+    committer, the checkout's current SHA or the remote's final state. This audit-side fail-closed
+    report is the chosen answer for such pushes; refusing them before mutation in loop-guard was
+    deliberately not chosen."""
     fetched, reason = fetch_ref(repo, remote, ref)
     if not fetched:
         return False, [f"cannot verify commits: {reason}"]
@@ -1074,18 +1140,29 @@ def default_move_verdict(repo: str, remote: str, ref: str, before_sha: str, afte
     if commits is None:
         return False, [f"cannot list commits {before_sha[:12]}..{after_sha[:12]}"]
     logged = logged_commits(repo, remote, ref, push_log)
+    aliased: dict[str, str] = {}
+    for entry in alias_receipts or []:
+        if entry["ref"] == ref:
+            for sha in rev_list(repo, f"{entry['old']}..{entry['new']}") or []:
+                aliased.setdefault(sha, f"{entry['canonical']} remote '{entry['remote']}'")
     bot_pushed: set[str] | None = None
-    notes = []
+    uncovered = []
+    via_alias: dict[str, int] = {}
     for sha in commits:
         if sha in logged or touches_only_backlog(repo, sha):
+            continue
+        if sha in aliased:
+            via_alias[aliased[sha]] = via_alias.get(aliased[sha], 0) + 1
             continue
         if bot_pushed is None:
             bot_pushed = bot_pushed_commits(repo, remote, ref, bot_logins, times)
         if sha in bot_pushed:
             continue
-        notes.append(f"commit {sha[:12]} is not in a logged push, is not backlog-only and was not pushed "
-                     "or merged by a declared bot actor")
-    return not notes, notes
+        uncovered.append(f"commit {sha[:12]} is not in a logged push, is not backlog-only and was not pushed "
+                         "or merged by a declared bot actor")
+    notes = [f"{count} commit(s) covered by endpoint-equivalent root push receipts journaled for {source}"
+             for source, count in sorted(via_alias.items())]
+    return not uncovered, notes + uncovered
 
 
 def shared_remote_grants(before_repos: dict, after_repos: dict, grants_by_repo: dict) -> dict:
@@ -1183,10 +1260,12 @@ def compare_repo(name: str, before: dict, after: dict, grants: list[str] | dict,
                     # A receipt names a remote, not a transferable URL alias. Missing/changed
                     # snapshot identity cannot spend it on the new endpoint. Independent backlog
                     # and bot evidence keeps its existing semantics.
-                    stable_endpoint = (isinstance(url, str) and bool(url)
-                                       and not re.search(r"[\r\n\x00]", url))
-                    verdicts[ref] = default_move_verdict(name, remote, ref, before_sha, after_sha,
-                                                         proto["push_log"] if stable_endpoint else [], bot_logins, times)
+                    # An endpoint-equivalent alias (byte-identical stable URL) may also spend the
+                    # canonical repository's exact root push ranges for this ref, and nothing else.
+                    endpoint = stable_endpoint(b, a)
+                    verdicts[ref] = default_move_verdict(
+                        name, remote, ref, before_sha, after_sha, proto["push_log"] if endpoint else [],
+                        bot_logins, times, proto.get("endpoints", {}).get(endpoint, []) if endpoint else [])
                 else:
                     verdicts[ref] = (False, [])
             return verdicts[ref]
@@ -1258,10 +1337,11 @@ def compare_repo(name: str, before: dict, after: dict, grants: list[str] | dict,
                 else:
                     all_covered = all_covered and covered
                     mark = "GRANTED" if covered else "UNGRANTED"
-            # Deduplicate only verified granted outcomes, never violations or unknowns.
+            # Deduplicate only verified granted outcomes, never violations or unknowns, and never a
+            # line carrying notes (an alias's endpoint-equivalent evidence must stay visible).
             head_identity = (before_head, after_head) if ref == "HEAD" else ()
             key = (url, change, ref, before_sha, after_sha, head_identity, mark)
-            if url and mark.startswith("GRANTED") and seen_granted is not None:
+            if url and not notes and mark.startswith("GRANTED") and seen_granted is not None:
                 if key in seen_granted:
                     continue
                 seen_granted.add(key)
@@ -1377,6 +1457,8 @@ def cmd_compare(args: argparse.Namespace) -> int:
     before_repos = before.get("repos", {})
     after_repos = after.get("repos", {})
     all_names = sorted(set(before_repos) | set(after_repos))
+    if proto is not None:
+        proto["endpoints"] = endpoint_receipts(before_repos, after_repos, proto["push_log"])
 
     shared = shared_remote_grants(before_repos, after_repos, grants_by_repo)
     seen_granted: set = set()

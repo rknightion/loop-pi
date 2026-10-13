@@ -1556,6 +1556,249 @@ class ProtoDefaultBranchTests(unittest.TestCase):
         self.assertNotIn("ignored", result.stderr)
 
 
+class AbsoluteEndpointTests(unittest.TestCase):
+    def test_only_urls_naming_one_endpoint_everywhere_are_absolute(self):
+        import importlib.machinery
+        import importlib.util
+        loader = importlib.machinery.SourceFileLoader("loop_pi_audit", SCRIPT)
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        for url in ("git@github.com:o/r.git", "https://github.com/o/r.git", "ssh://git@h:2222/o/r.git", "/srv/git/r.git"):
+            self.assertTrue(mod.absolute_endpoint(url), url)
+        # Relative paths, and remote-helper addresses a helper may resolve per checkout.
+        for url in ("../up.git", "./x:y", "~/up.git", "hg::../up.git", "ext::git %s", "foo::https://h/r"):
+            self.assertFalse(mod.absolute_endpoint(url), url)
+
+
+class AliasEndpointTests(unittest.TestCase):
+    """Protocol 2 alias reconciliation: a second checkout whose remote URL is byte-identical to the
+    canonical repository's receives only the canonical's journaled root-push ranges. Anything else
+    (other URL spellings, changed endpoints, unjournaled watcher pushes, foreign commits) stays
+    UNGRANTED. The remote is a real local bare repository; only snapshot URL text is rewritten for
+    the URL-form controls."""
+
+    commit = ProtoDefaultBranchTests.commit
+    head = ProtoDefaultBranchTests.head
+    proto = ProtoDefaultBranchTests.proto
+
+    def setUp(self):
+        self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="loop-pi-audit-alias-test-"))
+        self.repo, self.remote = init_repo_with_remote(self.tmp, "canonical")
+        git(self.remote, "symbolic-ref", "HEAD", "refs/heads/main")
+        self.alias = os.path.join(self.tmp, getattr(self, "alias_name", "alias"))
+        self.other = os.path.join(self.tmp, "other")
+        for clone in (self.alias, self.other):
+            subprocess.run([GIT, "clone", "--no-local", "-q", self.remote, clone], check=True, timeout=60)
+            git(clone, "config", "user.email", "someone@example.com")
+            git(clone, "config", "user.name", "someone")
+        self.assertEqual(git(self.alias, "remote", "get-url", "origin").stdout,
+                         git(self.repo, "remote", "get-url", "origin").stdout)
+        self.run_dir = os.path.join(self.tmp, "run")
+        os.makedirs(self.run_dir)
+        self.env = {"PATH": make_bin_with_gh_stub(self.tmp), "LOOP_PI_RUN_DIR": self.run_dir}
+        self.log_path = os.path.join(self.run_dir, "push-log.jsonl")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def ready(self):
+        self.proto()
+        for verb, repo in (("begin", self.repo), ("add", self.alias)):
+            result = run_audit(verb, repo, env_overrides=self.env)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.start = self.head(self.repo)
+
+    def journal(self, old, new, actor="root", repo=None, remote="origin"):
+        entry = {"v": 1, "ts": "2026-10-13T00:00:00Z", "actor": actor, "agent": None, "lane": None,
+                 "repo": repo or self.repo, "remote": remote, "ref": "refs/heads/main", "old": old, "new": new}
+        with open(self.log_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry) + "\n")
+
+    def root_push(self, old, new, **journal):
+        git(self.repo, "push", "-q", "origin", f"{new}:refs/heads/main")
+        self.journal(old, new, **journal)
+
+    def closeout(self):
+        return run_audit("closeout", "--push-log", self.log_path, env_overrides=self.env)
+
+    def lines(self, result, repo):
+        return "\n".join(line for line in result.stdout.splitlines() if line.startswith(f"[{repo}] "))
+
+    def assert_alias_ungranted(self, result, *flagged):
+        alias = self.lines(result, self.alias)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("refs/heads/main", alias)
+        self.assertIn("[UNGRANTED]", alias)
+        for sha in flagged:
+            self.assertIn(f"commit {sha[:12]} ", alias)
+
+    def test_byte_identical_alias_receives_the_journaled_root_push_range(self):
+        self.ready()
+        self.commit(self.repo, "f.txt", "one")
+        c2 = self.commit(self.repo, "f.txt", "two")
+        self.root_push(self.start, c2)
+        result = self.closeout()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        alias = self.lines(result, self.alias)
+        self.assertIn("refs/heads/main", alias)
+        self.assertIn("[GRANTED]", alias)
+        self.assertIn("endpoint-equivalent", alias)
+        self.assertIn(self.repo, alias)
+        self.assertNotIn("UNGRANTED", result.stdout)
+
+    def test_alias_grant_and_its_note_survive_when_the_canonical_reports_first(self):
+        # The canonical path sorts first, so an identical GRANTED line is already seen; the alias's
+        # line carries the endpoint-equivalent note and must still be printed.
+        self.tearDown()
+        self.alias_name = "zz-alias"
+        self.setUp()
+        self.assertLess(self.repo, self.alias)
+        self.ready()
+        c = self.commit(self.repo, "f.txt", "ours")
+        self.root_push(self.start, c)
+        result = self.closeout()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        alias = self.lines(result, self.alias)
+        self.assertIn("refs/heads/main", alias)
+        self.assertIn("[GRANTED]", alias)
+        self.assertIn("endpoint-equivalent", alias)
+
+    def test_relative_remote_urls_are_never_endpoint_equivalent(self):
+        # Two checkouts whose origin is the same relative text '../up.git' reach different repositories.
+        # A root push to one is journaled; the same commit reaches the other only by an unjournaled push.
+        roots = [os.path.join(self.tmp, side) for side in ("rel-a", "rel-b")]
+        checkouts = [os.path.join(root, "wc") for root in roots]
+        for root, checkout in zip(roots, checkouts):
+            os.makedirs(root)
+            bare = os.path.join(root, "up.git")
+            subprocess.run([GIT, "clone", "--bare", "-q", self.remote, bare], check=True, timeout=60)
+            git(bare, "symbolic-ref", "HEAD", "refs/heads/main")
+            subprocess.run([GIT, "clone", "--no-local", "-q", bare, checkout], check=True, timeout=60)
+            git(checkout, "remote", "set-url", "origin", "../up.git")
+            git(checkout, "config", "user.email", "someone@example.com")
+            git(checkout, "config", "user.name", "someone")
+        self.assertEqual(git(checkouts[0], "remote", "get-url", "origin").stdout,
+                         git(checkouts[1], "remote", "get-url", "origin").stdout)
+        self.proto()
+        for verb, repo in (("begin", checkouts[0]), ("add", checkouts[1])):
+            result = run_audit(verb, repo, env_overrides=self.env)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        start = self.head(checkouts[0])
+        c = self.commit(checkouts[0], "f.txt", "root")
+        git(checkouts[0], "push", "-q", "origin", "main")
+        self.journal(start, c, repo=checkouts[0])
+        git(checkouts[0], "push", "-q", os.path.join(roots[1], "up.git"), "main:refs/heads/main")
+        result = self.closeout()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        other = self.lines(result, checkouts[1])
+        self.assertIn("[UNGRANTED]", other)
+        self.assertIn(f"commit {c[:12]} ", other)
+        self.assertNotIn("endpoint-equivalent", other)
+        self.assertIn("[GRANTED]", self.lines(result, checkouts[0]))
+
+    def test_unjournaled_watcher_push_stays_ungranted_whatever_its_author_or_current_sha(self):
+        self.ready()
+        c1 = self.commit(self.repo, "f.txt", "root one")
+        self.root_push(self.start, c1)
+        # A watcher or subprocess publishes from the canonical checkout as the root's own identity:
+        # same author, and the checkout's current SHA equals the remote afterwards. No journal entry.
+        c2 = self.commit(self.repo, "f.txt", "watcher")
+        git(self.repo, "push", "-q", "origin", "HEAD:refs/heads/main")
+        self.assertEqual(self.head(self.repo), git(self.remote, "rev-parse", "refs/heads/main").stdout.strip())
+        result = self.closeout()
+        self.assert_alias_ungranted(result, c2)
+        self.assertNotIn(f"commit {c1[:12]} ", self.lines(result, self.alias))
+        canonical = self.lines(result, self.repo)
+        self.assertIn("[UNGRANTED]", canonical)
+        self.assertIn(f"commit {c2[:12]} ", canonical)
+
+    def test_concurrent_foreign_commit_stays_ungranted_in_the_alias(self):
+        self.ready()
+        b = self.commit(self.repo, "f.txt", "root one")
+        self.root_push(self.start, b)
+        git(self.other, "pull", "-q", "--ff-only", "origin", "main")
+        foreign = self.commit(self.other, "g.txt", "foreign")
+        git(self.other, "push", "-q", "origin", "main")
+        git(self.repo, "pull", "-q", "--ff-only", "origin", "main")
+        g = self.commit(self.repo, "f.txt", "root two")
+        self.root_push(foreign, g)
+        result = self.closeout()
+        self.assert_alias_ungranted(result, foreign)
+        alias = self.lines(result, self.alias)
+        for covered in (b, g):
+            self.assertNotIn(f"commit {covered[:12]} ", alias)
+
+    def test_only_root_receipts_of_a_snapshotted_canonical_transfer(self):
+        cases = {
+            "lane receipt": {"actor": "lane"},
+            "bot actor receipt": {"actor": "renovate[bot]"},
+            "root creation receipt with old null": {"old": None},
+            "receipt for an unsnapshotted clone": {"repo": None},
+            "receipt for an unknown remote name": {"remote": "mirror"},
+        }
+        for label, override in cases.items():
+            with self.subTest(label):
+                self.tearDown()
+                self.setUp()
+                self.ready()
+                c = self.commit(self.repo, "f.txt", label)
+                override = dict(override)
+                if override.get("repo", "") is None:
+                    override = {"repo": self.other}
+                old = override.pop("old") if "old" in override else self.start
+                self.root_push(old, c, **override)
+                self.assert_alias_ungranted(self.closeout(), c)
+
+    def test_a_changed_endpoint_on_either_side_does_not_transfer(self):
+        for side in ("alias", "canonical"):
+            with self.subTest(side):
+                self.tearDown()
+                self.setUp()
+                self.ready()
+                c = self.commit(self.repo, "f.txt", "ours")
+                self.root_push(self.start, c)
+                twin = os.path.join(self.tmp, "twin.git")
+                subprocess.run([GIT, "clone", "--bare", "-q", self.remote, twin], check=True, timeout=60)
+                git(self.alias if side == "alias" else self.repo, "remote", "set-url", "origin", twin)
+                self.assert_alias_ungranted(self.closeout(), c)
+
+    def test_url_equivalence_is_byte_exact(self):
+        self.ready()
+        c = self.commit(self.repo, "f.txt", "ours")
+        self.root_push(self.start, c)
+        self.assertEqual(self.closeout().returncode, 0)
+        canonical_url = "ssh://git@example.com/o/r.git"
+        cases = {
+            "identical": (canonical_url, canonical_url, 0),
+            "different SSH user": (canonical_url, "ssh://deploy@example.com/o/r.git", 1),
+            "different scheme": (canonical_url, "https://example.com/o/r.git", 1),
+            "scp-like spelling": (canonical_url, "git@example.com:o/r.git", 1),
+            "missing .git suffix": (canonical_url, "ssh://git@example.com/o/r", 1),
+            "host case": (canonical_url, "ssh://git@EXAMPLE.com/o/r.git", 1),
+            "unrelated repository": (canonical_url, "ssh://git@example.com/o/other.git", 1),
+            "alias endpoint changed during the run": (canonical_url, (canonical_url, "ssh://git@example.com/o/s.git"), 1),
+        }
+        sources = {side: os.path.join(self.run_dir, f"audit-{side}.json") for side in ("before", "after")}
+        for label, (canonical, alias, expected) in cases.items():
+            with self.subTest(label):
+                rewritten = {}
+                for index, side in enumerate(("before", "after")):
+                    with open(sources[side], encoding="utf-8") as fh:
+                        snap = json.load(fh)
+                    snap["repos"][self.repo]["remotes"]["origin"]["url"] = canonical
+                    snap["repos"][self.alias]["remotes"]["origin"]["url"] = alias[index] if isinstance(alias, tuple) else alias
+                    rewritten[side] = os.path.join(self.tmp, f"{side}-rewritten.json")
+                    with open(rewritten[side], "w", encoding="utf-8") as fh:
+                        json.dump(snap, fh)
+                result = run_audit("compare", rewritten["before"], rewritten["after"], "--run-dir", self.run_dir,
+                                   "--push-log", self.log_path, env_overrides=self.env)
+                self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+                if expected:
+                    self.assert_alias_ungranted(result, c)
+                    self.assertIn("[GRANTED]", self.lines(result, self.repo))
+
+
 class InducedEffectsTests(unittest.TestCase):
     """Real compare CLI and local ancestry; gh is faked only at the subprocess edge."""
 

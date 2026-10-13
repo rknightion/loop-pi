@@ -158,6 +158,14 @@ loop-pi-audit closeout --grants grants.json --grants-sha256 <hex> --push-log pus
   or the grants file is refused with exit 2. Anything else is `UNGRANTED` and printed in a `note:` line. A foreign commit between two logged pushes is
   therefore flagged, as is any commit after the last logged push. The fast-forward check still
   applies, and a derived `HEAD` move follows the default branch's verdict.
+- Another snapshotted remote whose unchanged URL is byte-identical to the canonical repository's
+  (no scheme, user, host-case or path normalisation) receives only that canonical's exact
+  `actor: root` `old..new` ranges, never its bot actors or grants. Only absolute URLs qualify
+  (`scheme://`, scp-like `host:path`, absolute local path); a relative URL such as `../up.git`
+  never transfers.
+- A push the log never saw (watcher, subprocess, script) is `UNGRANTED`; author, committer and
+  current SHA are never backfilled. Refusing such pushes before mutation in loop-guard was
+  deliberately not chosen.
 - Other branches, tags and releases are judged exactly as before. `bot_actors` sits beside `refs`
   in a repository's grants object: `{"<repo>": {"refs": ["HEAD"], "bot_actors": ["some-app[bot]"]}}`.
 - `compare` applies the same rules when given `--run-dir DIR` for a run dir with the marker; it
