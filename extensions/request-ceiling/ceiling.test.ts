@@ -39,7 +39,8 @@ test("an invalid ceiling setting falls back to the default instead of disabling 
   assert.equal(ceilingConfig({ loopPi: { requestCeiling: { wallClockMs: 0 } } }).wallClockMs, DEFAULT_WALL_CLOCK_MS);
   assert.equal(ceilingConfig({ loopPi: { requestCeiling: { wallClockMs: "900000" } } }).wallClockMs, DEFAULT_WALL_CLOCK_MS);
   assert.equal(ceilingConfig({ loopPi: { requestCeiling: { wallClockMs: 3e9 } } }).wallClockMs, DEFAULT_WALL_CLOCK_MS);
-  assert.ok(DEFAULT_WALL_CLOCK_MS < 15 * 60 * 1000);
+  assert.equal(DEFAULT_WALL_CLOCK_MS, 75 * 60 * 1000);
+  assert.equal(ceilingConfig({}).inactivityMs, 15 * 60 * 1000);
 });
 
 interface Run {
@@ -98,7 +99,7 @@ test("a request that never finishes is aborted at the ceiling and the root conti
   const run = await runRoot(
     [
       { match: "You are the root", once: true, thinking: "deliberating", hang: true },
-      { match: "wall-clock ceiling", text: "Recovered with a smaller step.\nPAUSED: test complete" },
+      { match: "absolute ceiling", text: "Recovered with a smaller step.\nPAUSED: test complete" },
     ],
     { wallClockMs: 1500, maxFollowUps: 2 },
     2,

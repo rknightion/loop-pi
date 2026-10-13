@@ -694,9 +694,11 @@ test("real pi synthetic followup cannot restart an exhausted episode", { timeout
   assert.equal(events.filter((e) => e.type === "agent_settled").length, 2);
 });
 
-test("per-request timeout followups share the original failure episode", { timeout: 20000 }, async () => {
+test("per-request timeout followups share the episode starting at the first failure", { timeout: 20000 }, async () => {
   const {seen,events}=await runScenario("ceiling");
-  assert.equal(seen.length,2);
+  // First failure starts1200ms of recovery: the next800ms attempt fits,
+  // then a third gets only the remaining400ms. No follow-up renews the budget.
+  assert.equal(seen.length,3);
   assert.ok(events.some((e) => e.type === "message_end" && (e.message as any)?.customType === "loop-recovery-exhausted"));
 });
 test("portable local Responses timeout after partial output recovers without a fake user turn", { timeout: 20000 }, async () => {

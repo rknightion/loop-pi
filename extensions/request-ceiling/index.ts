@@ -1,7 +1,7 @@
 // Per-request ceiling (SEAMS.md "Request ceiling"). Installed by both loop-guard entries, so the
 // root and every lane get it. pi's own bounds do not cover a request that keeps streaming
 // reasoning: `httpIdleTimeoutMs` is an idle timer that every streamed event resets, and the
-// provider `timeoutMs` stops at the response headers. This adds a wall-clock bound per model
+// provider `timeoutMs` stops at the response headers. This adds inactivity and absolute bounds per model
 // request, and turns an empty output-budget stop into an incident instead of a silent stop.
 //
 // - A timer starts at `turn_start` (pi's agent loop sends exactly one model request per turn, and
@@ -20,6 +20,7 @@ import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { isContextOverflow, isRetryableAssistantError, retryDelayMs } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { newProgress, observeAssistantEvent, type RequestProgress } from "../call-timing/progress.ts";
 import { installRecovery } from "./recovery.ts";
 import { backoffConfig, classifyRetryError, extraRetryDelayMs, retryPolicy } from "./backoff.ts";
 import {
@@ -51,10 +52,13 @@ function loadConfig(): CeilingConfig {
   return ceilingConfig(readSettings());
 }
 
-export function installRequestCeiling(pi: ExtensionAPI, config: CeilingConfig = loadConfig()): void {
+export function installRequestCeiling(pi: ExtensionAPI, supplied: CeilingConfig = loadConfig()): void {
+  const config = ceilingConfig({loopPi: {requestCeiling: supplied}});
   let generation = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let startedAt = 0;
+  let progress: RequestProgress | undefined;
+  let active = false;
   let pending: Incident | undefined;
   let consecutive = 0;
   let sessionId = "";
@@ -69,33 +73,63 @@ export function installRequestCeiling(pi: ExtensionAPI, config: CeilingConfig = 
     stopTimer();
     generation++;
     pending = undefined;
+    active = false;
+    progress = undefined;
     consecutive = 0;
     sessionId = ctx.sessionManager.getSessionId();
   });
 
-  pi.on("turn_start", (_event, ctx: ExtensionContext) => {
+  const expiredLimit = (now: number): "inactivity" | "absolute" | undefined => {
+    if (now - startedAt >= config.absoluteMs) return "absolute";
+    if (now - (progress?.lastModelEventAt ?? startedAt) >= config.inactivityMs) return "inactivity";
+    return undefined;
+  };
+  const expire = (ctx: ExtensionContext, kind: "inactivity" | "absolute", now: number) => {
+    stopTimer(); active = false;
+    pending = {kind: "wall-clock", model: ctx.model?.id ?? "unknown", elapsedMs: now - startedAt,
+      wallClockMs: kind === "absolute" ? config.absoluteMs : config.inactivityMs,
+      limitType: kind, absoluteMs: config.absoluteMs, inactivityMs: config.inactivityMs,
+      idleMs: now - (progress?.lastModelEventAt ?? startedAt), lastModelEventAt: progress?.lastModelEventAt ?? null};
+    pi.events.emit("loop-recovery:request-timeout", {});
+    ctx.abort();
+  };
+  const arm = (ctx: ExtensionContext) => {
     stopTimer();
-    const mine = ++generation;
-    startedAt = Date.now();
-    timer = setTimeout(() => {
-      if (mine !== generation || timer === undefined) return;
-      timer = undefined;
-      pending = {
-        kind: "wall-clock",
-        model: ctx.model?.id ?? "unknown",
-        elapsedMs: Date.now() - startedAt,
-        wallClockMs: config.wallClockMs,
-      };
-      pi.events.emit("loop-recovery:request-timeout", {});
-      ctx.abort();
-    }, config.wallClockMs);
+    if (!active) return;
+    const mine = generation;
+    const now = Date.now(); const kind = expiredLimit(now);
+    if (kind) { expire(ctx, kind, now); return; }
+    const next = Math.min(startedAt + config.absoluteMs, (progress?.lastModelEventAt ?? startedAt) + config.inactivityMs);
+    timer = setTimeout(() => { if (active && mine === generation) arm(ctx); }, Math.max(1, next - now));
     timer.unref?.();
+  };
+  pi.on("turn_start", (_event, ctx: ExtensionContext) => {
+    stopTimer(); generation++; active = true; startedAt = Date.now();
+    progress = newProgress({session: sessionId || null, request: "ceiling", turn: 1,
+      provider: ctx.model?.provider ?? null, model: ctx.model?.id ?? null, api: ctx.model?.api ?? null}, startedAt);
+    arm(ctx);
+  });
+  pi.on("message_update", (event, ctx: ExtensionContext) => {
+    if (!active || !progress || event.message.role !== "assistant") return;
+    const now = Date.now(); const kind = expiredLimit(now);
+    if (kind) { expire(ctx, kind, now); return; }
+    if (observeAssistantEvent(progress, event.assistantMessageEvent, now)) arm(ctx);
   });
 
   pi.on("message_end", (event, ctx: ExtensionContext) => {
     const message = event.message as { role?: string; stopReason?: string; model?: string; content?: unknown };
     if (message.role !== "assistant") return;
+    // The SDK emits terminal done directly as message_end, without a progress update.
+    // A delayed timer must not let terminal success execute tools after its deadline.
+    const overdue = active && (message.stopReason === "stop" || message.stopReason === "toolUse")
+      ? expiredLimit(Date.now()) : undefined;
+    if (overdue) {
+      expire(ctx, overdue, Date.now());
+      generation++;
+      return {message: {...event.message, stopReason: "aborted", errorMessage: "Request was aborted at the loop-pi request deadline"} as typeof event.message};
+    }
     stopTimer();
+    active = false;
     generation++;
     if (message.stopReason === "stop" || message.stopReason === "toolUse") {
       consecutive = 0;
@@ -114,6 +148,7 @@ export function installRequestCeiling(pi: ExtensionAPI, config: CeilingConfig = 
   });
 
   pi.on("agent_settled", (_event, ctx: ExtensionContext) => {
+    active = false;
     stopTimer();
     const incident = pending;
     pending = undefined;
@@ -137,13 +172,14 @@ export function installRequestCeiling(pi: ExtensionAPI, config: CeilingConfig = 
         customType: INCIDENT_CUSTOM_TYPE,
         content: incidentText(incident, attempt, config.maxFollowUps, continuing, decision.managed ? { attempts: decision.attempts, maxAttempts: decision.maxAttempts } : undefined),
         display: true,
-        details: { kind: incident.kind, attempt: decision.managed ? decision.attempts : consecutive, exhausted: !continuing, elapsedMs: incident.elapsedMs },
+        details: { limitType: incident.limitType ?? null, inactivityMs: incident.inactivityMs ?? config.inactivityMs, absoluteMs: incident.absoluteMs ?? config.absoluteMs, wallClockMs: incident.wallClockMs, idleMs: incident.idleMs ?? null, lastModelEventAt: incident.lastModelEventAt ?? null, kind: incident.kind, attempt: decision.managed ? decision.attempts : consecutive, exhausted: !continuing, elapsedMs: incident.elapsedMs },
       },
       { triggerTurn: continuing },
     );
   });
 
   pi.on("session_shutdown", () => {
+    active = false;
     stopTimer();
   });
 }

@@ -73,7 +73,7 @@ test("five-attempt configuration is bounded and reconciled with the native retry
   h.emit("session_shutdown");
 });
 
-test("timeout continuation retains the original deadline including failed request time", (t) => {
+test("timeout continuation starts its episode at the first recoverable failure", (t) => {
   t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
   const h = harness(); h.emit("turn_start"); h.emit("before_provider_request", { payload: { input: [] } });
   t.mock.timers.tick(20);
@@ -83,8 +83,10 @@ test("timeout continuation retains the original deadline including failed reques
   assert.equal(result.message.stopReason, "aborted", "native abort is terminal; do not pretend it is native retry");
   assert.equal(result.message.loopPiRecovery.reason, "safe-local-timeout");
   h.emit("agent_settled"); h.emit("input", { source: "extension" }); h.emit("turn_start");
-  t.mock.timers.tick(10);
-  assert.equal(h.aborted, 1, "follow-up must not get a new thirty-millisecond episode");
+  t.mock.timers.tick(29);
+  assert.equal(h.aborted, 0, "healthy first-request time is outside the recovery episode");
+  t.mock.timers.tick(1);
+  assert.equal(h.aborted, 1, "follow-up retains the failure-established deadline");
   h.emit("agent_settled"); h.emit("session_shutdown");
 });
 
@@ -145,7 +147,7 @@ test("user cancellation preserves aborted outcome even after partial output or a
 });
 
 test("switching away from an opted provider disposes exhausted recovery state", async () => {
-  const h=harness();h.emit("turn_start");h.emit("message_end",failure);
+  const h=harness();h.emit("turn_start");h.emit("before_provider_request", {payload:{input:[]}});h.emit("message_end",failure);
   await new Promise((r) => setTimeout(r,45));
   assert.equal(h.aborted,1);h.emit("agent_settled");
   h.ctx.model.provider="ordinary";h.emit("model_select");h.emit("turn_start");
@@ -173,6 +175,7 @@ test("queued input preserves an existing recovery deadline", (t) => {
   t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
   const h = harness();
   h.emit("turn_start");
+  h.emit("before_provider_request", {payload:{input:[]}});
   h.emit("message_end", failure);
   t.mock.timers.tick(20);
   h.emit("input", { source: "rpc" });
@@ -281,5 +284,20 @@ test("the request ceiling retains its bounded empty-output follow-up", async () 
   assert.equal(result.message.loopPiRecovery.disposition, "unchanged");
   h.emit("agent_settled");
   assert.equal(h.emit("input", { source: "extension" }), undefined);
+  h.emit("session_shutdown");
+});
+
+
+test("late successful recovery completion cannot erase an expired episode before timer delivery", (t) => {
+  t.mock.timers.enable({apis:["Date","setTimeout"],now:1000});
+  const h=harness(); h.emit("turn_start");h.emit("before_provider_request",{payload:{input:[]}});
+  h.emit("message_end",failure);h.emit("agent_settled");h.emit("turn_start");
+  h.emit("before_provider_request",{payload:{input:[]}});
+  t.mock.timers.setTime(Date.now()+31);
+  const result=h.emit("message_end",{message:{role:"assistant",stopReason:"toolUse",content:[{type:"toolCall",name:"bash",arguments:{}}]}});
+  assert.equal(result.message.stopReason,"error");
+  assert.equal(result.message.loopPiRecovery.reason,"episode-expired");
+  assert.equal(h.aborted,1);
+  h.emit("agent_settled");assert.deepEqual(h.emit("input",{source:"extension"}),{action:"handled"});
   h.emit("session_shutdown");
 });

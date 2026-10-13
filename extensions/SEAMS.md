@@ -269,12 +269,25 @@ reasoning never trips it, and the provider `timeoutMs` (`retry.provider.timeoutM
 response headers arrive. The output budget is pi's model `maxTokens` (sent as `max_output_tokens`),
 set per model in the home's `models.json` `modelOverrides`.
 
-- Settings: `loopPi.requestCeiling: {wallClockMs, maxFollowUps}`; defaults 840000 (under the
-  watchdog's 15-minute stall reading) and 2. A wall-clock value that is not a positive number within
-  Node's timer range falls back to the default; `maxFollowUps: 0` surfaces every incident without
-  starting a turn. `session_start` resets the chain.
-- The timer runs from `turn_start` (one model request per agent-loop turn; a retry is a new turn)
-  to the assistant `message_end`. If it fires first, `ctx.abort()` ends the run.
+- Settings: `loopPi.requestCeiling: {inactivityMs, absoluteMs, maxFollowUps}`; defaults
+  900000 (15 minutes), 4500000 (75 minutes) and 2. Limits must be positive finite numbers within
+  Node's timer range; invalid values use their defaults. Legacy `wallClockMs` remains an explicit
+  absolute-limit alias only when `absoluteMs` is absent. `maxFollowUps: 0` surfaces incidents
+  without starting a turn. `session_start` resets the chain.
+- Both limits run from `turn_start` to assistant `message_end`. Inactivity is measured from the
+  latest observed model event, or turn start before any event; it uses the exact Request progress
+  seam's normalized start/end/nonempty-delta semantics. Encrypted reasoning counts as activity;
+  transport keepalives, response headers and empty deltas never reset inactivity. The absolute
+  deadline never moves. A reached deadline is checked before accepting another progress event,
+  so delayed timer delivery cannot reopen an expired allowance. `ctx.abort()` ends the run.
+- Incident kind/class remain `wall-clock` / `loop-request-wall-clock-ceiling` for reader
+  compatibility, while `limitType: inactivity|absolute`, `inactivityMs`, `absoluteMs`, `idleMs`
+  and `lastModelEventAt` in notice details, plus matching snake-case file fields, identify the
+  actual bound. `wallClockMs` / `wall_clock_ms` is the triggering limit, not request age.
+  The earlier unconditional 14-minute limit is intentionally replaced: valid active reasoning may
+  finish after an hour, while an active runaway is still stopped at 75 minutes. Model effort and
+  `max_output_tokens` stay separately bounded by the selected model's settings; observed activity
+  does not establish useful work.
 - An assistant `length` stop with no text and no tool call is rewritten at `message_end` to
   `stopReason: "error"` with `EMPTY_LENGTH_ERROR`, which matches neither pi's retryable nor its
   context-overflow patterns: no identical retry, no compaction, and loop-continuation skips the
@@ -305,8 +318,10 @@ refuse configured managed admission rather than assuming zero hidden retries.
 The episode and
 proxy classification are enabled only for those provider ids; other providers retain their
 existing retry policy. An episode starts at
-its first failed assistant attempt, counts that attempt's duration, and includes subsequent waits and requests. Successful
-assistant completion or genuine interactive/RPC input received while idle resets it. Queued input
+its first safely recoverable assistant failure, at the local observation of that failure, and
+includes subsequent waits and requests. Healthy first-request time is outside the episode.
+Successful `stop` or `toolUse` completion or genuine interactive/RPC input received while idle
+resets it. Reasoning activity does not reset or extend it. Queued input
 cannot reset or extend an active episode. Compaction and extension
 follow-ups do not. Settlement disarms the active timer but retains its deadline; expiry
 aborts active work and refuses synthetic restart, without starting a replacement turn.

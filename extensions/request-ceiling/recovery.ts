@@ -292,18 +292,22 @@ export function installRecovery(pi: ExtensionAPI, loadSettings: (ctx?: Extension
   });
   pi.on("message_end", (event, ctx) => {
     if (event.message.role !== "assistant") return;
-    const message = event.message;
+    let message = event.message;
+    // Terminal done has no intervening message_update. Enforce a retained episode
+    // before success can reset it or make a completed tool call executable.
+    if (opted && active && deadline !== undefined && Date.now() >= deadline
+      && (message.stopReason === "stop" || message.stopReason === "toolUse")) {
+      expired = true; exhaustionCause ??= "episode-expired";
+      abortRecovery(ctx);
+      message = {...message, stopReason: "aborted", errorMessage: EPISODE_STOP};
+    }
     const failed = message.stopReason === "error" || message.stopReason === "aborted";
     const operatorCancelled = message.stopReason === "aborted" && !timedOut && !expired && !admissionReason && !halted;
-    if (!failed && message.stopReason !== "length") reset();
+    if (message.stopReason === "stop" || message.stopReason === "toolUse") reset();
     if (opted && operatorCancelled) {
       // Preserve the original abort outcome and do not blame the upstream or post a
       // recovery notice. Automatic input remains held until genuine idle input.
       halted = true; stopReason = "operator-cancelled"; stopNotified = true;
-    }
-    if (opted && failed && !expired && (message.stopReason !== "aborted" || timedOut) && deadline === undefined) {
-      deadline = startedAt + episodeMs;
-      arm(ctx);
     }
     if (!opted) return;
     error ??= httpProxyError(message.errorMessage);
@@ -358,6 +362,12 @@ export function installRecovery(pi: ExtensionAPI, loadSettings: (ctx?: Extension
     const allowed = !denied && !operatorCancelled && ((message.stopReason === "error" && !ownedRecovery && (retryable || nativeTransient)) || (timedOut && localReplay));
     ceilingAllowed = !denied && !operatorCancelled && (emptyCeiling || (timedOut && localReplay));
     compactionAllowed = !denied && !operatorCancelled && (nativeCompaction || emptyCeiling || (timedOut && localReplay));
+    // Healthy request time is excluded. Only positively authorized recovery establishes
+    // the shared deadline; later attempts and progress never move it.
+    if (failed && !expired && deadline === undefined && (allowed || ceilingAllowed || compactionAllowed)) {
+      deadline = Date.now() + episodeMs;
+      arm(ctx);
+    }
     const retryReason = timedOut ? "safe-local-timeout" : localReplay && interrupted ? "interrupted-local-response" : "unstarted-request";
     const upstreamLabel = stoppedUpstream?.code && stoppedUpstream.code !== "unrecognized" ? `; upstream=${stoppedUpstream.code}` : "";
     const explanation = `${RECOVERY_STOP} (${stopReason ?? reason}${upstreamLabel}). Inspect saved work, then send a new message to resume.`;

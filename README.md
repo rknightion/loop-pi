@@ -27,8 +27,10 @@ Three pi extensions, a home template and an installer:
   timer or a finished watcher starts the next root turn.
 - `extensions/loop-continuation` re-prompts a root that stops before the loop is finished, detects
   launch files, and triggers an optional transcript sync script.
-- `extensions/request-ceiling` bounds each model request in the root and every lane by wall-clock
-  time, and turns an output-budget stop with no output into an incident. Either one sends the
+- `extensions/request-ceiling` bounds each model request in the root and every lane by 15 minutes
+  without observed model progress and 75 minutes absolute elapsed time (both configurable), and
+  turns an output-budget stop with no output into an incident. Transport keepalives cannot extend
+  inactivity; active encrypted reasoning may continue past an hour. Either one sends the
   session a follow-up message that starts its next turn, a bounded number of times in a row.
   It also adds jitter to pi's retry wait after a 5xx and holds a 429 retry to a flat 60 s.
 - `home/` holds the agent files (mapper, lane-worker, reviewer, ops, ops-probe and so on), the pi

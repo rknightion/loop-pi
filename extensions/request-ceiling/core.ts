@@ -7,8 +7,11 @@ import { join } from "node:path";
 /** Custom message type of the follow-up that tells a session its last model request failed. */
 export const INCIDENT_CUSTOM_TYPE = "loop-request-incident";
 
-/** Below the 15-minute mark at which the watchdog reads a silent turn as stalled. */
-export const DEFAULT_WALL_CLOCK_MS = 14 * 60 * 1000;
+/** Healthy activity can continue for an hour; silence and total age remain independently bounded. */
+export const DEFAULT_INACTIVITY_MS = 15 * 60 * 1000;
+export const DEFAULT_ABSOLUTE_MS = 75 * 60 * 1000;
+/** Legacy absolute-limit name, retained for callers supplying an explicit wall-clock bound. */
+export const DEFAULT_WALL_CLOCK_MS = DEFAULT_ABSOLUTE_MS;
 /** Follow-up turns allowed in a row before the session is left to stop. */
 export const DEFAULT_MAX_FOLLOW_UPS = 2;
 /** Node fires a longer setTimeout delay after 1 ms, which would abort every request at once. */
@@ -30,21 +33,23 @@ export const EMPTY_LENGTH_ERROR =
   "loop-pi request ceiling: the model reached its output budget (max_output_tokens) with no text and no tool call";
 
 export interface CeilingConfig {
-  wallClockMs: number;
+  wallClockMs?: number;
+  inactivityMs?: number;
+  absoluteMs?: number;
   maxFollowUps: number;
 }
 
-/** `loopPi.requestCeiling: {wallClockMs, maxFollowUps}` from a home's settings, else the defaults. */
-export function ceilingConfig(settings: unknown): CeilingConfig {
+/** Explicit legacy wallClockMs is an absolute alias; malformed new settings cannot disable limits. */
+export function ceilingConfig(settings: unknown): CeilingConfig & {inactivityMs: number; absoluteMs: number; wallClockMs: number} {
   const loopPi = (settings as { loopPi?: Record<string, any> } | undefined)?.loopPi ?? {};
   const raw = (loopPi.requestCeiling ?? {}) as Record<string, unknown>;
-  const wall = raw.wallClockMs;
+  const limit = (value: unknown, fallback: number) => typeof value === "number" && Number.isFinite(value)
+    && value > 0 && value <= MAX_TIMER_MS ? value : fallback;
+  const absoluteMs = limit(raw.absoluteMs === undefined ? raw.wallClockMs : raw.absoluteMs, DEFAULT_ABSOLUTE_MS);
   const follow = raw.maxFollowUps;
   return {
-    wallClockMs:
-      typeof wall === "number" && Number.isFinite(wall) && wall > 0 && wall <= MAX_TIMER_MS ? wall : DEFAULT_WALL_CLOCK_MS,
-    maxFollowUps:
-      typeof follow === "number" && Number.isInteger(follow) && follow >= 0 ? follow : DEFAULT_MAX_FOLLOW_UPS,
+    inactivityMs: limit(raw.inactivityMs, DEFAULT_INACTIVITY_MS), absoluteMs, wallClockMs: absoluteMs,
+    maxFollowUps: typeof follow === "number" && Number.isInteger(follow) && follow >= 0 ? follow : DEFAULT_MAX_FOLLOW_UPS,
   };
 }
 
@@ -70,6 +75,11 @@ export interface Incident {
   model: string;
   elapsedMs: number;
   wallClockMs: number;
+  limitType?: "inactivity" | "absolute";
+  inactivityMs?: number;
+  absoluteMs?: number;
+  idleMs?: number;
+  lastModelEventAt?: number | null;
 }
 
 /** The follow-up message body. `attempt` counts follow-ups in the current unbroken chain. */
@@ -79,10 +89,11 @@ export function incidentText(incident: Incident, attempt: number, maxFollowUps: 
   const what =
     incident.kind === "wall-clock"
       ? [
-          "## Model request incident: wall-clock ceiling",
+          `## Model request incident: ${incident.limitType ?? "wall-clock"} ceiling`,
           "",
           `Your last model request (${incident.model}) ran for ${seconds} s without finishing and was aborted at the ` +
-            `loop-pi request ceiling of ${Math.round(incident.wallClockMs / 1000)} s. Its partial output was discarded: ` +
+            `loop-pi ${incident.limitType ?? "wall-clock"} request ceiling of ${Math.round(incident.wallClockMs / 1000)} s` +
+            (incident.limitType === "inactivity" ? ` without observed model progress (idle ${Math.round((incident.idleMs ?? 0) / 1000)} s)` : "") + ". Its partial output was discarded: " +
             "no tool call from it ran.",
         ]
       : [
@@ -135,6 +146,11 @@ export function writeRequestIncident(
       model: incident.model,
       elapsed_ms: incident.elapsedMs,
       wall_clock_ms: incident.wallClockMs,
+      limit_type: incident.limitType ?? null,
+      inactivity_ms: incident.inactivityMs ?? null,
+      absolute_ms: incident.absoluteMs ?? null,
+      idle_ms: incident.idleMs ?? null,
+      last_model_event_at: incident.lastModelEventAt ?? null,
       attempt,
     };
     const name = `${sessionId || "unknown"}-${at.replace(/[:.]/g, "-")}-${incident.kind}-${attempt}${exhausted ? "-exhausted" : ""}.json`;
