@@ -900,6 +900,20 @@ The invariant production domain is **one OS account on one machine**, across all
 
 This remains the existing honest-mistake fence, not an OS security boundary against adversarial same-account code or deliberately concealed script/task-runner commands. There is no cross-user, cross-host or network-filesystem serialization guarantee. Proving tests use real account-domain locks with unique test names; private-path validation fixtures substitute account metadata only inside unit tests.
 
+After declaration/path validation, the CLI queues best-effort version-1 JSON timing records for
+stderr with `type=loop_gate_timing`, `invocation_uid` (fresh UUID), `lock_id` (the existing SHA-256
+of the stable gate name), `event=waiting|acquired|finished`, and `observed_at_ms` (UTC epoch
+milliseconds). No gate name, command, cwd, environment, child output or error text is included.
+`waiting` is observed and queued before the blocking flock. Delivery may lag or be dropped,
+preserves FIFO order, and completion drain is bounded after flock release. `acquired` reports
+monotonic `wait_ms` measured only around
+flock; `finished` reports that `wait_ms`, `execution_ms` measured around child spawn/wait,
+`elapsed_ms` from wait start, and the child's `returncode` (negative for a terminating signal).
+These are supervisor-observed intervals, not kernel child CPU time. Missing finished records,
+including supervisor SIGKILL, are incomplete observations. Timing I/O failures never alter locking,
+signal forwarding, child execution or exit status; no new file, destination option or lock override
+is introduced. The existing lock domain and descriptor inheritance remain unchanged.
+
 ## Root activity and watch lifecycle events
 
 The frozen version-1 state-log bodies are `watch {op: "start" | "stop", what: string, deadline: string}` and `heartbeat {at: string}`. Existing framing (`v`, `seq`, `ts`, `by`) is unchanged; extensions append with `by=ext`. No additional event fields are introduced.

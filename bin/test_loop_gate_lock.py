@@ -9,6 +9,7 @@ import json
 import os
 import shlex
 import signal
+import select
 import subprocess
 import sys
 import tempfile
@@ -67,6 +68,29 @@ class GateLockTests(unittest.TestCase):
             time.sleep(0.01)
         self.assertTrue(path.exists(), f"child did not reach {path}")
 
+    def wait_for_timing(self, child):
+        ready, _, _ = select.select([child.stderr], [], [], 10)
+        self.assertTrue(ready, "CLI emitted no waiting timing record")
+        line = child.stderr.readline()
+        record = json.loads(line)
+        self.assertEqual(record["event"], "waiting")
+        return line
+
+    def timings(self, text, name):
+        records = [json.loads(line) for line in text.splitlines() if line.startswith('{"type":"loop_gate_timing"')]
+        self.assertEqual([r["event"] for r in records], ["waiting", "acquired", "finished"])
+        self.assertEqual(len({r["invocation_uid"] for r in records}), 1)
+        for record in records:
+            self.assertEqual(record["v"], 1)
+            self.assertEqual(record["lock_id"], hashlib.sha256((self.name_prefix + name).encode()).hexdigest())
+            self.assertIsInstance(record["observed_at_ms"], int)
+            self.assertNotIn(str(self.base), json.dumps(record))
+            self.assertNotIn(self.name_prefix + name, json.dumps(record))
+        acquired, finished = records[1:]
+        self.assertEqual(acquired["wait_ms"], finished["wait_ms"])
+        self.assertGreaterEqual(finished["elapsed_ms"], finished["wait_ms"] + finished["execution_ms"])
+        return finished
+
     def fixture_command(self, tag, *, exit_code=0, ignore_term=False):
         script = self.base / f"gate-{tag}.py"
         script.write_text(
@@ -86,18 +110,27 @@ class GateLockTests(unittest.TestCase):
         first = self.spawn(self.repo, "shared-heavy")
         self.wait_file(self.base / "first-started")
         second = self.spawn(self.other, "shared-heavy")
+        second_prefix = self.wait_for_timing(second)
         time.sleep(0.3)
         self.assertFalse((self.base / "second-started").exists(), "same-name gates overlapped")
         (self.base / "first-finish").touch()
         out, err = first.communicate(timeout=10)
         self.assertEqual(first.returncode, 23, out + err)
+        first_timing = self.timings(err, "shared-heavy")
+        self.assertEqual(first_timing["returncode"], 23)
         self.wait_file(self.base / "second-started")
         env = json.loads((self.base / "second-started").read_text())
         self.assertNotIn("LOOP_PI_RUN_DIR", env)
         self.assertNotIn("LOOP_PI_REPO", env)
+        time.sleep(0.2)
         (self.base / "second-finish").touch()
         out, err = second.communicate(timeout=10)
         self.assertEqual(second.returncode, 0, out + err)
+        second_timing = self.timings(second_prefix + err, "shared-heavy")
+        self.assertEqual(second_timing["returncode"], 0)
+        self.assertGreaterEqual(second_timing["wait_ms"], 250)
+        self.assertGreaterEqual(second_timing["execution_ms"], 180)
+        self.assertNotEqual(first_timing["invocation_uid"], second_timing["invocation_uid"])
         lock_path = m.account_lock_directory() / (hashlib.sha256((self.name_prefix + "shared-heavy").encode()).hexdigest() + ".lock")
         self.assertTrue(lock_path.is_file())
         self.assertFalse((self.base / "locks").exists(), "caller lock override was used")
@@ -127,11 +160,14 @@ class GateLockTests(unittest.TestCase):
             self.spawn(repo, tag)
         for tag in ("first", "second"):
             self.wait_file(self.base / f"{tag}-started")
+        time.sleep(0.2)
         for tag in ("first", "second"):
             (self.base / f"{tag}-finish").touch()
-        for child in self.children:
+        for child, tag in zip(self.children, ("first", "second")):
             out, err = child.communicate(timeout=10)
             self.assertEqual(child.returncode, 0, out + err)
+            timing = self.timings(err, tag)
+            self.assertGreaterEqual(timing["execution_ms"], 180)
 
     def test_signal_forwarding_keeps_lock_until_child_exits(self):
         self.declare(self.repo, "shared-heavy", self.fixture_command("first", ignore_term=True))
@@ -140,28 +176,91 @@ class GateLockTests(unittest.TestCase):
         self.wait_file(self.base / "first-started")
         first.send_signal(signal.SIGTERM)
         second = self.spawn(self.other, "shared-heavy")
+        second_prefix = self.wait_for_timing(second)
         time.sleep(0.3)
         self.assertIsNone(first.poll(), "supervisor exited before child finished")
         self.assertFalse((self.base / "second-started").exists(), "termination released lock early")
         (self.base / "first-finish").touch()
-        first.communicate(timeout=10)
+        _, err = first.communicate(timeout=10)
         self.assertEqual(first.returncode, 0)
+        self.assertEqual(self.timings(err, "shared-heavy")["returncode"], 0)
         self.wait_file(self.base / "second-started")
         (self.base / "second-finish").touch()
-        second.communicate(timeout=10)
+        _, err = second.communicate(timeout=10)
         self.assertEqual(second.returncode, 0)
+        self.assertGreaterEqual(self.timings(second_prefix + err, "shared-heavy")["wait_ms"], 250)
 
     def test_child_signal_is_preserved(self):
         code = "import os, signal; os.kill(os.getpid(), signal.SIGTERM)"
         command = f"exec {shlex.quote(sys.executable)} -c {shlex.quote(code)}"
         self.declare(self.repo, "signal-test", command)
         child = self.spawn(self.repo, "signal-test")
-        child.communicate(timeout=10)
+        _, err = child.communicate(timeout=10)
         self.assertEqual(child.returncode, -signal.SIGTERM)
+        self.assertEqual(self.timings(err, "signal-test")["returncode"], -signal.SIGTERM)
         self.declare(self.repo, "signal-test", "exit 0")
         child = self.spawn(self.repo, "signal-test")
         child.communicate(timeout=10)
         self.assertEqual(child.returncode, 0)
+
+    def test_competing_stderr_writer_cannot_stall_gate_execution(self):
+        self.declare(self.repo, "backpressure", self.fixture_command("sink"))
+        ready = self.base / "sink-ready"
+        filled = self.base / "sink-filled"
+        wrapper = self.base / "timing-scheduling-window.py"
+        wrapper.write_text(
+            "import importlib.machinery, importlib.util, os, sys, time\n"
+            "from pathlib import Path\n"
+            + f"loader = importlib.machinery.SourceFileLoader('gate_cli', {str(CLI)!r})\n"
+            "spec = importlib.util.spec_from_loader(loader.name, loader)\n"
+            "cli = importlib.util.module_from_spec(spec); loader.exec_module(cli)\n"
+            "real_write = os.write\n"
+            "def scheduling_window(fd, data):\n"
+            "    if fd == 2 and b'\"event\":\"acquired\"' in data:\n"
+            + f"        Path({str(ready)!r}).touch()\n"
+            "        deadline = time.monotonic() + 10\n"
+            + f"        while not Path({str(filled)!r}).exists() and time.monotonic() < deadline: time.sleep(0.01)\n"
+            "    return real_write(fd, data)\n"
+            "os.write = scheduling_window\n"
+            "sys.exit(cli.main())\n")
+        read_fd, write_fd = os.pipe()
+        child = subprocess.Popen([sys.executable, str(wrapper), self.name_prefix + "backpressure"],
+                                 cwd=self.repo, env=self.env, stderr=write_fd, stdout=subprocess.PIPE)
+        self.children.append(child)
+        try:
+            self.wait_file(ready)
+            # The scheduling hook does not mock readiness or write results.
+            # A real competing writer fills the shared pipe before the real
+            # telemetry write, then restores its original blocking state.
+            os.set_blocking(write_fd, False)
+            try:
+                while True:
+                    os.write(write_fd, b"x" * 4096)
+            except BlockingIOError:
+                pass
+            finally:
+                os.set_blocking(write_fd, True)
+            filled.touch()
+            deadline = time.monotonic() + 2
+            while not (self.base / "sink-started").exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue((self.base / "sink-started").exists(),
+                            "telemetry backpressure stalled the acquired gate before child execution")
+            (self.base / "sink-finish").touch()
+            child.communicate(timeout=2)
+            self.assertEqual(child.returncode, 0)
+        finally:
+            filled.touch()
+            (self.base / "sink-finish").touch()
+            os.set_blocking(read_fd, False)
+            try:
+                while os.read(read_fd, 4096):
+                    pass
+            except BlockingIOError:
+                pass
+            os.close(write_fd)
+            child.wait(timeout=10)
+            os.close(read_fd)
 
     def test_undeclared_name_does_not_execute_prose(self):
         (self.repo / "LOOP.md").write_text("## Mutexes\n- heavy: exit 0\n")
@@ -189,6 +288,27 @@ class LockPathSafetyTests(unittest.TestCase):
         fd = m.open_lock("safety")
         os.close(fd)
         self.assertEqual(self.filename.stat().st_mode & 0o777, 0o600)
+
+    def test_closed_stderr_does_not_write_timing_into_reused_lock_fd(self):
+        (self.home / ".git").mkdir()
+        (self.home / "LOOP.md").write_text("## Mutexes\n- gate: closed-output | printf gate-output\n")
+        code = (
+            "import importlib.machinery, importlib.util, os, sys\n"
+            "from types import SimpleNamespace\n"
+            "loader = importlib.machinery.SourceFileLoader('gate_cli', sys.argv[1])\n"
+            "spec = importlib.util.spec_from_loader(loader.name, loader)\n"
+            "cli = importlib.util.module_from_spec(spec); loader.exec_module(cli)\n"
+            "account_home = sys.argv[2]\n"
+            "cli.pwd.getpwuid = lambda uid: SimpleNamespace(pw_dir=account_home)\n"
+            "sys.argv = [sys.argv[1], 'closed-output']\n"
+            "os.close(2)\n"
+            "sys.exit(cli.main())\n")
+        child = subprocess.run([sys.executable, "-c", code, str(CLI), str(self.home)],
+                               cwd=self.home, stdout=subprocess.PIPE, timeout=10)
+        self.assertEqual(child.returncode, 0)
+        self.assertEqual(child.stdout, b"gate-output")
+        lock = self.directory / (hashlib.sha256(b"closed-output").hexdigest() + ".lock")
+        self.assertEqual(lock.read_bytes(), b"", "telemetry wrote into a reused closed-stderr descriptor")
 
     def test_symlink_parent_is_refused(self):
         self.directory.rmdir()

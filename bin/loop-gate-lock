@@ -10,13 +10,18 @@ from __future__ import annotations
 import argparse
 import fcntl
 import hashlib
+import json
 import os
 import pwd
+import queue
 import re
 import signal
 import stat
 import subprocess
 import sys
+import threading
+import time
+import uuid
 from pathlib import Path
 
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
@@ -123,9 +128,64 @@ def open_lock(name: str) -> int:
         os.close(directory_fd)
 
 
+class GateTiming:
+    """Bounded, best-effort telemetry with no writes on the supervisor thread."""
+
+    def __init__(self, name: str, *, enabled: bool = True):
+        self.writer = None
+        if not enabled:
+            return
+        self.identity = {"type": "loop_gate_timing", "v": 1, "invocation_uid": str(uuid.uuid4()),
+                         "lock_id": hashlib.sha256(name.encode()).hexdigest()}
+        self.records = queue.Queue(maxsize=3)
+        self.writer = threading.Thread(target=self._write_records, daemon=True)
+        try:
+            self.writer.start()
+        except RuntimeError:
+            self.writer = None
+
+    def _write_records(self) -> None:
+        while True:
+            data, finished = self.records.get()
+            try:
+                # No Python stderr buffering or inherited-descriptor flag changes.
+                # A blocked daemon writer cannot hold up the supervisor or child.
+                os.write(2, data)
+            except OSError:
+                pass
+            if finished:
+                return
+
+    def emit(self, event: str, **measurements: int) -> None:
+        if self.writer is None:
+            return
+        record = {**self.identity, "event": event, "observed_at_ms": time.time_ns() // 1_000_000,
+                  **measurements}
+        data = (json.dumps(record, separators=(",", ":")) + "\n").encode()
+        try:
+            self.records.put_nowait((data, event == "finished"))
+        except queue.Full:
+            pass
+
+    def drain(self) -> None:
+        if self.writer is not None:
+            self.writer.join(timeout=0.05)
+
+
 def run_locked(name: str, command: str, cwd: Path) -> int:
+    # Inspect stderr before path validation allocates fds: a closed descriptor
+    # can otherwise be reused for the lock file and become a telemetry sink.
+    try:
+        os.fstat(2)
+        stderr_open = True
+    except OSError:
+        stderr_open = False
     with os.fdopen(open_lock(name), "r+") as lock:
+        timing = GateTiming(name, enabled=stderr_open)
+        timing.emit("waiting")
+        wait_started = time.monotonic_ns()
         fcntl.flock(lock, fcntl.LOCK_EX)
+        wait_ms = (time.monotonic_ns() - wait_started) // 1_000_000
         env = dict(os.environ)
         for key in list(env):
             if key.startswith("GIT_") or key in ("LOOP_PI_RUN_DIR", "LOOP_PI_REPO", "LOOP_PI_GATE_LOCK_DIR", "BASH_ENV", "ENV"):
@@ -145,8 +205,10 @@ def run_locked(name: str, command: str, cwd: Path) -> int:
         signals = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT)
         previous = {sig: signal.signal(sig, forward) for sig in signals}
         try:
+            timing.emit("acquired", wait_ms=wait_ms)
             # Share the flock fd with the child. Even SIGKILL of this supervisor
             # cannot release the lock while the declared command is still alive.
+            execution_started = time.monotonic_ns()
             child = subprocess.Popen(["/bin/bash", "-c", command], cwd=cwd, env=env,
                                      start_new_session=True, pass_fds=(lock.fileno(),))
             for sig in pending:
@@ -154,10 +216,18 @@ def run_locked(name: str, command: str, cwd: Path) -> int:
                     os.killpg(child.pid, sig)
                 except ProcessLookupError:
                     pass
-            return child.wait()
+            result = child.wait()
+            finished = time.monotonic_ns()
         finally:
             for sig, handler in previous.items():
                 signal.signal(sig, handler)
+    # Release the flock before reporting completion; telemetry cannot extend its
+    # hold after the declared child has finished.
+    timing.emit("finished", wait_ms=wait_ms,
+                execution_ms=(finished - execution_started) // 1_000_000,
+                elapsed_ms=(finished - wait_started) // 1_000_000, returncode=result)
+    timing.drain()
+    return result
 
 
 def main() -> int:
