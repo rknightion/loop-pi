@@ -799,3 +799,19 @@ class DigestTests(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReturnArtifactTests(Base):
+    def test_native_artifact_round_trip_and_invalid_types(self):
+        self.seed()
+        self.append("dispatch", "lane=L1", "task=T1", "agent=lane-worker", "run=r1", "base=b")
+        artifact = os.path.join(self.repo, "full return.md")
+        self.append("return", "lane=L1", "run=r1", "status=complete", "artifact=" + artifact)
+        self.assertEqual(self.events()[-1]["artifact"], artifact)
+        self.assertEqual(run("check", self.log).returncode, 0)
+        self.assertEqual(run("digest", self.log).returncode, 0)
+        for invalid in (None, "", "relative.md", "/nul" + chr(0), 1, True, [], {}):
+            result = self.append("--by", "ext", ok=False, stdin=json.dumps({
+                "ev": "return", "lane": "L1", "run": "r1", "status": "complete", "artifact": invalid,
+            }))
+            self.assertEqual(result.returncode, 2, invalid)

@@ -926,6 +926,67 @@ The frozen version-1 state-log bodies are `watch {op: "start" | "stop", what: st
 
 The protocol event table is owned by the protocol source. No authority fences, budgets, pins, model selection or dispatcher behavior are changed.
 
+## State-aware root context budget
+
+The model root's continuation state freezes the accepted Goal text, its SHA-256 and source path,
+root cwd and run directory at arm. `loop-continuation:query-launch` exposes this optional
+`rootContext` snapshot; old sessions without it do not acquire it by reading a moving Goal.
+The native system prompt remains Pi-owned. No authority is inferred from a model summary.
+
+- `loop-state` checks Pi 1.1.0's public `ctx.getContextUsage()` at `agent_settled`, only when
+  not aborted, `ctx.isIdle()`, no pending messages and no queued/running native async children.
+  Active async work defers proactive compaction until a later settled boundary after completion;
+  it does not consume an attempt or suppress the normal child completion wake. Quiet requires a
+  supported current-session native status reply with zero displayed active children, zero occupied
+  top-level capacity and a complete version-1 async snapshot: no omitted runs/children or byte-limit
+  truncation, and only known terminal native job roots. Display nodes must have known kinds and
+  states, but their cached step states are not job liveness: a completed native job can retain a
+  running display step. The pinned projection keeps active materialized jobs as roots when their
+  workflow parent is terminal; a running parent independently refuses quiet. Zero displayed steps
+  alone does not prove zero queued/running jobs during native finalization. Unknown or incomplete status also defers
+  without consuming an attempt; this includes native snapshots exceeding their current 20-run or
+  32-KiB bounds. This avoids the
+  pinned package treating proactive compaction as an operator request to resume the root. `percent` is a percentage, so the proactive
+  trigger is **80%** (fraction 0.8), not 0.8%. It does not guess tokens from provider clocks.
+  Unknown usage, missing methods or a missing frozen snapshot is a concrete unsupported boundary,
+  not permission to restart. The latch survives in `loop-root-context-budget` custom entries:
+  at most one attempt per high-usage generation; a known reading below 70% rearms it (10 percentage
+  points of hysteresis). Null post-compaction usage never rearms it. There is no timer or retry. At most two
+  proactive compaction attempts are admitted per same-session run, including preparation failures
+  and native failures or aborts. The count and exact session/run binding persist alongside the
+  latch; reload never resets them. Unknown legacy consumption conservatively exhausts the allowance.
+- The extension drains its state append queue, obtains the CLI's bounded state digest and freezes
+  the dispatch-count projection (implementation runs excluding `kind: review` and `recovery_of`,
+  without resetting any consumed attempt). The summary consists only of frozen Goal/root/run
+  identity, frozen authority references/hashes, digest and that projection, at most 32,768 UTF-8
+  bytes. Larger or unreadable state refuses this compaction; no structured state is cut to fit.
+  The append-only state log stays authoritative for admits, dispatches, returns, parks and budgets.
+- It calls **native same-session `ctx.compact({onComplete,onError})`** while idle and supplies
+  that state summary through `session_before_compact`. A context-invisible custom attempt entry
+  is the valid kept boundary, so all prior conversation is removed from model projection while
+  raw entries remain on disk. Native `session_compact` still regenerates the digest. Success does
+  not start a turn; failure/abort changes neither the log nor frozen runtime authority, and does
+  not spawn/resume a child or replace/relaunch the root. Ordinary/native overflow compaction is
+  unchanged. An input or child completion arriving during summary preparation makes it decline
+  the proactive attempt rather than aborting live work.
+- Provenance: pinned Pi extension and compaction docs; `ContextUsage`, `CompactOptions`,
+  `ExtensionContext` in `dist/core/extensions/types.d.ts`; `AgentSession.getContextUsage`,
+  `compact`, `isIdle`, `_emitAgentSettled` in `dist/core/agent-session.js`; metadata cut points in
+  `dist/core/session-manager.js`. Physical model limits are Pi's responsibility, including virtual
+  routes. pi-subagents 0.77.0's existing 2,000-character preview/full-file transport is unchanged.
+  The full-return boundary is the resolved native package artifact written by `resolveSingleOutput`,
+  not raw provider/session terminal text: `stripAcceptanceReport` extracts structured acceptance
+  metadata and removes terminal whitespace before resolution. Substantive text and internal
+  whitespace remain intact; the preview still points to the complete resolved artifact. This
+  adds no raw-byte guarantee, wrapper or package change.
+- The budget coordinator's session start/shutdown lifecycle is composed through loop-state's
+  existing handlers, alongside dispatch/recovery initialization and queue shutdown.
+
+
+## Durable return artifact
+
+The optional version-1 `return.artifact` field is an absolute nonempty path without NUL. It is extension-owned metadata from the sole native completion result, never projected from lane-authored return JSON or a notification body. Existing return fields, event framing and all thirteen event schemas remain strict; readers accept only this additive optional field. The path names the complete resolved native package artifact after acceptance metadata extraction and terminal whitespace normalization. It is not the native display envelope, which appends a saved-output reference. The existing lane cap may retain an even larger original response behind its omission marker; that separate full copy and marker remain unchanged, and the package artifact is never presented as that original response. Missing or invalid native metadata leaves the field absent, never invents a path. The CLI and catalogue reader validate its type without dereferencing it. Producers must ship only after the compatible reader has been adopted.
+
 ## Loop status line
 
 `extensions/loop-status/` is a root-only extension (listed in the installer's root extension set

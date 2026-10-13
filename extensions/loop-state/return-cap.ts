@@ -177,8 +177,9 @@ export function completionInfo(data: unknown): CompletionInfo | null {
   if (results.length === 1 && results[0] && typeof results[0] === "object") {
     const r = results[0];
     const ref = r.outputReference as { path?: unknown } | string | undefined;
-    const candidate = typeof r.savedOutputPath === "string" ? r.savedOutputPath : typeof ref === "string" ? ref : typeof ref?.path === "string" ? ref.path : null;
-    if (candidate && isAbsolute(candidate)) saved = candidate;
+    const artifacts = r.artifactPaths as { outputPath?: unknown } | undefined;
+    const candidate = typeof r.savedOutputPath === "string" ? r.savedOutputPath : typeof ref === "string" ? ref : typeof ref?.path === "string" ? ref.path : r.artifactOutputSaveFailed !== true && typeof artifacts?.outputPath === "string" ? artifacts.outputPath : null;
+    if (candidate && isAbsolute(candidate) && !candidate.includes("\0")) saved = candidate;
   }
   return { runId, asyncDir, savedOutputPath: saved };
 }

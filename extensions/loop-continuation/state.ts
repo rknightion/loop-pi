@@ -52,7 +52,20 @@ export interface CloseOutDigest {
   timeParkDeadline?: string;
 }
 
+export interface FrozenRootContext {
+  goalPath: string;
+  goalSha256: string;
+  goalText: string;
+  cwd: string;
+  runDir: string;
+  sessionId: string;
+  sessionFile: string | null;
+  opsSha256: string | null;
+}
+
 export interface ContinuationState {
+  /** Accepted Goal and root identity; optional for sessions armed by an older build. */
+  rootContext?: FrozenRootContext;
   armed: boolean;
   launch: LaunchInfo | null;
   /** Nudges already sent in the current unbroken chain. */

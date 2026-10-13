@@ -1,6 +1,8 @@
 // Pure helpers for the loop-state extension: brief header parsing, lane-return parsing, and the
 // state log path. No pi imports, so they are unit-testable on their own.
 
+import { isAbsolute } from "node:path";
+
 export interface Brief {
   lane: string;
   task: string;
@@ -90,10 +92,11 @@ export function failedRunBlock(block: Record<string, unknown> | null): Record<st
 /** The `return` event for a finished run. The status is the block's: a run with no block, or with
  *  a block whose status is not one of the four, is `failed` whatever pi-subagents reported, as the
  *  dispatcher's parseLaneReturn reads it. Fields of a block that do not fit the schema are dropped. */
-export function returnEvent(lane: string, run: string, block: Record<string, unknown> | null): Record<string, unknown> {
+export function returnEvent(lane: string, run: string, block: Record<string, unknown> | null, artifact?: string | null): Record<string, unknown> {
   const ev: Record<string, unknown> = { ev: "return", lane, run };
   const fromBlock = block && typeof block.status === "string" && STATUSES.has(block.status) ? block.status : null;
   ev.status = fromBlock ?? "failed";
+  if (typeof artifact === "string" && isAbsolute(artifact) && !artifact.includes("\0")) ev.artifact = artifact;
   if (!block) return ev;
   if (block.sha === null || isStr(block.sha)) ev.sha = block.sha;
   if (typeof block.landed === "boolean") ev.landed = block.landed;

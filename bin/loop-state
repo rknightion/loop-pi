@@ -44,6 +44,7 @@ BOOL = "bool"
 STRLIST = "strlist"
 OWNED = "owned"
 CODERABBIT = "coderabbit"
+ARTIFACT = "artifact"
 
 STATUS = ("complete", "partial", "blocked", "failed")
 TIER = ("routine", "guarded")
@@ -81,6 +82,7 @@ SCHEMA = {
             "coderabbit": CODERABBIT,
             "base": STR,
             "questions": STRLIST,
+            "artifact": ARTIFACT,
         },
     ),
     "gate": (
@@ -142,7 +144,10 @@ def _check_value(field, kind, value):
         if not isinstance(value, str) or value not in kind:
             return "%s must be one of %s" % (field, "|".join(kind))
         return None
-    if kind == STR:
+    if kind == ARTIFACT:
+        if not isinstance(value, str) or not value.startswith("/") or "\x00" in value:
+            return "%s must be an absolute path without NUL" % field
+    elif kind == STR:
         if not isinstance(value, str) or value == "":
             return "%s must be a non-empty string" % field
     elif kind == STR_OR_NULL:

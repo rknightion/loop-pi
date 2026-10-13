@@ -208,6 +208,12 @@ export default function (pi: ExtensionAPI) {
       standingPath: standing.path,
       standingSha256: standing.sha256,
       concurrency: runConcurrency(check.goalText),
+      rootContext: {
+        goalPath: parsed.goal, goalSha256: check.goalSha256, goalText: check.goalText,
+        cwd: ctx.cwd, runDir: check.runDir, sessionId: ctx.sessionManager.getSessionId(),
+        sessionFile: ctx.sessionManager.getSessionFile() ?? null,
+        opsSha256: frozen.ops && opsLine.kind === "line" ? opsLine.sha256 : null,
+      },
     };
     persist();
     if (frozen.rejected !== null) {
@@ -301,6 +307,7 @@ export default function (pi: ExtensionAPI) {
       state.armed && state.launch ? resolveReportPath(state.launch.report, req.cwd ?? launchCwd ?? null) : null;
     req.reply({
       reportPath,
+      ...(state.armed && state.rootContext ? { rootContext: { ...state.rootContext } } : {}),
       opsPath: state.opsPath ?? null,
       ops: state.ops ?? null,
       auditGrantsPath: state.auditGrantsPath ?? null,

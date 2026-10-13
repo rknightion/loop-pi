@@ -21,6 +21,7 @@ import { type Brief, deriveLogPath, failedRunBlock, parseBrief, parseLaneReturn,
 import { allocateRepair, type ArtifactIdentity, artifactIdentity, identityOf, readRepair, type RepairBinding, validBinding, validIdentity } from "./repair.ts";
 import { capNotifyMessage, type CompletionInfo, completionInfo, contentText, NOTIFY_CUSTOM_TYPE, RETURN_CAP_BYTES } from "./return-cap.ts";
 import { subagentFields } from "../loop-guard/subagent-view.ts";
+import { installContextBudget, type RootLaunchContext, stateSummary, nativeChildrenQuiet } from "./context-budget.ts";
 
 export const DIGEST_CUSTOM_TYPE = "loop-state-digest";
 const CLI_TIMEOUT_MS = 10_000;
@@ -334,7 +335,8 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
     poll(15);
   }
 
-  async function recordReturn(runId: string, data: Record<string, unknown>, log: string, info: { lane: string }, final = false) {
+  async function recordReturn(runId: string, data: Record<string, unknown>, log: string, info: { lane: string }, final = false,
+    artifact: string | null | undefined = completionInfo({ ...data, runId })?.savedOutputPath) {
     if (returned.has(runId)) return;
     const results = Array.isArray(data.results) ? (data.results as Record<string, unknown>[]) : [];
     const first = results[0];
@@ -365,7 +367,7 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
         }
       }
     }
-    const event = returnEvent(info.lane, runId, runFailed(data) ? failedRunBlock(block) : block);
+    const event = returnEvent(info.lane, runId, runFailed(data) ? failedRunBlock(block) : block, artifact);
     const writeReturn = resumeAttempted.has(runId)
       ? (row: Record<string, unknown>) => appendRecoveryReturn(row, log)
       : (row: Record<string, unknown>) => append(row, log);
@@ -373,7 +375,7 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
     if (result.code === 2) {
       // The parsed block did not validate; keep the fact of the return.
       warn(`return for run ${runId} reduced to its status: ${result.stderr.trim()}`);
-      result = await writeReturn({ ev: "return", lane: info.lane, run: runId, status: event.status });
+      result = await writeReturn({ ev: "return", lane: info.lane, run: runId, status: event.status, ...(event.artifact ? { artifact: event.artifact } : {}) });
     }
     if (result.code !== 0) warn(`return for run ${runId} not recorded: ${result.stderr.trim()}`);
     else {
@@ -464,10 +466,11 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
 
   // The bound repair's text replaces the completion's: a file-only completion holds only a
   // reference, and an inline block or a body path is never authority for the repair.
-  function boundRepairData(runId: string, data: Record<string, unknown>, repair: Repair, originalRun: string): Record<string, unknown> {
+  function boundRepairData(runId: string, data: Record<string, unknown>, repair: Repair, originalRun: string): { data: Record<string, unknown>; artifact: string | null } {
     const results = Array.isArray(data.results) ? (data.results as Record<string, unknown>[]) : [];
     const first = results[0] && typeof results[0] === "object" ? results[0] : {};
     let text = "";
+    let read = false;
     try {
       if (results.length > 1) throw new Error("repair completion is not single-result");
       const ref = first.outputReference as { path?: unknown } | string | undefined;
@@ -476,6 +479,7 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
         throw new Error("completion names an output other than the repair binding");
       }
       text = readRepair(repair.binding);
+      read = true;
     } catch (error) {
       warn(`repair output for run ${runId}: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -487,7 +491,7 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
       if (!intact) warn(`original output ${repair.original.path} of run ${originalRun} changed during its block repair`);
     }
     doneFacts.set(originalRun, facts);
-    return { ...data, summary: text, results: [{ ...first, summary: text, output: text }] };
+    return { data: { ...data, summary: text, results: [{ ...first, summary: text, output: text }] }, artifact: read ? repair.binding.output : null };
   }
 
   async function handleComplete(runId: string, data: Record<string, unknown>, scoped: boolean) {
@@ -500,9 +504,17 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
         return;
       }
       handled.add(runId);
-      if (original.repair) data = boundRepairData(runId, data, original.repair, original.run);
-      await recordReturn(runId, data, original.log, dispatched.get(runId) ?? original.info, true);
-      await recordReturn(original.run, original.failed ? { ...data, success: false } : data, original.log, original.info, true);
+      let artifact: string | null = null;
+      if (original.repair) {
+        const bound = boundRepairData(runId, data, original.repair, original.run);
+        data = bound.data;
+        artifact = bound.artifact;
+      }
+      // Outcome repair does not replace either run's independently bound artifact identity.
+      // Older unbound repairs have no authoritative original path, so leave it absent.
+      await recordReturn(runId, data, original.log, dispatched.get(runId) ?? original.info, true, artifact);
+      await recordReturn(original.run, original.failed ? { ...data, success: false } : data, original.log, original.info, true,
+        original.repair?.original?.path ?? null);
       return;
     }
     const log = resolveLog();
@@ -531,6 +543,7 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
   }
 
   pi.on("session_start", (_event, ctx) => {
+    contextBudget.sessionStart(ctx);
     // pi-subagents tags its events with the session file when there is one, else the session id.
     sessionId = ctx.sessionManager.getSessionFile?.() ?? ctx.sessionManager.getSessionId();
     shuttingDown = false;
@@ -585,6 +598,7 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
   });
 
   pi.on("session_shutdown", async () => {
+    contextBudget.sessionShutdown();
     shuttingDown = true;
     for (const timer of recoveryTimers) clearTimeout(timer);
     recoveryTimers.clear();
@@ -670,6 +684,7 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
     if (typeof d.id !== "string" || d.sessionId !== sessionId) return;
     // deadlineAt is epoch milliseconds.
     const at = typeof d.deadlineAt === "number" && Number.isFinite(d.deadlineAt) ? new Date(d.deadlineAt) : null;
+    contextBudget.started();
     started.set(d.id, at && !Number.isNaN(at.getTime()) ? { deadlineAt: at.toISOString().replace(/\.\d{3}Z$/, "Z") } : {});
   });
 
@@ -678,6 +693,7 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
     if (typeof d.runId !== "string") return;
     if (typeof d.sessionId === "string" && d.sessionId !== sessionId) return;
     const scoped = typeof d.sessionId === "string" && d.sessionId === sessionId;
+    contextBudget.completed();
     const info = completionInfo(d);
     if (info) {
       completions.delete(info.runId);
@@ -686,5 +702,42 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
     }
     const runId = d.runId;
     enqueue(() => handleComplete(runId, d, scoped));
+  });
+
+  const contextBudget = installContextBudget(pi, {
+    drain: () => chain,
+    // One supported current-session status query at a high-usage settled boundary.
+    // Missing/invalid native fleet evidence is unknown, never permission to compact.
+    quiet: () => new Promise<boolean>((done) => {
+      const requestId = randomUUID();
+      let unsubscribe: (() => void) | undefined;
+      const finish = (quiet: boolean) => { clearTimeout(timer); unsubscribe?.(); done(quiet); };
+      const timer = setTimeout(() => { warn("context budget deferred: native child activity unavailable"); finish(false); }, CLI_TIMEOUT_MS);
+      unsubscribe = pi.events.on(`subagents:rpc:v1:reply:${requestId}`, (raw) => {
+        const reply = raw as { version?: number; requestId?: string; success?: boolean; data?: { fleet?: { version?: number; totalActive?: unknown } } };
+        if (reply.version !== 1 || reply.requestId !== requestId) return;
+        const fleet = reply.data?.fleet;
+        if (reply.success !== true || fleet?.version !== 1 || typeof fleet.totalActive !== "number" || !Number.isInteger(fleet.totalActive) || fleet.totalActive < 0) {
+          warn("context budget deferred: native child activity unavailable"); finish(false); return;
+        }
+        finish(nativeChildrenQuiet(reply.data));
+      });
+      try { pi.events.emit("subagents:rpc:v1:request", { version: 1, requestId, method: "status", params: {} }); }
+      catch { finish(false); }
+    }),
+    warn,
+    async prepare(ctx) {
+      const log = resolveLog();
+      if (!log) return null; // Unarmed sessions have no loop context budget.
+      let launch: RootLaunchContext | null = null;
+      pi.events.emit("loop-continuation:query-launch", { reply: (value: RootLaunchContext) => { launch = value; } });
+      const snapshot = launch as RootLaunchContext | null;
+      if (!snapshot?.rootContext) throw new Error("session has no frozen root snapshot");
+      const checked = await runCli(cliBin(), ["check", log]);
+      if (checked.code !== 0) throw new Error("state ledger validation failed");
+      const digest = await runCli(cliBin(), ["digest", log]);
+      if (digest.code !== 0 || !digest.stdout.trim()) throw new Error("state digest unavailable");
+      return { ...stateSummary(ctx, snapshot, log, digest.stdout), log };
+    },
   });
 }

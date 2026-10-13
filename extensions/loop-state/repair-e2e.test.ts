@@ -163,6 +163,10 @@ test("a revived lane's bound report stays byte-identical and the repair block la
     assert.ok(revived, "the repair has its own linked dispatch");
     const returns = Object.fromEntries(lane.filter((r) => r.ev === "return").map((r) => [r.run, [r.status, r.check, r.exit]]));
     assert.deepEqual(returns, { [revived.run]: ["complete", "just check", 0], [original.run]: ["complete", "just check", 0] });
+    const artifacts = Object.fromEntries(lane.filter((r) => r.ev === "return").map((r) => [r.run, r.artifact]));
+    assert.equal(artifacts[original.run], bound, "original return keeps its full native report artifact identity");
+    assert.equal(artifacts[revived.run], output, "repair return names only its separate bound artifact");
+    assert.equal(sha(readFileSync(artifacts[original.run])), sha(expected), "durable original path resolves to all original bytes");
 
     const entries = await recoveryEntries(session, "entries");
     assert.equal(entries[0].phase, "pending");
@@ -215,6 +219,10 @@ test(`a root restarted into a fresh launcher run dir still records the repair ou
     const [request] = resumes(s.requests);
     assert.equal(resumes(s.requests).length, 1, "the restart issues no second repair");
     assert.ok(request.params.output.startsWith(join(realpathSync(firstRunDir), "return-repairs") + "/"), "the binding stays in the first run dir");
+    const artifacts = Object.fromEntries(lane.filter((r) => r.ev === "return").map((r) => [r.run, r.artifact]));
+    assert.equal(artifacts[original.run], bound, "restart retains the original full native artifact identity");
+    assert.equal(artifacts[revived.run], request.params.output, "restart retains the separate repair artifact identity");
+    assert.equal(sha(readFileSync(artifacts[original.run])), sha(expected));
     const done = (await recoveryEntries(session, "done")).at(-1);
     assert.equal(done.phase, "done");
     assert.equal(done.originalIntact, true);

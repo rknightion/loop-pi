@@ -88,3 +88,13 @@ test("a run that finished without a usable lane-return block is recorded failed,
   assert.deepEqual(returnEvent("L1", "r1", null), { ev: "return", lane: "L1", run: "r1", status: "failed" });
   assert.equal(returnEvent("L1", "r1", { status: "great" }).status, "failed");
 });
+
+// Artifact metadata comes from the native completion, never the lane-authored block.
+test("returnEvent retains a native absolute artifact and ignores lane path claims", () => {
+  const event = (returnEvent as any)("L1", "r1", { status: "complete", artifact: "/wrong/body.md" }, "/fixture/full.md");
+  assert.equal(event.artifact, "/fixture/full.md");
+  assert.equal(returnEvent("L1", "r1", { status: "complete", artifact: "/wrong/body.md" }).artifact, undefined);
+  for (const artifact of [null, "", "relative.md", "/nul" + String.fromCharCode(0), 1]) {
+    assert.equal((returnEvent as any)("L1", "r1", null, artifact).artifact, undefined);
+  }
+});
