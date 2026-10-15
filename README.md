@@ -9,9 +9,8 @@ It exists because the Codex CLI root in the same kind of loop polls while it wai
 check is a model call, and over a long run those calls add up. pi gives an extension API that can
 hold a root idle until something actually happens.
 
-The loop contract itself (run contract, lane briefs, waits, closeout) is the
-[fan-out protocol](https://github.com/rknightion/fan-out-protocol): `loop/contract.md`, with pi in
-`loop/harness-pi.md`.
+The loop contract itself (run contract, charter, lane briefs, waits, closeout) lives in a separate
+loop protocol: a harness-neutral contract plus one harness file per runtime, `harness-pi.md` for pi.
 
 ## What is in it
 
@@ -47,8 +46,8 @@ Three pi extensions, a home template and an installer:
   the lane policy, the pi settings and the policy header for the dedicated loop home.
 - `bin/loop-pi-install` builds a pinned runtime, validates it, installs one pi home and writes a
   launcher. `bin/loop-pi-preflight` refuses a target repository that is not safe to loop in, and
-  `bin/loop-pi-audit` snapshots remote state before a run and reports every ungranted remote change
-  at closeout.
+  `bin/loop-pi-audit` snapshots remote state before a run and reports every remote change the
+  run's push log does not account for at closeout.
 
 `extensions/SEAMS.md` is the contract between the extensions: event names, file layout, the hook
 script payload and the settings keys.
@@ -125,84 +124,50 @@ printing `{"hookSpecificOutput": {"permissionDecision": "deny", "permissionDecis
 Samples of both live in `extensions/test-support/hook-scripts/`. List a script in
 `requiredHookScripts` when its absence should stop lanes rather than be skipped.
 
-### Closeout grants
+### Closeout audit
 
-`loop-pi-audit compare BEFORE AFTER --grants grants.json` (or `closeout --grants`)
-uses exact snapshot repository paths as keys. An entry remains either a list of exact refs,
-or an object with `refs` and `allow_non_fast_forward` lists. Objects can also predeclare
-actor-bound automation, independently of those lists:
-
-```json
-{
-  "<repository path>": {
-    "refs": ["refs/heads/main"],
-    "automation": [
-      {"ref_prefix": "refs/heads/renovate/", "actor": "dependency-app[bot]"},
-      {"ref": "refs/heads/release-please--branches--main", "actor": "release-app[bot]"}
-    ]
-  }
-}
-```
-
-Each automation item requires an exact GitHub App bot push actor login: a nonempty bot name
-ending in literal `[bot]`. Human or other nonbot actor declarations are malformed, even if
-push records match, and exit 2. Each item has exactly one of `ref` (an exact branch) or
-`ref_prefix` (a branch namespace longer than `refs/heads/`, ending in `/`). Unknown keys or
-malformed items exit 2. Read the login from the forge's activity API, not the commit metadata
-or a pull request's author display. No wildcards are accepted.
-
-Automation covers creation, movement, rewriting or deletion only when the read-only GitHub
-activity API for that remote and ref accounts for the complete before-to-after SHA chain
-between the snapshot timestamps, with every entry attributed to that one actor. All activity
-pages are read. Missing, unavailable, malformed or mixed-actor evidence grants nothing; the
-ordinary audit verdict remains unchanged. Covered changes have a separate `automation` report
-line with full old/new SHAs and actor. Neither `main`, either snapshot's default branch, tags,
-nor an unresolved default branch can be covered this way. This never grants another ref or
-permits the root's own ungranted pushes. Declare grants before a run, not to repair an old audit.
-
-### Protocol 2 closeout
-
-A run dir that holds a `loop-pi-proto` file (written by `loop-continuation` when it arms a root)
-is a protocol 2 run. For those, and only those, `closeout` judges a move of a remote's default
-branch commit by commit instead of by grant:
+The launcher runs `loop-pi-audit begin <repo>` before the root starts, recording every remote's
+refs, the local tags and the GitHub releases in `<run dir>/audit-before.json`; `loop-pi-audit add
+<repo>` adds another repository for a cross-repo charter. `/loop-closeout` runs
 
 ```sh
-loop-pi-audit closeout --grants grants.json --grants-sha256 <hex> --push-log push-log.jsonl
+loop-pi-audit closeout --run-dir <run dir> --push-log <run dir>/push-log.jsonl
 ```
 
-- `--grants-sha256 HEX` is the hash frozen for the grants file at launch. A file whose bytes differ
-  is refused with exit 2 before it covers anything. A protocol 2 closeout without it warns.
+which snapshots the same repositories again and compares. A run dir that holds a `loop-pi-proto`
+file (written by `loop-continuation` when it arms a root), or a snapshot that retains that
+evidence, judges a move of a remote's default branch commit by commit:
+
 - `--push-log FILE` is the loop's push log (default `<run-dir>/push-log.jsonl`), one JSON object
-  per successfully updated ref with `repo`, `ref`, `old` and `new`.
-- A `refs/heads/<default branch>` entry in the grants file is ignored, with a warning. The move is
-  granted only when every commit in `before..after` lies in some logged `old..new` range for that
-  repository and ref, or touches only paths under `backlog/`, or lies in a range that a login in
-  that repository's `bot_actors` itself pushed or merged inside the snapshot window, according to
-  GitHub's activity API (push records, never commit author or committer metadata; missing evidence
-  grants nothing). Every `bot_actors` entry must be an exact App bot login (`^[A-Za-z0-9-]+\[bot\]$`),
-  or the grants file is refused with exit 2. Anything else is `UNGRANTED` and printed in a `note:` line. A foreign commit between two logged pushes is
+  per successfully updated ref with `repo`, `ref`, `old` and `new`, written by loop-guard after the
+  root's own pushes.
+- The move is accounted for only when every commit in `before..after` lies in some logged
+  `old..new` range for that repository and ref, or touches only paths under `backlog/`. Anything
+  else is `UNGRANTED` and printed in a `note:` line. A foreign commit between two logged pushes is
   therefore flagged, as is any commit after the last logged push. The fast-forward check still
   applies, and a derived `HEAD` move follows the default branch's verdict.
 - Another snapshotted remote whose unchanged URL is byte-identical to the canonical repository's
   (no scheme, user, host-case or path normalisation) receives only that canonical's exact
-  `actor: root` `old..new` ranges, never its bot actors or grants. Only absolute URLs qualify
-  (`scheme://`, scp-like `host:path`, absolute local path); a relative URL such as `../up.git`
-  never transfers.
+  `actor: root` `old..new` ranges. Only absolute URLs qualify (`scheme://`, scp-like `host:path`,
+  absolute local path); a relative URL such as `../up.git` never transfers.
 - A push the log never saw (watcher, subprocess, script) is `UNGRANTED`; author, committer and
   current SHA are never backfilled. Refusing such pushes before mutation in loop-guard was
   deliberately not chosen.
-- Other branches, tags and releases are judged exactly as before. `bot_actors` sits beside `refs`
-  in a repository's grants object: `{"<repo>": {"refs": ["HEAD"], "bot_actors": ["some-app[bot]"]}}`.
-- `compare` applies the same rules when given `--run-dir DIR` for a run dir with the marker; it
-  never reads `LOOP_PI_RUN_DIR`. With no marker, behaviour is unchanged.
+- Any other added, moved or deleted ref, tag or release is reported and fails the audit (exit 1),
+  except `refs/pull/*` changes, which are reported as foreign.
+- `compare BEFORE AFTER` applies the same rules when given `--run-dir DIR` for a run dir with the
+  marker or `--push-log FILE`; it never reads `LOOP_PI_RUN_DIR`.
 
 ### State log (`loop-state`)
 
 `loop-state append <log> <ev> k=v ...` validates every event; `check` and `digest` read the log.
-A log takes one `open`. Only `land mode=after-green` is accepted for new appends (older logs with
+The extensions write the run's events themselves: `open` at arm (`charter_sha256`, `root`,
+`root_model`, `first_wave`, and `tier` only when the charter states one), `dispatch` and `return`
+per lane, `watch` and `heartbeat` for root activity, and `judgement` for automatic recovery.
+`digest <log> --json` gives `live_lanes` after a compaction. A log takes one `open`. Only `land mode=after-green` is accepted for new appends (older logs with
 `pre-green` still check and digest). `revert` accepts `reason=root-decision`. `park needs=budget`
-is valid; `close reason=budget` in a protocol 2 run (`--run-dir DIR` or `LOOP_PI_RUN_DIR`) is
-refused unless `harness-facts.jsonl` records a `compaction-failed` or `quota-exhausted` fact. When
+is valid; `close reason=budget` in a marked run (`--run-dir DIR` or `LOOP_PI_RUN_DIR` holding
+`loop-pi-proto`) is refused unless `harness-facts.jsonl` records a `compaction-failed` or `quota-exhausted` fact. When
 `LOOP_PI_RUN_DIR` holds `loop-pi-proto`, a different `--run-dir` is ignored with a warning. `by` is
 not a `k=v` field; use `--by`. A string-list field accepts a JSON array or a comma-separated string, `judgement` text may be 4,096
 bytes, and an unknown field's error lists the event's allowed fields.
@@ -214,8 +179,7 @@ bytes, and an unknown field's error lists the event's allowed fields.
   releases; a bump means re-running the tests and a real loop, not just the installer.
 - **Not a sandbox.** loop-guard is a fence against honest mistakes, parsed from the command text.
   A determined model can get round it (an interpreter, an encoded string, a file it writes and then
-  runs). The closeout audit, not the guard, is the evidence that nothing ungranted changed on a
-  remote. Run loops only where a mistake is recoverable.
+  runs). The closeout audit, not the guard, is the evidence of what changed on a remote. Run loops only where a mistake is recoverable.
 - **One model family.** The guard enforces the configured family and the model names in the agent
   files, not whether your provider actually serves them.
 - **The tests never call a model.** They drive real pi processes against a scripted `faux`

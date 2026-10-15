@@ -26,7 +26,7 @@ function packageNotify() {
     sendUserMessage() {},
   };
   registerSubagentNotify(pi as never, { currentSessionId: "s", completionOwnerId: "o" } as never, { sendRegistry: createCompletionSendRegistry() });
-  bus.get("subagent:async-complete")!({ sessionId: "s", completionOwnerId: "o", agent: "lane-worker", runId: "r1", success: false, exitCode: 1, summary: "lane failed" });
+  bus.get("subagent:async-complete")!({ sessionId: "s", completionOwnerId: "o", agent: "worker", runId: "r1", success: false, exitCode: 1, summary: "lane failed" });
   assert.equal(notices.length, 1, "the completion notice was sent");
   return { settle: () => handlers.get("agent_before_settle"), notice: notices[0].content };
 }

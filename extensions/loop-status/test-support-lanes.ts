@@ -16,7 +16,7 @@ export default function (pi: ExtensionAPI): void {
     const [, verb, arg] = m;
     const sessionId = ctx.sessionManager.getSessionFile() ?? ctx.sessionManager.getSessionId();
     if (verb === "lane-start") {
-      pi.events.emit("subagent:async-started", { id: arg, sessionId, agent: "lane-worker", deadlineAt: Date.now() + 3_600_000 });
+      pi.events.emit("subagent:async-started", { id: arg, sessionId, agent: "worker", deadlineAt: Date.now() + 3_600_000 });
     } else if (verb === "lane-done") {
       pi.events.emit("subagent:async-complete", { runId: arg, triggerTurn: false, results: [] });
     } else if (verb === "timer") {

@@ -370,8 +370,8 @@ test("a child launched by the root writes its own progress checkpoint in the sha
   const timingProvider = join(HERE, "test-support", "provider.ts");
   const spawnResult = join(home, "spawn.json");
   mkdirSync(join(home, "agents"));
-  writeFileSync(join(home, "agents", "lane-worker.md"), [
-    "---", "name: lane-worker", "description: Progress child fixture", "extensions: []",
+  writeFileSync(join(home, "agents", "worker.md"), [
+    "---", "name: worker", "description: Progress child fixture", "extensions: []",
     `subagentOnlyExtensions: ${timingProvider}`, "tools: read", "model: timing-fixture/fixture", "---", "Exercise progress.",
   ].join("\n"));
   const session = startPiRpc({

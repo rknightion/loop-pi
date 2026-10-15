@@ -1,15 +1,14 @@
 // Real pinned pi/faux lifecycle: native package patches are captured by the installed extension,
 // reconciled on startup, then survive package retention of eligible scratch originals. No live model.
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { CLI_PATH, FAUX_EXTENSION, PI_SUBAGENTS_PACKAGE_DIR, cleanupAll, freshDir, startPiRpc, waitForCondition, writeFauxScript } from "../loop-guard/rpc-test-helpers.ts";
+import { FAUX_EXTENSION, PI_SUBAGENTS_PACKAGE_DIR, cleanupAll, freshDir, startPiRpc, waitForCondition, writeFauxScript } from "../loop-guard/rpc-test-helpers.ts";
 import { patchCleanupAllowed, patchManifestPath, type PatchManifest } from "./retention.ts";
 import laneWorktrees, { PATCH_DECISION_EVENT, PATCH_STATE_CUSTOM_TYPE } from "./index.ts";
-import { hermeticPiEnv } from "../test-support/hermetic-env.ts";
 
 // Internal installed API, deliberately loaded by file URL: no exported prune-hook API is claimed.
 const retentionUrl = new URL("../../node_modules/pi-subagents/src/runs/background/async-retention.js", import.meta.url);
@@ -123,119 +122,6 @@ test("installed lifecycle and restart capture survive pinned package pruning of 
     }
   } finally {
     await session.close();
-  }
-});
-
-test("actual dispatcher RPC capture keeps patches pending through task acceptance and scratch pruning", { timeout: 150_000 }, async () => {
-  const root = realpathSync(freshDir("patch-dispatcher-"));
-  const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-c", "user.email=test@example.com", "-c", "user.name=test", ...args], { cwd, encoding: "utf8", timeout: 10_000 }).trim();
-  const origin = join(root, "origin.git");
-  const repo = join(root, "repo");
-  git(root, "init", "-q", "--bare", origin);
-  git(root, "clone", "-q", origin, repo);
-  git(repo, "config", "commit.gpgsign", "false");
-  mkdirSync(join(repo, "codex"));
-  writeFileSync(join(repo, ".gitignore"), "codex/\n");
-  writeFileSync(join(repo, "seed"), "base\n");
-  writeFileSync(join(repo, "second"), "second\n");
-  writeFileSync(join(repo, "third"), "third\n");
-  writeFileSync(join(repo, "LOOP.md"), "# Loop: fixture\ntier: routine\ngate: true\nci-required: none\nrelease-on-push: no\ndeploy-on-push: no\n");
-  git(repo, "add", "--", "seed", "second", "third", ".gitignore", "LOOP.md");
-  git(repo, "commit", "-qm", "base");
-  git(repo, "push", "-q", "origin", "HEAD:main");
-  git(repo, "remote", "set-head", "origin", "main");
-  const head = git(repo, "rev-parse", "HEAD");
-  const goal = join(repo, "codex", "goal-fixture-loop1.md");
-  const report = join(repo, "codex", "report-fixture-loop1.md");
-  const log = join(repo, "codex", "state-fixture-loop1.jsonl");
-  writeFileSync(goal, ["# Goal", "## Run", "tier: routine", "root: dispatcher - patch fixture", "root-model: none", "concurrency: 1",
-    "## Envelope", "| task | acceptance check | owned files | gate | landing | agent | tier |",
-    "|---|---|---|---|---|---|---|", "| T1 | patch exists | seed | true | lands-after-green | lane-worker-push | routine |",
-    "| T2 | second fixture | second | true | lands-after-green | lane-worker-push | routine |",
-    "| T3 | third fixture | third | true | lands-after-green | lane-worker-push | routine |",
-    "## Authority", "push agents: lane-worker-push", "ops: none", "secret paths: none", "credential creation: none", "## Decisions", "## Notes"].join("\n"));
-  const runDir = join(root, "durable");
-  const agentDir = join(root, "home");
-  const stubs = join(root, "stubs");
-  const subRoot = join(root, "sub");
-  for (const dir of [runDir, agentDir, stubs, subRoot, join(agentDir, "agents"), join(agentDir, "bin")]) mkdirSync(dir);
-  const executable = (path: string, text: string) => { writeFileSync(path, text); chmodSync(path, 0o755); };
-  executable(join(agentDir, "bin", "loop-state"), "#!/usr/bin/env python3\nimport json,sys\nevent=json.load(sys.stdin)\nwith open(sys.argv[2], 'a') as f: f.write(json.dumps({'by':'dispatcher', **event})+'\\n')\n");
-  // Neutral scratch CLI stubs, not live tracker writes.
-  executable(join(stubs, "backlog"), '#!/bin/sh\nif [ "$1" = task ] && [ "$3" = --plain ]; then echo "Task $2 - Patch fixture"; fi\n');
-  executable(join(stubs, "gh"), "#!/bin/sh\necho '[]'\n");
-  writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [PI_SUBAGENTS_PACKAGE_DIR],
-    subagents: { agentExcludeDirs: ["~/.agents"] } }));
-  // Pinned package loadConfig uses this file, not settings.json.subagents.worktree.
-  mkdirSync(join(agentDir, "extensions", "subagent"), { recursive: true });
-  writeFileSync(join(agentDir, "extensions", "subagent", "config.json"), JSON.stringify({ worktree: true }));
-  for (const agent of ["lane-worker-push", "gate-runner"]) writeFileSync(join(agentDir, "agents", `${agent}.md`), [
-    "---", `name: ${agent}`, "description: Dispatcher patch fixture", "tools: bash", "extensions: []",
-    `subagentOnlyExtensions: ${FAUX_EXTENSION}`, "model: faux/faux-1", "---", "", "worker"].join("\n"));
-  const block = '```lane-return\n' + JSON.stringify({ v: 2, lane: "L1", status: "complete", sha: head, landed: true,
-    base: head, check: "true", exit: 0, tail: "fixture", ci: null, coderabbit: null, questions: [] }) + '\n```';
-  const script = writeFauxScript([
-    { match: "Run the composed gate once", text: block },
-    { match: "Task: T1 ", once: true, toolCalls: [{ name: "bash", args: { command: "printf 'dispatcher candidate\\n' > seed && echo DISPATCHER_PATCH_WRITTEN" } }] },
-    { match: "DISPATCHER_PATCH_WRITTEN", text: block },
-    { match: "Task: T[23] ", text: block },
-  ]);
-  const env = hermeticPiEnv({ PATH: `${stubs}:${process.env.PATH}`, PI_CODING_AGENT_DIR: agentDir,
-    PI_SUBAGENTS_TEMP_ROOT: subRoot, PI_OFFLINE: "1", PI_SKIP_VERSION_CHECK: "1", PI_TELEMETRY: "0",
-    LOOP_PI_FAUX_SCRIPT: script, LOOP_PI_RUN_DIR: runDir });
-  const audit = join(HERE, "..", "..", "bin", "loop-pi-audit");
-  const before = spawnSync(audit, ["begin", repo], { cwd: repo, env, encoding: "utf8", timeout: 30_000 });
-  assert.equal(before.status, 0, before.stderr);
-  const runtime = spawnSync(process.execPath, [CLI_PATH, "-p", "--provider", "loop-dispatch", "--model", "idle", "--no-tools",
-    "--extension", FAUX_EXTENSION, "--extension", join(HERE, "..", "dispatcher", "index.ts"),
-    `You are the root. Read ${goal} in full. Write ${report} as the terminal action.`], { cwd: repo, env, encoding: "utf8", timeout: 90_000 });
-  assert.equal(runtime.status, 0, `${runtime.signal}\n${runtime.stderr}`);
-  assert.match(runtime.stderr, /T1=accepted/);
-  const events = readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line));
-  const work = events.find((e) => e.ev === "dispatch" && e.agent === "lane-worker-push");
-  assert.ok(work?.run, "actual dispatcher RPC returned a work run");
-  const path = patchManifestPath(runDir, work.run);
-  assert.ok(existsSync(path), "dispatcher entry registers actual retention lifecycle");
-  const manifest = JSON.parse(readFileSync(path, "utf8")) as PatchManifest;
-  assert.equal(manifest.disposition, "pending", "task acceptance and landed lane-return do not grant exact-run cleanup");
-  assert.equal(patchCleanupAllowed(runDir, work.run), false);
-  const asyncDir = join(subRoot, "async-subagent-runs", work.run);
-  const patch = manifest.patches.find((p) => readFileSync(join(asyncDir, p.source), "utf8").includes("+dispatcher candidate"));
-  assert.ok(patch, `actual native dispatcher patch captured on completion/shutdown: ${JSON.stringify({ manifest, status: JSON.parse(readFileSync(join(asyncDir, "status.json"), "utf8")), stderr: runtime.stderr })}`);
-  const originalBytes = readFileSync(join(asyncDir, patch.source));
-  const durable = join(dirname(path), `${patch.sha256}.patch`);
-  assert.deepEqual(readFileSync(durable), originalBytes);
-  const statusPath = join(asyncDir, "status.json");
-  const status = JSON.parse(readFileSync(statusPath, "utf8"));
-  delete status.sessionFile;
-  delete status.parallelHandoff;
-  for (const step of status.steps ?? []) delete step.sessionFile;
-  writeFileSync(statusPath, JSON.stringify(status));
-  const descriptorPath = join(asyncDir, "recovery-descriptor.json");
-  if (existsSync(descriptorPath)) {
-    const descriptor = JSON.parse(readFileSync(descriptorPath, "utf8"));
-    delete descriptor.sessionFile;
-    writeFileSync(descriptorPath, JSON.stringify(descriptor));
-  }
-  const handoffPath = join(asyncDir, "handoff.json");
-  if (existsSync(handoffPath)) {
-    const handoff = JSON.parse(readFileSync(handoffPath, "utf8"));
-    for (const group of handoff.groups) group.cleanup = { state: "complete" };
-    writeFileSync(handoffPath, JSON.stringify(handoff));
-  }
-  const result = await cleanupAsyncRetention({ asyncDirRoot: dirname(asyncDir), resultsDir: join(subRoot, "async-subagent-results"),
-    now: () => Date.now() + 40 * 24 * 60 * 60 * 1000, signal: AbortSignal.timeout(15_000) });
-  assert.equal(result.workerFailed, false, JSON.stringify(result));
-  assert.deepEqual(result.errors, [], JSON.stringify(result));
-  assert.ok(result.deletedRuns >= 1, JSON.stringify(result));
-  assert.equal(existsSync(join(asyncDir, patch.source)), false);
-  assert.deepEqual(readFileSync(durable), originalBytes);
-  assert.equal(patchCleanupAllowed(runDir, work.run), false);
-  const evidence = process.env.LOOP_PI_RETENTION_TEST_EVIDENCE;
-  if (evidence) {
-    mkdirSync(evidence, { recursive: true });
-    writeFileSync(join(evidence, "dispatcher.json"), JSON.stringify({ runId: work.run, patchHash: patch.sha256,
-      disposition: manifest.disposition, originalRemoved: !existsSync(asyncDir), durablePresent: existsSync(durable), prune: result }, null, 2));
   }
 });
 

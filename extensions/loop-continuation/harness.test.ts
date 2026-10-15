@@ -2,12 +2,11 @@
 // index.ts against a fake ExtensionAPI.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import { chmodSync, closeSync, constants, existsSync, openSync, readdirSync, readFileSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { runOnIncident } from "./incident.ts";
-import { cleanupFixtures, fakePi, fresh, loopFixture, setCharterKeys } from "./test-fixture.ts";
+import { cleanupFixtures, fakePi, fresh, loopFixture } from "./test-fixture.ts";
 
 after(cleanupFixtures);
 
@@ -184,17 +183,12 @@ function fakeAudit(agentDir: string, exit: number): string {
   return argvFile;
 }
 
-test("/loop-closeout runs loop-pi-audit closeout with the frozen grants and push log and surfaces the result to the root", async () => {
+test("/loop-closeout runs loop-pi-audit closeout with the push log and surfaces the result to the root", async () => {
   const f = loopFixture();
   const argvFile = fakeAudit(f.agentDir, 1);
-  const grants = JSON.stringify({ [f.repo]: ["refs/heads/main"] });
-  const grantsPath = join(f.repo, "codex", "grants-x-loop3.json");
-  writeFileSync(grantsPath, grants);
-  const digest = createHash("sha256").update(grants).digest("hex");
-  setCharterKeys(f, `audit grants: ${grantsPath} sha256=${digest}`);
   const pi = await fakePi({ agentDir: f.agentDir, cwd: f.repo, runDir: f.runDir });
   try {
-    await pi.input(`${f.launch}\nAudit grants: ${grantsPath} sha256=${digest}`);
+    await pi.input(f.launch);
     let resolveSweep!: () => void;
     const lines: string[] = [];
     const pending = [new Promise<void>((r) => (resolveSweep = r)).then(() => void lines.push("lane-worktrees: removed 1 worktree(s)"))];
@@ -214,10 +208,6 @@ test("/loop-closeout runs loop-pi-audit closeout with the frozen grants and push
       "closeout",
       "--run-dir",
       f.runDir,
-      "--grants",
-      join(f.runDir, "audit-grants.json"),
-      "--grants-sha256",
-      digest,
       "--push-log",
       join(f.runDir, "push-log.jsonl"),
     ]);
@@ -226,14 +216,13 @@ test("/loop-closeout runs loop-pi-audit closeout with the frozen grants and push
   }
 });
 
-test("without audit grants closeout passes no --grants; without the protocol marker it does not run", async () => {
+test("a clean closeout audit is reported clean; without the run marker it does not run", async () => {
   const { f, pi } = await armed();
-  const argvFile = fakeAudit(f.agentDir, 0);
+  fakeAudit(f.agentDir, 0);
   try {
     pi.emit("loop-closeout", { lines: [], pending: [] });
     const deadline = Date.now() + 10_000;
     while (pi.sent.length === 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
-    assert.deepEqual(readFileSync(argvFile, "utf8").trim().split("\n"), ["closeout", "--run-dir", f.runDir, "--push-log", join(f.runDir, "push-log.jsonl")]);
     assert.match(pi.sent[0].message.content, /exited 0 \(clean\)/);
   } finally {
     pi.restore();

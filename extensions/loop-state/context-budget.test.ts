@@ -98,7 +98,7 @@ test("actual native status refuses a finalizing running job whose displayed step
     emit: (name: string, value: any) => handlers.get(name)?.(value) };
   const state = { currentSessionId: sessionId, statusProjectionSessionId: sessionId, foregroundControls: new Map(),
     asyncJobs: new Map([["run", { asyncId: "run", sessionId, status: "running", mode: "single", startedAt: 1, updatedAt: 2,
-      steps: [{ agent: "lane-worker", status: "complete", startedAt: 1, endedAt: 2 }] }]]), fleetJobs: new Map(), activeAsyncCapacity: { used: 1, limit: 64 } };
+      steps: [{ agent: "worker", status: "complete", startedAt: 1, endedAt: 2 }] }]]), fleetJobs: new Map(), activeAsyncCapacity: { used: 1, limit: 64 } };
   registerSubagentRpcBridge({ events, state, getContext: () => ({ sessionManager: { getSessionFile: () => sessionId, getSessionId: () => "session" } }),
     execute: () => { throw new Error("unexpected executor status path"); } });
   let reply: any;
@@ -142,7 +142,7 @@ test("actual native status refuses a finalizing running job whose displayed step
     runs: [{ id: "job", kind: "subagent", state: "complete", children: [{ id: "step", kind: "step", state: "running" }] }] } }), true);
   // Actual queued/running materialized work remains a root under a terminal workflow.
   state.asyncJobs.set("run", { ...completed, mode: "workflow", status: "complete", steps: [] });
-  state.asyncJobs.set("nested", { ...completed, asyncId: "nested", status: "running", parentWorkflowRunId: "run", steps: [{ agent: "lane-worker", status: "complete" }] } as any);
+  state.asyncJobs.set("nested", { ...completed, asyncId: "nested", status: "running", parentWorkflowRunId: "run", steps: [{ agent: "worker", status: "complete" }] } as any);
   await events.emit("subagents:rpc:v1:request", { version: 1, requestId: "proof", method: "status", params: {} });
   assert.ok(reply.data.asyncSnapshot.runs.some((run: any) => run.id === "nested" && run.state === "running"));
   assert.equal(reply.data.fleet.totalActive, 0, "terminal display steps do not stand in for nested native job state");

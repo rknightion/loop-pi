@@ -1,6 +1,6 @@
 // Arming through index.ts's `input` hook: arm-time checks against the v3 charter refuse with
-// `handled` and an incident; a good arm writes the protocol marker, freezes audit grants and
-// standing, and appends `open` itself (the root never writes it).
+// `handled` and an incident; a good arm writes the run marker, freezes standing, and appends
+// `open` itself (the root never writes it).
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -30,9 +30,10 @@ test("a good arm writes the marker, appends one open by ext from the charter's k
     const opens = events(f.log).filter((e) => e.ev === "open");
     assert.equal(opens.length, 1);
     assert.deepEqual(
-      { by: opens[0].by, goal_sha256: opens[0].goal_sha256, tier: opens[0].tier, root: opens[0].root, root_model: opens[0].root_model, envelope: opens[0].envelope },
-      { by: "ext", goal_sha256: sha(readFileSync(f.charter)), tier: "routine", root: "llm", root_model: "sol / medium", envelope: ["T-1", "T-2"] },
+      { by: opens[0].by, charter_sha256: opens[0].charter_sha256, root: opens[0].root, root_model: opens[0].root_model, first_wave: opens[0].first_wave },
+      { by: "ext", charter_sha256: sha(readFileSync(f.charter)), root: "llm", root_model: "sol / medium", first_wave: ["T-1", "T-2"] },
     );
+    assert.equal("tier" in opens[0], false, "the charter states no run tier, so the open carries none");
     assert.equal(pi.query().reportPath, f.report);
     assert.equal(rootIncidents(f.agentDir).length, 0);
 
@@ -108,19 +109,10 @@ test("each failed arm check is refused with handled, an arm-refused incident and
       reason: /cannot be read/,
     },
     {
-      name: "an Ops grants line (v3 has no ops lane)",
-      setup: () => {
-        const fixture = loopFixture();
-        fixture.launch += `\nOps grants: ${join(fixture.repo, "codex", "ops-x-loop3.json")} sha256=${"a".repeat(64)}`;
-        return { fixture, runDir: fixture.runDir };
-      },
-      reason: /carries an Ops grants line; v3 has no ops lane/,
-    },
-    {
       name: "charter changed since open",
       setup: () => {
         const fixture = loopFixture();
-        writeFileSync(fixture.log, `${JSON.stringify({ v: 1, seq: 1, ts: "2026-10-04T00:00:00Z", by: "ext", ev: "open", goal_sha256: "0".repeat(64), tier: "guarded", root: "llm", root_model: "m", envelope: [] })}\n`);
+        writeFileSync(fixture.log, `${JSON.stringify({ v: 1, seq: 1, ts: "2026-10-04T00:00:00Z", by: "ext", ev: "open", charter_sha256: "0".repeat(64), tier: "guarded", root: "llm", root_model: "m", first_wave: [] })}\n`);
         return { fixture, runDir: fixture.runDir };
       },
       reason: /charter changed since the loop opened/,
@@ -144,7 +136,7 @@ test("each failed arm check is refused with handled, an arm-refused incident and
       assert.ok(pi.notes.some((n) => n.type === "error" && c.reason.test(n.message)), `${c.name}: the reason is shown`);
       assert.equal(pi.query().reportPath, null, `${c.name}: not armed`);
       if (runDir && existsSync(runDir)) assert.equal(existsSync(join(runDir, "loop-pi-proto")), false, `${c.name}: no marker`);
-      assert.equal(events(f.log).filter((e) => e.ev === "open" && e.goal_sha256 !== "0".repeat(64)).length, 0, `${c.name}: no open`);
+      assert.equal(events(f.log).filter((e) => e.ev === "open" && e.charter_sha256 !== "0".repeat(64)).length, 0, `${c.name}: no open`);
     } finally {
       pi.restore();
     }
@@ -217,49 +209,7 @@ test("a first input naming a charter file that does not arm gets the relaunch wa
   }
 });
 
-test("Audit grants are frozen into the run dir with their digest and exposed on query-launch; a bad line gives none and an ops incident", async () => {
-  const f = loopFixture();
-  const grantsPath = join(f.repo, "codex", "grants-x-loop3.json");
-  const grants = JSON.stringify({ [f.repo]: { refs: [], automation: [] }, bot_actors: ["release-app[bot]"] });
-  writeFileSync(grantsPath, grants);
-  setCharterKeys(f, `audit grants: ${grantsPath} sha256=${sha(grants)}`);
-  const pi = await fakePi({ agentDir: f.agentDir, cwd: f.repo, runDir: f.runDir });
-  try {
-    await pi.input(`${f.launch}\nAudit grants: ${grantsPath} sha256=${sha(grants)}`);
-    const copy = join(f.runDir, "audit-grants.json");
-    assert.equal(readFileSync(copy, "utf8"), grants);
-    writeFileSync(grantsPath, "{}");
-    assert.equal(readFileSync(copy, "utf8"), grants, "a later edit of the source does not reach the frozen copy");
-    const answer = pi.query();
-    assert.equal(answer.auditGrantsPath, copy);
-    assert.equal(answer.auditGrantsSha256, sha(grants));
-    assert.equal(answer.ops, null);
-  } finally {
-    pi.restore();
-  }
-
-  const g = loopFixture();
-  // The charter and the launch agree on the digest; the file does not match it, so the freeze refuses it.
-  setCharterKeys(g, `audit grants: ${join(g.repo, "codex", "grants.json")} sha256=${"0".repeat(64)}`);
-  const pi2 = await fakePi({ agentDir: g.agentDir, cwd: g.repo, runDir: g.runDir });
-  try {
-    writeFileSync(join(g.repo, "codex", "grants.json"), "{}");
-    assert.deepEqual(await pi2.input(`${g.launch}\nAudit grants: ${join(g.repo, "codex", "grants.json")} sha256=${"0".repeat(64)}`), { action: "continue" });
-    const answer = pi2.query();
-    assert.equal(answer.auditGrantsPath, null);
-    assert.equal(answer.auditGrantsSha256, null);
-    assert.equal(existsSync(join(g.runDir, "audit-grants.json")), false);
-    const files = readdirSync(join(g.agentDir, "incidents", "ops"));
-    assert.equal(files.length, 1);
-    const incident = JSON.parse(readFileSync(join(g.agentDir, "incidents", "ops", files[0]), "utf8"));
-    assert.equal(incident.class, "loop-audit-grants-rejected");
-    assert.match(incident.reason, /sha256 does not match/);
-  } finally {
-    pi2.restore();
-  }
-});
-
-test("Standing is frozen into the run dir with its digest and exposed on query-launch; a bad hash or a missing file gives none and an ops incident", async () => {
+test("Standing is frozen into the run dir with its digest and exposed on query-launch; a bad hash or a missing file gives none and an incident", async () => {
   const f = loopFixture();
   const standingPath = join(f.repo, "authority", "owner__repo.md");
   const body = "# Standing authority\n\n## Grants\n- read anything\n\n## Fences\n- no deletes\n";
@@ -276,7 +226,7 @@ test("Standing is frozen into the run dir with its digest and exposed on query-l
     const answer = pi.query();
     assert.equal(answer.standingPath, copy);
     assert.equal(answer.standingSha256, sha(body));
-    assert.equal(existsSync(join(f.agentDir, "incidents", "ops")), false);
+    assert.equal(existsSync(join(f.agentDir, "incidents", "standing")), false);
   } finally {
     pi.restore();
   }
@@ -299,9 +249,9 @@ test("Standing is frozen into the run dir with its digest and exposed on query-l
       assert.equal(answer.standingPath, null, c.name);
       assert.equal(answer.standingSha256, null, c.name);
       assert.equal(existsSync(join(g.runDir, "standing.md")), false, c.name);
-      const files = readdirSync(join(g.agentDir, "incidents", "ops"));
+      const files = readdirSync(join(g.agentDir, "incidents", "standing"));
       assert.equal(files.length, 1, c.name);
-      const incident = JSON.parse(readFileSync(join(g.agentDir, "incidents", "ops", files[0]), "utf8"));
+      const incident = JSON.parse(readFileSync(join(g.agentDir, "incidents", "standing", files[0]), "utf8"));
       assert.equal(incident.class, "loop-standing-rejected", c.name);
       assert.match(incident.reason, c.reason, c.name);
       assert.equal(incident.standing_path, path, c.name);
@@ -333,10 +283,7 @@ test("a launch file of the v3 shape (cmd line, charter named in the text, Standi
     assert.deepEqual(await pi.input(launchFile), { action: "continue" });
     const answer = pi.query();
     assert.equal(answer.reportPath, f.report);
-    assert.equal(answer.opsPath, null);
-    assert.equal(answer.ops, null);
     assert.equal(answer.standingSha256, sha(body));
-    assert.equal(answer.auditGrantsPath, null);
     assert.equal(events(f.log).filter((e) => e.ev === "open").length, 1, JSON.stringify(pi.notes));
   } finally {
     pi.restore();
@@ -357,35 +304,32 @@ test("a charter with no root key still gets its open, appended by continuation w
     assert.equal(opens.length, 1, JSON.stringify(pi.notes));
     assert.equal(opens[0].by, "ext");
     assert.equal(opens[0].root_model, "unknown");
-    assert.equal(opens[0].goal_sha256, sha(readFileSync(f.charter)));
+    assert.equal(opens[0].charter_sha256, sha(readFileSync(f.charter)));
   } finally {
     pi.restore();
   }
 });
 
-test("the launch's Audit grants and Standing lines must be the charter's audit grants and standing keys, or the arm is refused", async () => {
-  const auditBody = JSON.stringify({ "/r": { refs: [] } });
+test("the launch's Standing line must be the charter's standing key, or the arm is refused", async () => {
+  const otherBody = "# another file\n";
   const standingBody = "# Standing authority\n## Grants\n## Fences\n";
   type Case = { name: string; keys: (p: Record<string, string>) => string[]; launch: (p: Record<string, string>) => string[]; refused: RegExp | null };
   const cases: Case[] = [
-    { name: "both match", keys: (p) => [`audit grants: \`${p.audit}\` sha256=${sha(auditBody)}`, `standing: ${p.standing} sha256=${sha(standingBody)}`], launch: (p) => [`Audit grants: ${p.audit} sha256=${sha(auditBody)}`, `Standing: ${p.standing} sha256=${sha(standingBody)}`], refused: null },
+    { name: "match", keys: (p) => [`standing: \`${p.standing}\` sha256=${sha(standingBody)}`], launch: (p) => [`Standing: ${p.standing} sha256=${sha(standingBody)}`], refused: null },
     { name: "a repo-relative charter path", keys: () => [`standing: codex/owner__repo.md sha256=${sha(standingBody)}`], launch: (p) => [`Standing: ${p.standing} sha256=${sha(standingBody)}`], refused: null },
-    { name: "charter audit none, launch carries Audit grants", keys: () => ["audit grants: none"], launch: (p) => [`Audit grants: ${p.audit} sha256=${sha(auditBody)}`], refused: /Audit grants line but the charter's audit grants is none/ },
-    { name: "no charter audit key, launch carries Audit grants", keys: () => [], launch: (p) => [`Audit grants: ${p.audit} sha256=${sha(auditBody)}`], refused: /Audit grants line but the charter's audit grants is absent/ },
-    { name: "a different audit grants digest", keys: (p) => [`audit grants: ${p.audit} sha256=${sha(auditBody)}`], launch: (p) => [`Audit grants: ${p.audit} sha256=${"0".repeat(64)}`], refused: /Audit grants sha256 0+ is not the charter's audit grants sha256/ },
     { name: "charter standing none, no launch line", keys: () => ["standing: none"], launch: () => [], refused: null },
     { name: "charter standing none, launch carries Standing", keys: () => ["standing: none"], launch: (p) => [`Standing: ${p.standing} sha256=${sha(standingBody)}`], refused: /launch carries a Standing line but the charter's standing is none/ },
     { name: "a charter standing file the launch omits", keys: (p) => [`standing: ${p.standing} sha256=${sha(standingBody)}`], launch: () => [], refused: /names .*owner__repo\.md but the launch has no Standing line/ },
     { name: "a different standing digest", keys: (p) => [`standing: ${p.standing} sha256=${sha(standingBody)}`], launch: (p) => [`Standing: ${p.standing} sha256=${"0".repeat(64)}`], refused: /Standing sha256 0+ is not the charter's standing sha256/ },
-    { name: "a different standing file", keys: (p) => [`standing: ${p.standing} sha256=${sha(standingBody)}`], launch: (p) => [`Standing: ${p.audit} sha256=${sha(standingBody)}`], refused: /Standing file .*grants-x-loop3\.json is not the charter's standing file/ },
+    { name: "a different standing file", keys: (p) => [`standing: ${p.standing} sha256=${sha(standingBody)}`], launch: (p) => [`Standing: ${p.other} sha256=${sha(standingBody)}`], refused: /Standing file .*other\.md is not the charter's standing file/ },
     { name: "a malformed charter standing key", keys: () => ["standing: somewhere"], launch: () => [], refused: /charter's standing key is neither none nor/ },
     { name: "two Standing lines", keys: (p) => [`standing: ${p.standing} sha256=${sha(standingBody)}`], launch: (p) => [`Standing: ${p.standing} sha256=${sha(standingBody)}`, `Standing: ${p.standing} sha256=${sha(standingBody)}`], refused: /Standing line is malformed \(the launch carries more than one Standing line\)/ },
     { name: "a relative Standing path", keys: (p) => [`standing: ${p.standing} sha256=${sha(standingBody)}`], launch: () => [`Standing: authority/owner__repo.md sha256=${sha(standingBody)}`], refused: /Standing line is malformed \(the Standing path is not absolute\)/ },
   ];
   for (const c of cases) {
     const f = loopFixture();
-    const p = { audit: join(f.repo, "codex", "grants-x-loop3.json"), standing: join(f.repo, "codex", "owner__repo.md") };
-    writeFileSync(p.audit, auditBody);
+    const p = { other: join(f.repo, "codex", "other.md"), standing: join(f.repo, "codex", "owner__repo.md") };
+    writeFileSync(p.other, otherBody);
     writeFileSync(p.standing, standingBody);
     if (c.keys(p).length) setCharterKeys(f, ...c.keys(p));
     const pi = await fakePi({ agentDir: f.agentDir, cwd: f.repo, runDir: f.runDir });
@@ -405,7 +349,6 @@ test("the launch's Audit grants and Standing lines must be the charter's audit g
       assert.ok(pi.notes.some((n) => n.type === "error" && c.refused!.test(n.message)), `${c.name}: the reason is shown`);
       assert.equal(pi.query().reportPath, null, `${c.name}: not armed`);
       assert.equal(existsSync(join(f.runDir, "loop-pi-proto")), false, `${c.name}: no marker`);
-      assert.equal(existsSync(join(f.runDir, "audit-grants.json")), false, `${c.name}: no audit grants copy`);
       assert.equal(existsSync(join(f.runDir, "standing.md")), false, `${c.name}: no standing copy`);
     } finally {
       pi.restore();

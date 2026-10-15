@@ -311,12 +311,11 @@ const LANE_ONLY_DENY: { name: string; command: string }[] = [
   { name: "gcloud service account key", command: "gcloud iam service-accounts keys create k.json --iam-account a@b" },
   { name: "gh ssh-key add", command: "gh ssh-key add key.pub" },
   { name: "az ad sp credential reset", command: "az ad sp credential reset --id x" },
-  { name: "write into codex/ops-*", command: "echo '{}' > codex/ops-c-loop1.json" },
   { name: "append into codex/state-*", command: "echo x 2>/dev/null >> repo/codex/state-c-loop1.jsonl" },
-  { name: "tee into codex/goal-*", command: "tee codex/goal-c-loop1.md < /dev/null" },
-  { name: "write into codex/charter-* (v3 run file)", command: "echo x > codex/charter-2026-10-04-loop1.md" },
-  { name: "write into codex/launch-* (v3 run file)", command: "cp /tmp/l.txt codex/launch-2026-10-04-loop1.txt" },
-  { name: "write into codex/closeout-* (v3 run file)", command: "printf done >> repo/codex/closeout-2026-10-04-loop1.md" },
+  { name: "write into codex/charter-* (run file)", command: "echo x > codex/charter-2026-10-04-loop1.md" },
+  { name: "tee into codex/charter-* (run file)", command: "tee codex/charter-c-loop1.md < /dev/null" },
+  { name: "write into codex/launch-* (run file)", command: "cp /tmp/l.txt codex/launch-2026-10-04-loop1.txt" },
+  { name: "write into codex/closeout-* (run file)", command: "printf done >> repo/codex/closeout-2026-10-04-loop1.md" },
 ];
 
 for (const c of LANE_ONLY_DENY) {
@@ -424,8 +423,8 @@ test("read-only gh release, gh workflow and loop control reads are allowed for l
     "gh -R a/b release view v1",
     "gh workflow --repo a/b list",
     "gh api -X GET /repos/x/y",
-    "cat codex/ops-c-loop1.json",
-    "echo x > codex/report-c-loop1.md",
+    "cat codex/charter-c-loop1.md",
+    "echo x > codex/notes-c-loop1.md",
     "some-cmd > out.log 2>&1",
   ]) {
     assert.equal(evaluateBashCommand(command, "lane").block, false, command);
@@ -921,7 +920,7 @@ test("subagent deny: a workflow under any action, including validate", () => {
   }
 });
 
-test("subagent deny: workflowScript launch (Appendix C: one async call per lane, never a workflow)", () => {
+test("subagent deny: workflowScript launch (one async call per lane, never a workflow)", () => {
   const decision = evaluateSubagentCall({ workflowScript: 'return runs.run("main", { agent: "worker", task: "x" })' });
   assert.equal(decision.block, true);
   assert.match(decision.reason ?? "", /own async `subagent` call/);
@@ -1010,7 +1009,7 @@ for (const r of REAL_LANE_BLOCKS) {
 }
 
 // ---------------------------------------------------------------------------
-// Protocol 2 (SEAMS S0/S1/S8): refusals that apply only when the run dir carries `loop-pi-proto`
+// Marker-gated (SEAMS "Launch arming"): refusals that apply only when the run dir carries `loop-pi-proto`
 // (`proto: true` in the guard context). Without the marker every command below keeps today's
 // verdict. `protectedPath` is the run-dir / authority predicate the extension entries build; here
 // a pure stand-in that refuses anything under a fake run dir.
@@ -1027,10 +1026,10 @@ const LEGACY = { proto: false, protectedPath: fakeProtected, cwd: "/repo" };
 const ROOT_LOOP_STATE_DENY = [
   "loop-state append codex/state-a-loop1.jsonl land task=T-1 mode=after-green --by ext",
   "loop-state append codex/state-a-loop1.jsonl park task=T-1 --by daemon",
-  "loop-state append codex/state-a-loop1.jsonl open goal_sha256=x --by=dispatcher",
+  "loop-state append codex/state-a-loop1.jsonl open charter_sha256=x --by=daemon",
   "/home/user/.loop-pi-x/bin/loop-state append codex/state-a-loop1.jsonl close reason=budget --by=ext",
   "python3 $HOME/.loop-pi-x/bin/loop-state append codex/state-a-loop1.jsonl revert sha=abc --by daemon",
-  "cd /repo && loop-state append codex/state-a-loop1.jsonl gate scope=lane sha=a cmd=x exit=0 --by ext",
+  "cd /repo && loop-state append codex/state-a-loop1.jsonl judgement text=x --by ext",
   "loop-state append codex/state-a-loop1.jsonl <<'EOF'\n{\"ev\":\"land\",\"task\":\"T-1\",\"by\":\"ext\"}\nEOF",
   "echo '{\"ev\":\"close\",\"reason\":\"budget\",\"by\": \"daemon\"}' | loop-state append codex/state-a-loop1.jsonl",
   "loop-state append codex/state-a-loop1.jsonl <<< '{\"ev\":\"land\",\"by\":\"root\"}'",
@@ -1064,7 +1063,7 @@ const RUN_DIR_BASH_WRITES = [
   "echo x > $LOOP_PI_RUN_DIR/push-log.jsonl",
   "printf '%s\\n' '{}' >> ${LOOP_PI_RUN_DIR}/harness-facts.jsonl",
   "echo 2 | tee $LOOP_PI_RUN_DIR/loop-pi-proto",
-  "cp /tmp/grants.json /runs/loop-a/audit-grants.json",
+  "cp /tmp/s.md /runs/loop-a/standing.md",
   "mv /tmp/x.md /runs/loop-a/returns/run-1.md",
   "mv /runs/loop-a/push-log.jsonl /tmp/old.jsonl",
   "rm -f /runs/loop-a/push-log.jsonl",
@@ -1097,7 +1096,7 @@ test("proto: reading the run dir (cat, cp out of it, jq) is allowed for root and
   }
 });
 
-test("proto lane: gh pr merge is a release, refused without an ops grant", () => {
+test("proto lane: gh pr merge is a release, refused", () => {
   for (const command of ["gh pr merge 12 --squash", "gh -R o/r pr merge 12 --merge --delete-branch", "env GH_PROMPT_DISABLED=1 gh pr merge --auto 3"]) {
     const decision = evaluateBashCommand(command, "lane", 0, P2);
     assert.equal(decision.block, true, command);
@@ -1110,36 +1109,14 @@ test("legacy lane (no marker): gh pr merge keeps today's verdict", () => {
   assert.equal(evaluateBashCommand("gh pr merge 12 --squash", "lane", 0, LEGACY).block, false);
 });
 
-test("proto lane: gh pr merge passes only on an ops release surface whose allow fully matches", () => {
-  const release = { surface: "release:svc", kind: "release", allow: ["gh pr merge [0-9]+ --squash"] };
-  const deploy = { surface: "deploy:svc", kind: "deploy", allow: ["gh pr merge [0-9]+ --squash"] };
-  assert.equal(evaluateBashCommand("gh pr merge 12 --squash", "lane", 0, { ...P2, ops: release }).block, false);
-  assert.equal(evaluateBashCommand("gh pr merge 12 --merge", "lane", 0, { ...P2, ops: release }).block, true);
-  const onDeploy = evaluateBashCommand("gh pr merge 12 --squash", "lane", 0, { ...P2, ops: deploy });
-  assert.equal(onDeploy.block, true);
-  assert.match(onDeploy.reason ?? "", /release/);
-});
-
 test("proto lane: gh pr view/list/checks stay allowed", () => {
   for (const command of ["gh pr view 12 --json state", "gh pr list --state open", "gh pr checks 12"]) {
     assert.equal(evaluateBashCommand(command, "lane", 0, P2).block, false, command);
   }
 });
 
-test("proto lane: bash writes into codex/grants-* are refused, reads are not", () => {
-  for (const command of [
-    "echo '{}' > codex/grants-2026-10-04-loop3.json",
-    "jq . /tmp/g.json | tee codex/grants-2026-10-04-loop3.json",
-    "rm codex/grants-*.json",
-    "sed -i 's/a/b/' /repo/codex/grants-2026-10-04-loop3.json",
-  ]) {
-    const decision = evaluateBashCommand(command, "lane", 0, P2);
-    assert.equal(decision.block, true, command);
-    assert.match(decision.reason ?? "", /grants/);
-    assert.equal(evaluateBashCommand(command, "lane", 0, LEGACY).block, false, `legacy: ${command}`);
-  }
-  assert.equal(evaluateBashCommand("cat codex/grants-2026-10-04-loop3.json", "lane", 0, P2).block, false);
-  assert.equal(evaluateBashCommand("echo x > LOOP.md", "lane", 0, P2).block, false, "LOOP.md stays writable by lanes");
+test("proto lane: LOOP.md stays writable by lanes", () => {
+  assert.equal(evaluateBashCommand("echo x > LOOP.md", "lane", 0, P2).block, false);
 });
 
 test("proto: an unparseable command still gets the run-dir and loop-state refusals (fallback scan)", () => {
@@ -1151,7 +1128,7 @@ test("proto: an unparseable command still gets the run-dir and loop-state refusa
   assert.equal(evaluateBashCommand(loopState, "root", 0, P2).block, true);
 });
 
-// Protocol 2 root loop-state hardening: a `by=` k=v other than root, stdin from a file (which the
+// Marker-gated root loop-state hardening: a `by=` k=v other than root, stdin from a file (which the
 // guard cannot read), and `--run-dir` (which would point the call at another run's facts).
 const ROOT_LOOP_STATE_DENY_P2 = [
   "loop-state append codex/state-a-loop1.jsonl land task=T-1 mode=after-green by=ext",
@@ -1204,21 +1181,21 @@ test("proto root: an unparseable loop-state call with by=, a stdin file or --run
   }
 });
 
-// Protocol 2 root fence: the root never writes the planner's files (ops, grants, launch, goal, charter).
+// Root fence (marker-gated): the root never writes the planner's files (charter, launch).
 const ROOT_CONTROL_BASH_WRITES = [
-  "echo x > codex/goal-2026-10-04-loop3.md",
-  "printf '%s' '{}' >> /repo/codex/ops-2026-10-04-loop3.json",
-  "jq . /tmp/g.json | tee codex/grants-2026-10-04-loop3.json",
+  "echo x > codex/charter-2026-10-04-loop3.md",
+  "printf '%s' 'x' >> /repo/codex/launch-2026-10-04-loop3.txt",
+  "jq . /tmp/g.json | tee codex/charter-2026-10-04-loop3.md",
   "cp /tmp/launch.txt codex/launch-2026-10-04-loop3.txt",
-  "mv codex/goal-2026-10-04-loop3.md /tmp/goal.md",
-  "sed -i '' 's/tier: routine/tier: guarded/' codex/goal-2026-10-04-loop3.md",
+  "mv codex/charter-2026-10-04-loop3.md /tmp/charter.md",
+  "sed -i '' 's/lanes: 6/lanes: 9/' codex/charter-2026-10-04-loop3.md",
   "rm codex/launch-*",
-  "bash -c 'echo x > codex/ops-2026-10-04-loop3.json'",
+  "bash -c 'echo x > codex/launch-2026-10-04-loop3.txt'",
   "cp /tmp/charter.md codex/charter-2026-10-04-loop3.md",
 ];
 
 for (const command of ROOT_CONTROL_BASH_WRITES) {
-  test(`proto root: a bash write into codex/ops|grants|launch|goal-* is refused: ${command}`, () => {
+  test(`proto root: a bash write into codex/charter|launch-* is refused: ${command}`, () => {
     const decision = evaluateBashCommand(command, "root", 0, P2);
     assert.equal(decision.block, true, command);
     assert.match(decision.reason ?? "", /root may not write/);
@@ -1230,10 +1207,9 @@ for (const command of ROOT_CONTROL_BASH_WRITES) {
 
 test("proto root: reading planner files and writing state and report files stay allowed", () => {
   for (const command of [
-    "cat codex/goal-2026-10-04-loop3.md",
-    "cp codex/goal-2026-10-04-loop3.md /tmp/goal.md",
-    "sha256sum codex/grants-2026-10-04-loop3.json > /tmp/sum",
-    "echo x >> codex/report-2026-10-04-loop3.md",
+    "cat codex/charter-2026-10-04-loop3.md",
+    "cp codex/charter-2026-10-04-loop3.md /tmp/charter.md",
+    "sha256sum codex/launch-2026-10-04-loop3.txt > /tmp/sum",
     "echo x >> codex/closeout-2026-10-04-loop3.md",
     "loop-state append codex/state-2026-10-04-loop3.jsonl judgement text=x",
   ]) {

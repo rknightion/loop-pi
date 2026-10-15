@@ -1,4 +1,4 @@
-// Protocol 2 refusals (SEAMS S0, S1, S8) at the extension entries: root.ts and lane.ts driven
+// Marker-gated refusals (SEAMS "Launch arming", "Run-dir files") at the extension entries: root.ts and lane.ts driven
 // through a fake ExtensionAPI, with a scratch run dir. Every refusal here applies only when the run
 // dir carries `loop-pi-proto`; the legacy cases pin that a run without it keeps today's verdict.
 import assert from "node:assert/strict";
@@ -101,7 +101,7 @@ test("proto root: edit and write into the run dir are refused, through any spell
   for (const [tool, path] of [
     ["write", join(runDir, "push-log.jsonl")],
     ["edit", join(runDir, "loop-pi-proto")],
-    ["write", join(real, "audit-grants.json")],
+    ["write", join(real, "teardown.json")],
     ["write", join(runDir, "standing.md")],
     ["edit", join(real, "standing.md")],
     ["write", join(scratch, "run-link", "harness-facts.jsonl")],
@@ -137,32 +137,32 @@ test("proto root: edit and write into the authority registry are refused (~ and 
   }
 });
 
-test("proto root: edit and write into codex/ops-*, grants-*, launch-* and goal-* are refused, through any spelling", async () => {
+test("proto root: edit and write into codex/charter-* and launch-* are refused, through any spelling", async () => {
   const r = root();
   await mkdir(join(scratch, "links"), { recursive: true });
   await symlink(join(cwd, "codex"), join(scratch, "links", "codex-link"));
   for (const [tool, path] of [
-    ["write", "codex/ops-2026-10-04-loop3.json"],
-    ["edit", "codex/grants-2026-10-04-loop3.json"],
+    ["write", "codex/charter-2026-10-04-loop3.md"],
+    ["edit", "codex/launch-2026-10-04-loop3.md"],
     ["write", join(cwd, "codex", "launch-2026-10-04-loop3.txt")],
-    ["edit", `@${join(cwd, "codex", "goal-2026-10-04-loop3.md")}`],
-    ["write", join(cwd, "codex", "GOAL-2026-10-04-loop3.md")],
-    ["write", join(scratch, "links", "codex-link", "goal-2026-10-04-loop3.md")],
+    ["edit", `@${join(cwd, "codex", "charter-2026-10-04-loop3.md")}`],
+    ["write", join(cwd, "codex", "CHARTER-2026-10-04-loop3.md")],
+    ["write", join(scratch, "links", "codex-link", "charter-2026-10-04-loop3.md")],
   ]) {
     const result = await r.call(tool, { path, content: "x", edits: [] });
     assert.equal(blocked(result), true, `${tool} ${path}`);
     assert.match(result.reason, /root may not write/, path);
   }
-  const bash = await r.call("bash", { command: "echo x > codex/goal-2026-10-04-loop3.md" });
+  const bash = await r.call("bash", { command: "echo x > codex/charter-2026-10-04-loop3.md" });
   assert.equal(blocked(bash), true);
   assert.match(bash.reason, /root may not write/);
-  for (const path of ["codex/state-2026-10-04-loop3.jsonl", "codex/report-2026-10-04-loop3.md", "codex/notes-goal.md"]) {
+  for (const path of ["codex/state-2026-10-04-loop3.jsonl", "codex/closeout-2026-10-04-loop3.md", "codex/notes-charter.md"]) {
     const result = await r.call("write", { path, content: "x" });
     assert.equal(blocked(result), false, `${path}: ${result?.reason}`);
   }
   process.env.LOOP_PI_RUN_DIR = legacyRunDir;
   const legacy = root();
-  for (const path of ["codex/goal-2026-10-04-loop3.md", "codex/ops-2026-10-04-loop3.json"]) {
+  for (const path of ["codex/charter-2026-10-04-loop3.md", "codex/launch-2026-10-04-loop3.txt"]) {
     const result = await legacy.call("write", { path, content: "x" });
     assert.equal(blocked(result), false, `legacy ${path}: ${result?.reason}`);
   }
@@ -170,7 +170,7 @@ test("proto root: edit and write into codex/ops-*, grants-*, launch-* and goal-*
 
 test("proto root: writes elsewhere stay allowed", async () => {
   const r = root();
-  for (const path of ["codex/report-repo-loop1.md", join(scratch, "runs", "other.md"), "LOOP.md"]) {
+  for (const path of ["codex/closeout-repo-loop1.md", join(scratch, "runs", "other.md"), "LOOP.md"]) {
     const result = await r.call("write", { path, content: "x" });
     assert.equal(blocked(result), false, `${path}: ${result?.reason}`);
   }
@@ -275,7 +275,7 @@ test("root binds the run dir into a lane's identity when LOOP_PI_RUN_DIR is set"
 
 // --- lanes -------------------------------------------------------------------------------------
 
-test("proto lane (run dir from the binding): run dir, authority and codex/grants-* writes are refused", async () => {
+test("proto lane (run dir from the binding): run dir and authority writes are refused", async () => {
   delete process.env.LOOP_PI_RUN_DIR;
   const call = lane({ "loop-pi.guard/1": { agent: "worker", runDir } });
   for (const [tool, path, reason] of [
@@ -283,14 +283,12 @@ test("proto lane (run dir from the binding): run dir, authority and codex/grants
     ["edit", join(runDir, "returns", "x.md"), /run dir/],
     ["write", join(runDir, "standing.md"), /run dir/],
     ["write", "~/repos/agent-docs/authority/owner__repo.md", /authority/],
-    ["write", "codex/grants-2026-10-04-loop3.json", /grants/],
-    ["edit", join(cwd, "codex", "GRANTS-2026-10-04-loop3.json"), /grants/],
   ] as [string, string, RegExp][]) {
     const result = await call(tool, { path, content: "x", edits: [] });
     assert.equal(blocked(result), true, `${tool} ${path}`);
     assert.match(result.reason, reason, path);
   }
-  for (const command of [`echo x > ${runDir}/push-log.jsonl`, "echo x > $LOOP_PI_RUN_DIR/push-log.jsonl", `cp /tmp/r.md ${runDir}/standing.md`, "cp /tmp/g.json codex/grants-2026-10-04-loop3.json", "gh pr merge 12 --squash"]) {
+  for (const command of [`echo x > ${runDir}/push-log.jsonl`, "echo x > $LOOP_PI_RUN_DIR/push-log.jsonl", `cp /tmp/r.md ${runDir}/standing.md`, "gh pr merge 12 --squash"]) {
     const result = await call("bash", { command });
     assert.equal(blocked(result), true, command);
   }
@@ -302,7 +300,7 @@ test("proto lane (run dir from the binding): run dir, authority and codex/grants
 test("proto lane (run dir from the environment): the same refusals apply without a binding run dir", async () => {
   const call = lane({ "loop-pi.guard/1": { agent: "worker" } });
   assert.equal(blocked(await call("write", { path: join(runDir, "push-log.jsonl"), content: "x" })), true);
-  assert.equal(blocked(await call("write", { path: "codex/grants-2026-10-04-loop3.json", content: "x" })), true);
+  assert.equal(blocked(await call("write", { path: join(runDir, "standing.md"), content: "x" })), true);
 });
 
 test("legacy lane (no marker, or no run dir anywhere): the same writes keep today's verdict", async () => {
@@ -314,7 +312,7 @@ test("legacy lane (no marker, or no run dir anywhere): the same writes keep toda
     if (env === undefined) delete process.env.LOOP_PI_RUN_DIR;
     else process.env.LOOP_PI_RUN_DIR = env;
     const call = lane(binding);
-    for (const path of ["codex/grants-2026-10-04-loop3.json", AUTHORITY_FILE, join(env ?? legacyRunDir, "push-log.jsonl")]) {
+    for (const path of [AUTHORITY_FILE, join(env ?? legacyRunDir, "push-log.jsonl")]) {
       const result = await call("write", { path, content: "x" });
       assert.equal(blocked(result), false, `${env} ${JSON.stringify(binding)} ${path}: ${result?.reason}`);
     }

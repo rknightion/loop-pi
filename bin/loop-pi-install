@@ -22,7 +22,9 @@ home receipt so each session can name the variant it ran with.
 
 An `agents/*.md` file in the installed home that the build no longer ships is moved, not deleted,
 to `<home>/backups/agents-<UTC timestamp>/` (`--check` reports it as STALE and exits 1). A file
-named by `--external-managed` is exempt.
+named by `--external-managed` is exempt. A retired dispatcher launcher (`loop-pi-dispatch*`, or
+`<launcher>-dispatch`, generated with the in-process `loop-dispatch` provider) in `--bin` is moved
+the same way, to `<home>/backups/launchers-<UTC timestamp>/`.
 """
 from __future__ import annotations
 
@@ -54,9 +56,6 @@ HOME_MANIFEST = ".loop-pi-managed.json"
 # Root-only extensions, loaded by launcher flags, never by settings packages.
 ROOT_EXTENSIONS = ("loop-guard/root.ts", "loop-wait/root.ts", "loop-continuation/index.ts", "loop-state/index.ts",
                    "lane-worktrees/index.ts", "call-timing/index.ts", "loop-status/index.ts")
-# The dispatcher host loads only its own entry: it registers the lane children itself and answers
-# pi-subagents' completion turns with an in-process idle model (extensions/dispatcher).
-DISPATCH_EXTENSIONS = ("dispatcher/index.ts",)
 # Lane entries, registered by the root guard as required child extensions.
 LANE_EXTENSIONS = ("loop-guard/lane.ts", "loop-wait/lane.ts", "call-timing/index.ts")
 # Operator and root CLIs from bin/, installed next to the launcher.
@@ -66,8 +65,10 @@ HOME_TOOLS = ("loop-state", "loop-pi-nopush")
 LANE_POLICY = "lane-policy.md"
 LANE_POLICY_MARKER = "<!-- lane-policy -->"
 NEVER_MANAGED = {"auth.json"}
-# Agent files the build no longer ships are moved here, inside the home, never deleted.
+# Agent files the build no longer ships, and retired launchers, are moved here, inside the home, never deleted.
 BACKUP_DIR = "backups"
+# A launcher an earlier build generated for the retired dispatcher carries this provider flag.
+RETIRED_LAUNCHER_MARKER = b"--provider loop-dispatch "
 MIN_NODE = (22, 19, 0)
 # Fixed discovery order, independent of the installing shell (Homebrew first).
 NODE_CANDIDATES = ("/opt/homebrew/bin/node", "/usr/local/bin/node", "/usr/bin/node")
@@ -252,7 +253,7 @@ def same_major_keg_link(missing: str, recorded_version: object) -> str:
 
 
 def missing_extensions(prefix: Path) -> List[str]:
-    return [rel for rel in dict.fromkeys(ROOT_EXTENSIONS + LANE_EXTENSIONS + DISPATCH_EXTENSIONS)
+    return [rel for rel in dict.fromkeys(ROOT_EXTENSIONS + LANE_EXTENSIONS)
             if not (prefix / "extensions" / rel).is_file()]
 
 
@@ -340,13 +341,6 @@ def root_route(prefix: Path) -> Tuple[str, str, str]:
     return route["provider"], route["model"], route["thinking"]
 
 
-def dispatch_launcher_name(launcher: str) -> str:
-    """loop-pi -> loop-pi-dispatch, loop-pi-fast -> loop-pi-dispatch-fast; other names get a -dispatch suffix."""
-    if launcher == "loop-pi" or launcher.startswith("loop-pi-"):
-        return "loop-pi-dispatch" + launcher[len("loop-pi"):]
-    return launcher + "-dispatch"
-
-
 def node_major_guard(node: str) -> List[str]:
     """A keg link follows its formula across major versions; refuse to start on a different major
     rather than switch runtimes silently. Other node paths are fixed binaries and need no guard."""
@@ -405,27 +399,6 @@ def incomplete_lines(manifest: dict, name: str) -> List[str]:
     missing = ", ".join(manifest["missing_extensions"])
     return [f"echo '{name}: build {manifest['label']} is incomplete (missing: {missing}); only --version runs.' >&2",
             "exit 78"]
-
-
-def dispatch_launcher_text(prefix: Path, home: Path, node: str, manifest: dict, name: str,
-                           generated_by: str) -> str:
-    """The thin dispatcher: always a loop run, no LLM root (extensions/dispatcher)."""
-    pi = prefix / PI_CLI
-    lines = launcher_preamble(prefix, home, node, generated_by)
-    if manifest["missing_extensions"]:
-        lines += incomplete_lines(manifest, name)
-    else:
-        flags = " ".join(f"--extension '{prefix / 'extensions' / rel}'" for rel in DISPATCH_EXTENSIONS)
-        lines += [
-            "unset LOOP_PI_RUN_DIR LOOP_PI_REPO",
-            'if ! repo=$(git rev-parse --show-toplevel 2>/dev/null); then',
-            f'  echo "{name}: run it inside the loop repository." >&2',
-            "  exit 78",
-            "fi",
-            *loop_run_lines(prefix, home, name, ""),
-            f"exec '{node}' '{pi}' -p --no-tools --provider loop-dispatch --model idle {flags} \"$@\"",
-        ]
-    return "\n".join(lines) + "\n"
 
 
 def launcher_text(prefix: Path, home: Path, node: str, manifest: dict, name: str, generated_by: str) -> str:
@@ -544,7 +517,6 @@ def validate(prefix: Path, pin: Dict[str, str], node: str, allow_missing: bool) 
     if not missing:
         smoke_extensions(prefix, node, ROOT_EXTENSIONS)
         smoke_extensions(prefix, node, LANE_EXTENSIONS)
-        smoke_extensions(prefix, node, DISPATCH_EXTENSIONS)
     return missing
 
 
@@ -644,12 +616,10 @@ def drift(prefix: Path, target: Target, node: str,
         path = target.bin_dir / name
         if not path.is_file() or path.read_bytes() != data:
             changes.append((path, data, 0o755))
-    dispatch = dispatch_launcher_name(target.launcher)
-    for name, text in ((target.launcher, launcher_text), (dispatch, dispatch_launcher_text)):
-        launcher = text(prefix, home, node, manifest, name, target.generated_by).encode()
-        path = target.bin_dir / name
-        if not path.is_file() or path.read_bytes() != launcher:
-            changes.append((path, launcher, 0o755))
+    launcher = launcher_text(prefix, home, node, manifest, target.launcher, target.generated_by).encode()
+    path = target.bin_dir / target.launcher
+    if not path.is_file() or path.read_bytes() != launcher:
+        changes.append((path, launcher, 0o755))
     return changes
 
 
@@ -672,24 +642,59 @@ def retired_agents(home: Path, plan_files: set, external: Tuple[str, ...] = ()) 
                   if (path.is_file() or path.is_symlink()) and f"agents/{path.name}" not in keep)
 
 
+def backup_destination(home: Path, kind: str) -> Path:
+    """A fresh `<home>/backups/<kind>-<UTC timestamp>[-<n>]/` directory."""
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backups = home / BACKUP_DIR
+    backups.mkdir(mode=0o700, exist_ok=True)
+    destination, serial = backups / f"{kind}-{stamp}", 0
+    while True:
+        try:
+            destination.mkdir(mode=0o700)
+            return destination
+        except FileExistsError:
+            serial += 1
+            destination = backups / f"{kind}-{stamp}-{serial}"
+
+
 def retire_agents(home: Path, retired: List[str]) -> Optional[Path]:
     """Move retired agent files into `<home>/backups/agents-<UTC timestamp>/`; nothing is deleted.
     Returns the backup directory, or None when there is nothing to move."""
     if not retired:
         return None
-    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    backups = home / BACKUP_DIR
-    backups.mkdir(mode=0o700, exist_ok=True)
-    destination, serial = backups / f"agents-{stamp}", 0
-    while True:
-        try:
-            destination.mkdir(mode=0o700)
-            break
-        except FileExistsError:
-            serial += 1
-            destination = backups / f"agents-{stamp}-{serial}"
+    destination = backup_destination(home, "agents")
     for rel in retired:
         os.replace(home / rel, destination / Path(rel).name)
+    return destination
+
+
+def retired_launchers(bin_dir: Path, launcher: str) -> List[Path]:
+    """Dispatcher launchers an earlier build generated in `bin_dir`: `loop-pi-dispatch*` and this
+    launcher's `<launcher>-dispatch` counterpart, when they are regular files carrying the retired
+    `loop-dispatch` provider. Anything else under those names is left alone."""
+    if not bin_dir.is_dir():
+        return []
+    names = {path.name for path in bin_dir.glob("loop-pi-dispatch*")} | {f"{launcher}-dispatch"}
+    found = []
+    for name in sorted(names):
+        path = bin_dir / name
+        try:
+            if path.is_symlink() or not path.is_file() or RETIRED_LAUNCHER_MARKER not in path.read_bytes():
+                continue
+        except OSError:
+            continue
+        found.append(path)
+    return found
+
+
+def retire_launchers(home: Path, retired: List[Path]) -> Optional[Path]:
+    """Move retired launchers into `<home>/backups/launchers-<UTC timestamp>/`; nothing is deleted.
+    Returns the backup directory, or None when there is nothing to move."""
+    if not retired:
+        return None
+    destination = backup_destination(home, "launchers")
+    for path in retired:
+        shutil.move(str(path), str(destination / path.name))
     return destination
 
 
@@ -824,9 +829,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print(f"STALE: {target.home / rel} is no longer managed")
             for rel in retired:
                 print(f"STALE: {target.home / rel} is an agent this build no longer ships; install moves it to a backup")
-            if not changes and not stale and not retired:
+            old_launchers = retired_launchers(target.bin_dir, target.launcher)
+            for path in old_launchers:
+                print(f"STALE: {path} is a retired dispatcher launcher; install moves it to a backup")
+            if not changes and not stale and not retired and not old_launchers:
                 print(f"OK: {label} installed; home and launcher match")
-            return 1 if changes or stale or retired else 0
+            return 1 if changes or stale or retired or old_launchers else 0
         provenance = {"source_repo": args.source_repo, "source_commit": source_commit(SRC),
                       "overlay_commit": args.overlay_commit}
         prefix = build(data, label, files, pin, node, args.allow_missing_extensions, args.policy_source, provenance)
@@ -843,6 +851,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         backup = retire_agents(target.home, retired)
         for rel in retired:
             print(f"retired {target.home / rel} -> {backup / Path(rel).name}")
+        old_launchers = retired_launchers(target.bin_dir, target.launcher)
+        launcher_backup = retire_launchers(target.home, old_launchers)
+        for path in old_launchers:
+            print(f"retired {path} -> {launcher_backup / path.name}")
         for rel in stale:
             print(f"STALE (left in place): {target.home / rel}")
         manifest = json.loads((prefix / BUILD_MANIFEST).read_text())

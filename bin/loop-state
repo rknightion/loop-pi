@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""loop-state: append-only event log for a fan-out loop, with a recovery digest.
+"""loop-state: append-only event log for a loop, with a recovery digest.
 
-  loop-state append <log> <ev> [k=v ...] [--by root|dispatcher|ext|daemon] [--run-dir DIR]
+  loop-state append <log> <ev> [k=v ...] [--by root|ext|daemon] [--run-dir DIR]
   loop-state append <log> [--by ...] [--run-dir DIR] < event.json
   loop-state digest <log> [--json]
   loop-state check <log>
@@ -27,13 +27,10 @@ import sys
 from datetime import datetime, timezone
 
 VERSION = 1
-GATE_AGENT = "gate-runner"
-# The agents bound to one ops surface; their dispatches should name it.
-OPS_AGENTS = ("ops", "ops-probe")
 DIGEST_MAX_BYTES = 4096
 JUDGEMENT_MAX_BYTES = 4096
 JUDGEMENTS_IN_DIGEST = 5
-BY_VALUES = ("root", "dispatcher", "ext", "daemon")
+BY_VALUES = ("root", "ext", "daemon")
 TS_RE = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
 
 STR = "str"
@@ -53,22 +50,21 @@ TIER = ("routine", "guarded")
 SCHEMA = {
     "open": (
         {
-            "goal_sha256": STR,
-            "tier": TIER,
-            "root": ("llm", "dispatcher"),
+            "charter_sha256": STR,
+            "root": ("llm",),
             "root_model": STR,
-            "envelope": STRLIST,
+            "first_wave": STRLIST,
         },
-        {},
+        {"tier": TIER},
     ),
     "admit": (
-        {"task": STR, "source": ("envelope", "loop-created"), "owned": OWNED, "accept": STR},
+        {"task": STR, "source": ("first-wave", "loop-created"), "owned": OWNED, "accept": STR},
         {"tier": TIER, "surfaces": STRLIST},
     ),
     "dispatch": (
         {"lane": STR, "task": STR, "agent": STR, "run": STR, "base": STR},
         {"deadline": STR, "model": STR, "effort": STR, "surface": STR,
-         "tier": TIER, "tasks": STRLIST, "kind": ("work", "gate", "triage", "review"),
+         "tier": TIER, "tasks": STRLIST, "kind": ("work", "review"),
          "recovery_of": STR},
     ),
     "return": (
@@ -84,10 +80,6 @@ SCHEMA = {
             "questions": STRLIST,
             "artifact": ARTIFACT,
         },
-    ),
-    "gate": (
-        {"scope": ("lane", "composed"), "sha": STR, "cmd": STR, "exit": INT_OR_NULL},
-        {"lane": STR, "base": STR},
     ),
     "accept": ({"task": STR, "accepted": BOOL, "reason": STR}, {"lane": STR}),
     "park": (
@@ -192,9 +184,9 @@ def validate_event(obj, framed=False):
     if not isinstance(ev, str) or ev not in SCHEMA:
         raise Rejected("ev must be one of %s" % "|".join(SCHEMA))
     required, optional = SCHEMA[ev]
-    envelope = {"ev", "v", "seq", "ts", "by"}
+    framing = {"ev", "v", "seq", "ts", "by"}
     for field in obj:
-        if field not in required and field not in optional and field not in envelope:
+        if field not in required and field not in optional and field not in framing:
             raise Rejected(
                 "%s: unknown field %s; allowed fields: %s"
                 % (ev, field, ", ".join(list(required) + list(optional)))
@@ -392,7 +384,7 @@ def read_run_facts(run_dir):
 
 
 def check_budget_close(run_dir):
-    """Refuse `close reason=budget` in a protocol-2 run that holds no compaction or quota fact."""
+    """Refuse `close reason=budget` in a marked run (`loop-pi-proto`) that holds no compaction or quota fact."""
     if not run_dir or not os.path.isfile(os.path.join(run_dir, "loop-pi-proto")):
         return
     if not any(k in BUDGET_FACT_KINDS for k in read_run_facts(run_dir)):
@@ -516,7 +508,6 @@ def fold(path):
         "returns": {},  # first terminal outcome per run; replays are not new work
         "lane_task": {},  # lane -> task
         "judgements": [],
-        "last_gate": None,
         "heartbeat": None,
         "watches": {},
         "has_activity": False,
@@ -559,15 +550,6 @@ def fold(path):
             t = task(obj["task"])
             t.update(state="admitted", dispatched=False, accepted=False, landed=False, parked=None,
                      tier=obj.get("tier"), surfaces=obj.get("surfaces", []))
-        elif ev == "dispatch" and obj.get("agent") == GATE_AGENT:
-            # A composed gate names its batch (`T2,T3`) as its task. It is a live lane until it
-            # returns, never a task: its result reaches tasks through gate, accept and park.
-            st["lanes"][obj.get("run")] = {
-                "lane": obj.get("lane"),
-                "task": obj.get("task"),
-                "agent": GATE_AGENT,
-                "deadline": obj.get("deadline"),
-            }
         elif ev == "dispatch" and isinstance(obj.get("recovery_of"), str):
             # Block generation is a separate live lifecycle, not implementation work.
             st["lanes"][obj.get("run")] = {
@@ -603,8 +585,6 @@ def fold(path):
                 audit["coderabbit"] = isinstance(obj.get("coderabbit"), dict) and obj["coderabbit"].get("ran") is True
             run, lane = obj.get("run"), obj.get("lane")
             info = st["lanes"].pop(run, None)
-            if info and info.get("agent") == GATE_AGENT:
-                continue
             dispatch = st["dispatches"].get(run) or info or {}
             tid = dispatch.get("task") or st["lane_task"].get(lane)
             replay = run in st["returns"]
@@ -658,8 +638,6 @@ def fold(path):
                     state="reverted",
                     reason=obj.get("reason"),
                 )
-        elif ev == "gate":
-            st["last_gate"] = obj
         elif ev == "heartbeat" and isinstance(obj.get("at"), str):
             st["has_activity"] = True
             st["heartbeat"] = obj["at"]
@@ -785,22 +763,19 @@ def render_digest(st, judgements, task_level):
     out = ["# Loop state"]
     op = st["open"]
     if op:
+        tier = (", tier %s" % op["tier"]) if op.get("tier") else ""
         out.append(
-            "goal %s, tier %s, root %s (%s)"
-            % (op.get("goal_sha256"), op.get("tier"), op.get("root"), op.get("root_model"))
+            "charter %s%s, root %s (%s)"
+            % (op.get("charter_sha256"), tier, op.get("root"), op.get("root_model"))
         )
     else:
-        out.append("goal unknown (no open event)")
+        out.append("charter unknown (no open event)")
     status = "seq %d" % st["last_seq"]
     if st["close"]:
         status += ", closed: %s" % st["close"].get("reason")
     if st["bad"]:
         status += ", %d unreadable lines" % st["bad"]
     out.append(status)
-    if st["last_gate"]:
-        g = st["last_gate"]
-        exit_text = "null" if g.get("exit") is None else g.get("exit")
-        out.append("last gate: %s %s exit %s" % (g.get("scope"), _short(g.get("sha")), exit_text))
     if st["has_activity"]:
         if st["heartbeat"]:
             out.append("last heartbeat: %s" % st["heartbeat"])
@@ -934,15 +909,12 @@ def cmd_append(args):
 
 
 def telemetry_warnings(event):
-    """Warn mode for the tier and surface telemetry: the event is already appended, but a missing
-    admit `tier` or ops dispatch `surface` leaves the audit split unknown, so name the field."""
+    """Warn mode for the tier telemetry: the event is already appended, but a missing admit `tier`
+    leaves the audit split unknown, so name the field."""
     out = []
     if event["ev"] == "admit" and "tier" not in event:
         out.append("admit %s has no tier; pass tier=routine|guarded so its lanes and reviews "
                    "are audited by tier" % event["task"])
-    if event["ev"] == "dispatch" and event["agent"] in OPS_AGENTS and "surface" not in event:
-        out.append("dispatch %s (%s) has no surface; pass the bound ops surface as surface=<id>"
-                   % (event["run"], event["agent"]))
     return out
 
 

@@ -19,15 +19,15 @@ const append = (log: string, ...args: string[]) => execFileSync(BIN, ["append", 
 for (const outcome of ["success", "failure", "abort"] as const) {
   test(`80% native same-session state compaction: ${outcome}`, { timeout: 60_000 }, async () => {
     const s = loopFixture({ root: "faux/faux-1" });
-    const originalGoal = readFileSync(s.charter, "utf8");
+    const originalCharter = readFileSync(s.charter, "utf8");
     writeFileSync(join(s.agentDir, "settings.json"), JSON.stringify({ retry: { enabled: false }, packages: [PI_SUBAGENTS_PACKAGE_DIR], defaultProjectTrust: "never", subagents: { agentExcludeDirs: ["~/.agents"] } }));
     // Real authority hash checked at arm, plus an explicit consumed allowance in the frozen charter.
     const standingPath = join(s.repo, "codex", "standing.md");
     const standing = "# Standing authority\n";
     writeFileSync(standingPath, standing);
-    const goal = originalGoal.replace("standing:   none", `standing:   ${standingPath} sha256=${hash(standing)}`) +
+    const charterBody = originalCharter.replace("standing:   none", `standing:   ${standingPath} sha256=${hash(standing)}`) +
       "\n## Decisions\nAttempt ceiling 4; T-1 consumed 2; remaining 2.\n";
-    writeFileSync(s.charter, goal);
+    writeFileSync(s.charter, charterBody);
     const observer = join(freshDir(), "observer.ts");
     const facts = join(s.repo, "facts.jsonl");
     writeFileSync(observer, `import { appendFileSync } from "node:fs";
@@ -54,11 +54,11 @@ for (const outcome of ["success", "failure", "abort"] as const) {
       session.send({ type: "prompt", id: "arm", message: s.launch + `\nStanding: ${standingPath} sha256=${hash(standing)}` });
       await session.waitFor(e => e.type === "agent_settled");
       const before = await rpc("get_state", "identity-before");
-      append(s.log, "admit", "task=T-1", "source=envelope", "owned=a/**", "accept=fixture", "tier=routine");
-      append(s.log, "admit", "task=T-2", "source=envelope", "owned=b/**", "accept=fixture", "tier=guarded");
-      append(s.log, "dispatch", "lane=L1", "task=T-1", "agent=lane-worker", "run=run-one", "base=fixture");
+      append(s.log, "admit", "task=T-1", "source=first-wave", "owned=a/**", "accept=fixture", "tier=routine");
+      append(s.log, "admit", "task=T-2", "source=first-wave", "owned=b/**", "accept=fixture", "tier=guarded");
+      append(s.log, "dispatch", "lane=L1", "task=T-1", "agent=worker", "run=run-one", "base=fixture");
       append(s.log, "return", "lane=L1", "run=run-one", "status=failed");
-      append(s.log, "dispatch", "lane=L2", "task=T-1", "agent=lane-worker", "run=run-two", "base=fixture");
+      append(s.log, "dispatch", "lane=L2", "task=T-1", "agent=worker", "run=run-two", "base=fixture");
       append(s.log, "park", "task=T-2", "reason=fixture", "needs=owner");
       const ledgerHash = hash(readFileSync(s.log));
       // Public faux withUsageEstimate reports input plus cache-write on new prompt bytes.
@@ -85,22 +85,21 @@ for (const outcome of ["success", "failure", "abort"] as const) {
       assert.equal(session.events.filter(e => e.type === "agent_start").length, 2, "no root spawn or replacement model turn");
       assert.equal(session.events.filter(e => e.type === "tool_execution_start").length, 0, "no child autosponsor");
       const frozen = (await rpc("get_entries", "entries")).entries.filter((e: any) => e.customType === "loop-continuation-state").at(-1).data;
-      assert.equal(frozen.rootContext.goalText, goal);
-      assert.equal(frozen.rootContext.opsSha256, null, "v3 has no ops lane");
+      assert.equal(frozen.rootContext.goalText, charterBody);
       assert.equal(frozen.standingSha256, hash(standing), "successful or failed compaction never changes frozen authority");
       if (outcome === "success") {
         assert.ok(terminal.result, "native compaction persisted a real result");
         const summary = terminal.result.summary;
         assert.ok(Buffer.byteLength(summary) <= 32768);
-        assert.ok(summary.includes(goal), "the accepted Goal, including consumed allowance, survives exactly");
+        assert.ok(summary.includes(charterBody), "the accepted charter, including consumed allowance, survives exactly");
         assert.match(summary, /implementation_dispatches.*T-1.*2/s);
         assert.ok(summary.includes(hash(standing)), "frozen authority hash survives");
         const projection = await rpc("get_messages", "projection");
         assert.ok(Buffer.byteLength(JSON.stringify(projection.messages)) < 50_000, "real native model projection is bounded");
         const rawBytes = readFileSync(before.sessionFile).length;
         assert.ok(rawBytes > 450_000, "full previous history stays on disk");
-        // Editing the source Goal cannot silently replace the frozen Goal on a later compaction.
-        writeFileSync(s.charter, originalGoal);
+        // Editing the source charter cannot silently replace the frozen charter on a later compaction.
+        writeFileSync(s.charter, originalCharter);
         session.send({ type: "prompt", id: "small", message: "short follow-up" });
         await session.waitFor(e => e.type === "agent_settled" && session.events.filter(x => x.type === "agent_settled").length === 3);
         const contexts = readFileSync(facts, "utf8").trim().split("\n").map(l => JSON.parse(l)).filter(r => r.type === "context");
@@ -109,7 +108,7 @@ for (const outcome of ["success", "failure", "abort"] as const) {
         await session.waitFor(e => e.type === "agent_settled" && session.events.filter(x => x.type === "agent_settled").length === 4);
         assert.equal(session.events.filter(e => e.type === "compaction_start").length, 2, "low known usage rearms the next generation");
         const next = session.events.filter(e => e.type === "compaction_end").at(-1) as any;
-        assert.ok(next.result.summary.includes(goal), "later compaction still uses the original frozen Goal");
+        assert.ok(next.result.summary.includes(charterBody), "later compaction still uses the original frozen charter");
         assert.equal(hash(readFileSync(s.log)), ledgerHash);
         session.send({ type: "prompt", id: "small-after-two", message: "short follow-up" });
         await session.waitFor(e => e.type === "agent_settled" && session.events.filter(x => x.type === "agent_settled").length === 5);
@@ -140,7 +139,7 @@ test(`native async public subagent return previews 2000 characters and retains t
   const s = loopFixture({ root: "faux/faux-1" });
   mkdirSync(join(s.agentDir, "agents"));
   writeFileSync(join(s.agentDir, "settings.json"), JSON.stringify({ packages: [PI_SUBAGENTS_PACKAGE_DIR], defaultProjectTrust: "never", subagents: { agentExcludeDirs: ["~/.agents"] } }));
-  writeFileSync(join(s.agentDir, "agents", "lane-worker.md"), ["---", "name: lane-worker", "description: Fixture", "tools: read", "model: faux/faux-1", "extensions: []", `subagentOnlyExtensions: ${FAUX_EXTENSION}`, "---", "Fixture"].join("\n"));
+  writeFileSync(join(s.agentDir, "agents", "worker.md"), ["---", "name: worker", "description: Fixture", "tools: read", "model: faux/faux-1", "extensions: []", `subagentOnlyExtensions: ${FAUX_EXTENSION}`, "---", "Fixture"].join("\n"));
   const block = '```lane-return\n' + JSON.stringify({ v: 2, lane: "L1", status: "complete", sha: null, landed: false, base: "fixture", check: "fixture", exit: 0, tail: "ok", ci: null, coderabbit: null, questions: [] }) + '\n```';
   const full = block + '\n' + "native-output-line\n".repeat(500);
   // Independent scripted expectation for the resolved artifact, not saved-file readback or
@@ -155,14 +154,14 @@ test(`native async public subagent return previews 2000 characters and retains t
   const requestedOutput = explicitOutput ? join(s.runDir, "full-return.md") : undefined;
   const session = startPiRpc({ extensions: [FAUX_EXTENSION, CONTINUATION, STATE, observer], agentDir: s.agentDir, subagentTempRoot: freshDir(), cwd: s.repo, sessionArgs: [], extraArgs: ["--exclude-tools", "subagents_enable"], env: { LOOP_PI_RUN_DIR: s.runDir },
     fauxScriptPath: writeFauxScript([
-      { match: "NATIVE_PREVIEW", once: true, toolCalls: [{ name: "subagent", args: { agent: "lane-worker", task: "Lane: L1 · Task: T-1 · Tier: routine\nObjective: CHILD_PREVIEW", async: true, worktree: false, ...(requestedOutput ? { output: requestedOutput } : {}) } }] },
+      { match: "NATIVE_PREVIEW", once: true, toolCalls: [{ name: "subagent", args: { agent: "worker", task: "Lane: L1 · Task: T-1 · Tier: routine\nObjective: CHILD_PREVIEW", async: true, worktree: false, ...(requestedOutput ? { output: requestedOutput } : {}) } }] },
       { match: "CHILD_PREVIEW", text: full },
       { match: ".*", text: "PAUSED: fixture awaits the next explicit input." },
     ]) });
   try {
     session.send({ type: "prompt", id: "arm", message: s.launch });
     await session.waitFor(e => e.type === "agent_settled");
-    append(s.log, "admit", "task=T-1", "source=envelope", "owned=a/**", "accept=fixture", "tier=routine");
+    append(s.log, "admit", "task=T-1", "source=first-wave", "owned=a/**", "accept=fixture", "tier=routine");
     session.send({ type: "prompt", id: "spawn", message: "NATIVE_PREVIEW" });
     const ret = await waitForCondition(() => { try { return readFileSync(s.log, "utf8").split("\n").filter(Boolean).map(l => JSON.parse(l)).find(r => r.ev === "return"); } catch { return undefined; } }, 60_000);
     assert.equal(ret.status, "complete", "the unpreviewed completion still supplies the return block");
@@ -218,10 +217,10 @@ test("live native child defers without consumption, completion wakes, then the s
   const s = loopFixture({ root: "faux/faux-1" });
   mkdirSync(join(s.agentDir, "agents"));
   writeFileSync(join(s.agentDir, "settings.json"), JSON.stringify({ retry: { enabled: false }, packages: [PI_SUBAGENTS_PACKAGE_DIR], defaultProjectTrust: "never", subagents: { agentExcludeDirs: ["~/.agents"] } }));
-  writeFileSync(join(s.agentDir, "agents", "lane-worker.md"), ["---", "name: lane-worker", "description: Fixture", "tools: read", "model: faux/faux-1", "extensions: []", `subagentOnlyExtensions: ${FAUX_EXTENSION}`, "---", "Fixture"].join("\n"));
+  writeFileSync(join(s.agentDir, "agents", "worker.md"), ["---", "name: worker", "description: Fixture", "tools: read", "model: faux/faux-1", "extensions: []", `subagentOnlyExtensions: ${FAUX_EXTENSION}`, "---", "Fixture"].join("\n"));
   const block = '```lane-return\n' + JSON.stringify({ v: 2, lane: "L1", status: "complete", sha: null, landed: false, check: "fixture", exit: 0, coderabbit: null }) + '\n```';
   const session = startPiRpc({ extensions: [FAUX_EXTENSION, CONTINUATION, STATE], agentDir: s.agentDir, subagentTempRoot: freshDir(), cwd: s.repo, sessionArgs: [], extraArgs: ["--exclude-tools", "subagents_enable"], env: { LOOP_PI_RUN_DIR: s.runDir }, fauxScriptPath: writeFauxScript([
-    { match: "SPAWN_LIVE", once: true, toolCalls: [{ name: "subagent", args: { agent: "lane-worker", task: "Lane: L1 · Task: T-1 · Tier: routine\nObjective: CHILD_LIVE", async: true, worktree: false } }] },
+    { match: "SPAWN_LIVE", once: true, toolCalls: [{ name: "subagent", args: { agent: "worker", task: "Lane: L1 · Task: T-1 · Tier: routine\nObjective: CHILD_LIVE", async: true, worktree: false } }] },
     { match: "CHILD_LIVE", delayMs: 30_000, text: block },
     { match: ".*", text: "PAUSED: fixture awaits the next explicit input." },
   ]) });
@@ -230,8 +229,8 @@ test("live native child defers without consumption, completion wakes, then the s
     session.send({ type: "prompt", id: "arm", message: s.launch });
     await session.waitFor(e => e.type === "agent_settled");
     const identity = await rpc("get_state", "identity");
-    append(s.log, "admit", "task=T-1", "source=envelope", "owned=a/**", "accept=fixture", "tier=routine");
-    append(s.log, "admit", "task=T-2", "source=envelope", "owned=b/**", "accept=fixture", "tier=guarded");
+    append(s.log, "admit", "task=T-1", "source=first-wave", "owned=a/**", "accept=fixture", "tier=routine");
+    append(s.log, "admit", "task=T-2", "source=first-wave", "owned=b/**", "accept=fixture", "tier=guarded");
     append(s.log, "park", "task=T-2", "reason=fixture", "needs=owner");
     session.send({ type: "prompt", id: "spawn", message: "SPAWN_LIVE" });
     await session.waitFor(e => e.type === "agent_settled" && session.events.filter(x => x.type === "agent_settled").length === 2);

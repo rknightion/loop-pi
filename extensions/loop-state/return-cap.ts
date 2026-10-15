@@ -2,7 +2,7 @@
 // up to its first HEAD_BYTES, a marker naming where the full text is, the last ```lane-return block
 // when it is not wholly inside the kept head or tail, and up to its last TAIL_BYTES. The full text is written to
 // `<run dir>/returns/<run id>.md` unless pi-subagents already saved the lane's output to a file, whose
-// path is named instead. Used by the loop-state extension (LLM roots) and the dispatcher.
+// path is named instead. Used by the loop-state extension (the root) and loop-guard's lane entry.
 //
 // The saved-output path comes only from pi-subagents' structured completion (the async-complete
 // payload's single result `savedOutputPath`, matched by details.runs[].runId when present,
@@ -15,8 +15,8 @@
 // loop-guard's lane entry) to LANE_RETURN_CAP_BYTES, leaving room under RETURN_CAP_BYTES for the
 // notify's own lines, and writes the full text to `<run dir>/returns/lane-<key>-<hash>.md`.
 //
-// Pure apart from `capNotifyContent`'s and `capLaneAssistantMessage`'s file writes. Both real
-// consumers check that a cut preserves their lane-return outcome; an unsafe cut stays whole.
+// Pure apart from `capNotifyContent`'s and `capLaneAssistantMessage`'s file writes. A cut must
+// preserve the lane-return outcome `loop-state/core.ts` parses; an unsafe cut stays whole.
 // Callers build the `return` event from the async-complete payload, which is the lane's own
 // (lane-capped) output, before the root message is rewritten.
 
@@ -25,7 +25,6 @@ import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, isAbsolute, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { parseLaneReturn } from "./core.ts";
-import { parseLaneReturn as parseDispatcherLaneReturn } from "../dispatcher/brief.ts";
 
 export const NOTIFY_CUSTOM_TYPE = "subagent-notify";
 export const RETURN_CAP_BYTES = 16_384;
@@ -74,7 +73,7 @@ export function markerLine(omitted: number, fullPath: string): string {
 
 /**
  * The capped form of `text`, or null when it fits, its protected block/marker cannot fit `limit`,
- * or the cut would change either real consumer's lane-return outcome.
+ * or the cut would change the lane-return outcome loop-state parses.
  * Reserve the block, marker and separators before allocating UTF-8-safe head and tail maxima.
  * Every opener left unclosed by the head cut is removed, not only the last block's opener.
  */
@@ -109,11 +108,8 @@ export function capText(
   if (block && block.end > head.length && block.start < tailStart) parts.push(block.block);
   parts.push(tail.toString("utf8"));
   const capped = parts.join("\n");
-  // The consumers differ in their accepted fence grammar and malformed-block handling. Keeping
-  // the model-root outcome alone can still resurrect a stale success for the dispatcher.
-  // Use both actual consumers, not a copied parser, and decline a cut that changes either outcome.
-  return isDeepStrictEqual(parseLaneReturn(capped), parseLaneReturn(text))
-    && isDeepStrictEqual(parseDispatcherLaneReturn(capped), parseDispatcherLaneReturn(text)) ? capped : null;
+  // Use the actual consumer, not a copied parser, and decline a cut that changes its outcome.
+  return isDeepStrictEqual(parseLaneReturn(capped), parseLaneReturn(text)) ? capped : null;
 }
 
 /** The text of a custom message's content (a string or text blocks). */

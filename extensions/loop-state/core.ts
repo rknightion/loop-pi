@@ -26,9 +26,7 @@ export function parseBrief(text: unknown): Brief | null {
   const brief: Brief = { lane: m[1], task: m[2], tier: m[3] as Brief["tier"] };
   const deadline = lines.map((l) => /^Deadline:\s*(\S+)\s*$/.exec(l.trim())).find((x) => x !== null);
   if (deadline) brief.deadline = deadline[1];
-  // `Ops surface:` (the contract's ops brief line) takes precedence over a bare `Surface:` line.
-  const line = (re: RegExp) => lines.map((l) => re.exec(l.trim())).find((match) => match !== null);
-  const surface = line(/^Ops surface:\s*(\S+)\s*$/) ?? line(/^Surface:\s*(\S+)\s*$/);
+  const surface = lines.map((l) => /^Surface:\s*(\S+)\s*$/.exec(l.trim())).find((match) => match !== null);
   if (surface) brief.surface = surface[1];
   const tasks = lines.map((line) => /^Tasks:\s*(.+)\s*$/.exec(line.trim())).find((match) => match !== null);
   if (tasks) {
@@ -39,7 +37,7 @@ export function parseBrief(text: unknown): Brief | null {
 }
 
 /** Frozen v3 seam S3: `closeout-<name>.md` becomes `state-<name>.jsonl` in the same directory. Null
- *  for any other name, including a v2 `report-<name>.md`. */
+ *  for any other name, including a `report-<name>.md`. */
 export function deriveLogPath(closeoutPath: string): string | null {
   const slash = closeoutPath.lastIndexOf("/");
   const dir = slash >= 0 ? closeoutPath.slice(0, slash + 1) : "";
@@ -92,7 +90,7 @@ export function failedRunBlock(block: Record<string, unknown> | null): Record<st
 
 /** The `return` event for a finished run. The status is the block's: a run with no block, or with
  *  a block whose status is not one of the four, is `failed` whatever pi-subagents reported, as the
- *  dispatcher's parseLaneReturn reads it. Fields of a block that do not fit the schema are dropped. */
+ *  root reads it. Fields of a block that do not fit the schema are dropped. */
 export function returnEvent(lane: string, run: string, block: Record<string, unknown> | null, artifact?: string | null): Record<string, unknown> {
   const ev: Record<string, unknown> = { ev: "return", lane, run };
   const fromBlock = block && typeof block.status === "string" && STATUSES.has(block.status) ? block.status : null;

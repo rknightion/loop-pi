@@ -4,15 +4,12 @@ runnable as `python3 -m unittest bin.test_loop_pi_audit -v` from `pi/`, or
 directly as a script. Builds scratch git repos with a local bare "remote"
 (file-path, no network) under a temp dir.
 """
-import datetime
-import hashlib
 import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -94,52 +91,57 @@ def snapshot(out_path, *repos, env_overrides=None):
 
 
 class DuplicateRemoteTests(unittest.TestCase):
-    def test_duplicate_grants_and_ungranted_moves(self):
-        # Exercise snapshot and compare through the CLI against a real bare remote.
-        for grant_paths in ((), (0,), (1,), (0, 1)):
-            with self.subTest(grant_paths=grant_paths), tempfile.TemporaryDirectory() as tmp:
-                first, remote = init_repo_with_remote(tmp, "first")
-                git(remote, "symbolic-ref", "HEAD", "refs/heads/main")
-                second = os.path.join(tmp, "second")
-                subprocess.run([GIT, "clone", "--no-local", "-q", remote, second],
-                               check=True, timeout=60)
-                paths = (first, second)
-                env = {"PATH": make_bin_with_gh_stub(tmp)}
-                before, after = (os.path.join(tmp, f"{phase}.json") for phase in ("before", "after"))
-                snapshot(before, *paths, env_overrides=env)
-                git(first, "commit", "--allow-empty", "-q", "-m", "advance")
-                git(first, "push", "-q", "origin", "main")
-                snapshot(after, *paths, env_overrides=env)
-                grants = os.path.join(tmp, "grants.json")
-                with open(grants, "w") as fh:
-                    json.dump({paths[i]: ["refs/heads/main"] for i in grant_paths}, fh)
-                result = run_audit("compare", before, after, "--grants", grants, env_overrides=env)
-                self.assertEqual(result.returncode, 0 if grant_paths else 1, result.stdout + result.stderr)
-                moves = [line for line in result.stdout.splitlines() if "ref moved: refs/heads/main " in line]
-                self.assertEqual(len(moves), 1 if grant_paths else 2, result.stdout)
-                if grant_paths:
-                    self.assertIn("[GRANTED]", moves[0])
-                    self.assertNotIn("UNGRANTED", result.stdout)
-                else:
-                    for path in paths:
-                        self.assertTrue(any(f"[{path}]" in line and "[UNGRANTED]" in line for line in moves))
+    """Two snapshot paths that read the same unchanged remote URL, through the CLI against a real
+    bare remote."""
 
-    def test_single_path_grant_is_unchanged(self):
+    def two_paths(self, tmp):
+        first, remote = init_repo_with_remote(tmp, "first")
+        git(remote, "symbolic-ref", "HEAD", "refs/heads/main")
+        second = os.path.join(tmp, "second")
+        subprocess.run([GIT, "clone", "--no-local", "-q", remote, second], check=True, timeout=60)
+        git(second, "config", "user.email", "someone@example.com")
+        git(second, "config", "user.name", "someone")
+        return first, second
+
+    def test_an_unaccounted_move_is_reported_under_every_path(self):
         with tempfile.TemporaryDirectory() as tmp:
-            repo, _ = init_repo_with_remote(tmp, "single")
+            paths = self.two_paths(tmp)
             env = {"PATH": make_bin_with_gh_stub(tmp)}
             before, after = (os.path.join(tmp, f"{phase}.json") for phase in ("before", "after"))
-            snapshot(before, repo, env_overrides=env)
-            git(repo, "commit", "--allow-empty", "-q", "-m", "advance")
-            git(repo, "push", "-q", "origin", "main")
-            snapshot(after, repo, env_overrides=env)
-            grants = os.path.join(tmp, "grants.json")
-            with open(grants, "w") as fh:
-                json.dump({repo: ["refs/heads/main"]}, fh)
-            for granted in (False, True):
-                result = run_audit("compare", before, after, *(["--grants", grants] if granted else []), env_overrides=env)
-                self.assertEqual(result.returncode, 0 if granted else 1, result.stdout + result.stderr)
-                self.assertEqual(result.stdout.count("ref moved: refs/heads/main "), 1)
+            snapshot(before, *paths, env_overrides=env)
+            git(paths[0], "commit", "--allow-empty", "-q", "-m", "advance")
+            git(paths[0], "push", "-q", "origin", "main")
+            snapshot(after, *paths, env_overrides=env)
+            result = run_audit("compare", before, after, env_overrides=env)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            moves = [line for line in result.stdout.splitlines() if "ref moved: refs/heads/main " in line]
+            self.assertEqual(len(moves), 2, result.stdout)
+            for path in paths:
+                self.assertTrue(any(f"[{path}]" in line and "[UNGRANTED]" in line for line in moves))
+
+    def test_an_accounted_move_on_a_shared_endpoint_is_reported_once(self):
+        # A backlog-only commit is accounted for under both paths; the identical GRANTED line for
+        # the second path reading the same URL is not repeated.
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = self.two_paths(tmp)
+            env = {"PATH": make_bin_with_gh_stub(tmp)}
+            before, after = (os.path.join(tmp, f"{phase}.json") for phase in ("before", "after"))
+            snapshot(before, *paths, env_overrides=env)
+            os.makedirs(os.path.join(paths[0], "backlog"))
+            with open(os.path.join(paths[0], "backlog", "task.md"), "w", encoding="utf-8") as fh:
+                fh.write("task\n")
+            git(paths[0], "add", "--", "backlog/task.md")
+            git(paths[0], "commit", "-q", "-m", "task", "--", "backlog/task.md")
+            git(paths[0], "push", "-q", "origin", "main")
+            snapshot(after, *paths, env_overrides=env)
+            log = os.path.join(tmp, "push-log.jsonl")
+            open(log, "w", encoding="utf-8").close()
+            result = run_audit("compare", before, after, "--push-log", log, env_overrides=env)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            moves = [line for line in result.stdout.splitlines() if "ref moved: refs/heads/main " in line]
+            self.assertEqual(len(moves), 1, result.stdout)
+            self.assertIn("[GRANTED]", moves[0])
+            self.assertNotIn("UNGRANTED", result.stdout)
 
 
 class SnapshotTests(unittest.TestCase):
@@ -312,24 +314,6 @@ class CompareTests(unittest.TestCase):
         self.assertIn("added", result.stdout)
         self.assertIn("UNGRANTED", result.stdout)
 
-    def test_added_branch_granted_exits_zero(self):
-        git(self.repo, "checkout", "-q", "-b", "feature")
-        with open(os.path.join(self.repo, "f.txt"), "a") as fh:
-            fh.write("more\n")
-        git(self.repo, "commit", "-q", "-am", "feature commit")
-        git(self.repo, "push", "-q", "origin", "feature")
-        after = self._snapshot_after()
-
-        grants = os.path.join(self.tmp, "grants.json")
-        with open(grants, "w") as fh:
-            json.dump({self.repo: ["refs/heads/feature"]}, fh)
-
-        result = run_audit("compare", self.before, after, "--grants", grants)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("refs/heads/feature", result.stdout)
-        self.assertIn("GRANTED", result.stdout)
-        self.assertNotIn("UNGRANTED", result.stdout)
-
     def test_moved_ref_detected(self):
         with open(os.path.join(self.repo, "f.txt"), "a") as fh:
             fh.write("more\n")
@@ -360,9 +344,9 @@ class CompareTests(unittest.TestCase):
         self.assertIn("refs/tags/v1", result.stdout)
         self.assertIn("deleted", result.stdout)
 
-    def test_pull_refs_are_foreign_unless_explicitly_granted(self):
+    def test_pull_refs_are_foreign(self):
         # GitHub recomputes refs/pull/<n>/merge whenever the base moves, so it
-        # is foreign automation, as is the synthesised head ref.
+        # is foreign, as is the synthesised head ref.
         git(self.repo, "push", "-q", "origin", "HEAD:refs/pull/7/merge")
         git(self.repo, "push", "-q", "origin", "HEAD:refs/pull/7/head")
         before = os.path.join(self.tmp, "before-pull.json")
@@ -393,13 +377,19 @@ class CompareTests(unittest.TestCase):
         self.assertIn("refs/pull/7/head", result.stdout)
         self.assertIn("FOREIGN", result.stdout)
 
-    def _compare_with_grants(self, before, after, value):
-        grants = os.path.join(self.tmp, "grants.json")
-        with open(grants, "w") as fh:
-            json.dump({self.repo: value}, fh)
-        return run_audit("compare", before, after, "--grants", grants)
+    def _push_log(self, *entries):
+        """A push log at a fixed path holding `(old, new)` ranges for origin's main."""
+        path = os.path.join(self.tmp, "push-log.jsonl")
+        with open(path, "w", encoding="utf-8") as fh:
+            for old, new in entries:
+                fh.write(json.dumps({"repo": self.repo, "remote": "origin", "ref": "refs/heads/main",
+                                     "old": old, "new": new}) + "\n")
+        return path
 
-    def test_head_uses_target_grant_and_legacy_snapshot_is_readable(self):
+    def _head(self):
+        return git(self.repo, "rev-parse", "HEAD").stdout.strip()
+
+    def test_derived_head_follows_main_and_legacy_snapshot_is_readable(self):
         git(self.remote, "symbolic-ref", "HEAD", "refs/heads/main")
         snapshot(self.before, self.repo, env_overrides={"PATH": self.gh_bin})
         with open(self.before) as fh:
@@ -407,30 +397,30 @@ class CompareTests(unittest.TestCase):
         legacy["repos"][self.repo]["remotes"]["origin"].pop("symrefs", None)
         with open(self.before, "w") as fh:
             json.dump(legacy, fh)
+        old = self._head()
         git(self.repo, "commit", "-q", "--allow-empty", "-m", "advance")
         git(self.repo, "push", "-q", "origin", "main")
         after = self._snapshot_after()
-        result = self._compare_with_grants(self.before, after, ["refs/heads/main"])
+        result = run_audit("compare", self.before, after, "--push-log", self._push_log((old, self._head())))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("GRANTED derived HEAD", result.stdout)
         self.assertNotIn("UNGRANTED", result.stdout)
-        # A standalone HEAD grant cannot authorize its ungranted target.
-        denied = self._compare_with_grants(self.before, after, ["HEAD"])
+        # Without the push log the same move, and HEAD with it, is not accounted for.
+        denied = run_audit("compare", self.before, after)
         self.assertEqual(denied.returncode, 1)
-        self.assertIn("UNGRANTED", denied.stdout)
+        self.assertIn("UNGRANTED derived HEAD", denied.stdout)
 
-    def test_head_retarget_same_object_requires_target_grant(self):
+    def test_head_retarget_same_object_is_ungranted(self):
         git(self.remote, "symbolic-ref", "HEAD", "refs/heads/main")
         git(self.repo, "push", "-q", "origin", "HEAD:refs/heads/other")
         snapshot(self.before, self.repo, env_overrides={"PATH": self.gh_bin})
         git(self.remote, "symbolic-ref", "HEAD", "refs/heads/other")
         after = self._snapshot_after()
-        denied = self._compare_with_grants(self.before, after, ["refs/heads/main"])
-        self.assertEqual(denied.returncode, 1, denied.stdout + denied.stderr)
-        self.assertIn("UNGRANTED derived HEAD", denied.stdout)
-        allowed = self._compare_with_grants(self.before, after,
-                                            ["refs/heads/main", "refs/heads/other"])
-        self.assertEqual(allowed.returncode, 0, allowed.stdout + allowed.stderr)
-        self.assertIn("GRANTED derived HEAD", allowed.stdout)
+        for extra in ([], ["--push-log", self._push_log()]):
+            with self.subTest(extra=extra):
+                denied = run_audit("compare", self.before, after, *extra)
+                self.assertEqual(denied.returncode, 1, denied.stdout + denied.stderr)
+                self.assertIn("UNGRANTED derived HEAD", denied.stdout)
 
     def test_snapshot_records_head_symref(self):
         git(self.remote, "symbolic-ref", "HEAD", "refs/heads/main")
@@ -439,60 +429,16 @@ class CompareTests(unittest.TestCase):
             remote = json.load(fh)["repos"][self.repo]["remotes"]["origin"]
         self.assertEqual(remote["symrefs"]["HEAD"], "refs/heads/main")
 
-    def test_annotated_tag_peel_uses_tag_grant(self):
+    def test_annotated_tag_and_its_peel_are_ungranted(self):
         git(self.repo, "tag", "-a", "v2", "-m", "release")
         git(self.repo, "push", "-q", "origin", "v2")
         after = self._snapshot_after()
-        result = self._compare_with_grants(self.before, after, ["refs/tags/v2"])
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("refs/tags/v2^{}", result.stdout)
         denied = run_audit("compare", self.before, after)
-        self.assertEqual(denied.returncode, 1)
-
-    def test_explicit_automation_branch_grant_allows_rewrite_only_for_named_branch(self):
-        ref = "refs/heads/release-please--branches--main"
-        git(self.repo, "push", "-q", "origin", "HEAD:" + ref)
-        before = os.path.join(self.tmp, "automation-before.json")
-        snapshot(before, self.repo, env_overrides={"PATH": self.gh_bin})
-        git(self.repo, "commit", "-q", "--amend", "-m", "rewrite automation")
-        git(self.repo, "push", "-q", "--force", "origin", "HEAD:" + ref)
-        after = self._snapshot_after()
-        result = self._compare_with_grants(before, after, {
-            "refs": [ref], "allow_non_fast_forward": [ref]})
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("EXPECTED NON-FAST-FORWARD", result.stdout)
-        denied = self._compare_with_grants(before, after, [ref])
-        self.assertEqual(denied.returncode, 1)
-        self.assertIn("NON-FAST-FORWARD", denied.stdout)
-
-    def test_named_pull_ref_is_audited_not_foreign(self):
-        ref = "refs/pull/9/head"
-        git(self.repo, "push", "-q", "origin", "HEAD:" + ref)
-        before = os.path.join(self.tmp, "pull-before.json")
-        snapshot(before, self.repo, env_overrides={"PATH": self.gh_bin})
-        git(self.repo, "commit", "-q", "--amend", "-m", "rewrite pull")
-        git(self.repo, "push", "-q", "--force", "origin", "HEAD:" + ref)
-        after = self._snapshot_after()
-        result = self._compare_with_grants(before, after, [ref])
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("NON-FAST-FORWARD", result.stdout)
-        self.assertNotIn("FOREIGN", result.stdout)
-
-    def test_grants_file_repo_key_must_match_exactly(self):
-        git(self.repo, "checkout", "-q", "-b", "feature")
-        with open(os.path.join(self.repo, "f.txt"), "a") as fh:
-            fh.write("more\n")
-        git(self.repo, "commit", "-q", "-am", "feature commit")
-        git(self.repo, "push", "-q", "origin", "feature")
-        after = self._snapshot_after()
-
-        grants = os.path.join(self.tmp, "grants.json")
-        with open(grants, "w") as fh:
-            json.dump({"/some/other/repo": ["refs/heads/feature"]}, fh)
-
-        result = run_audit("compare", self.before, after, "--grants", grants)
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("UNGRANTED", result.stdout)
+        self.assertEqual(denied.returncode, 1, denied.stdout + denied.stderr)
+        for ref in ("refs/tags/v2 ", "refs/tags/v2^{} "):
+            self.assertTrue(any(f"remote 'origin' ref added: {ref}" in line and "[UNGRANTED]" in line
+                                for line in denied.stdout.splitlines()), denied.stdout)
+        self.assertIn("tag added: refs/tags/v2 ", denied.stdout)
 
     def test_releases_unavailable_on_one_side_is_unverified_and_fails_closed(self):
         # Releases unreadable on either side means the audit
@@ -508,7 +454,7 @@ class CompareTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("releases", result.stdout)
         self.assertIn("unavailable", result.stdout)
-        self.assertNotIn("every remote change is covered by a grant", result.stdout)
+        self.assertNotIn("every remote change is accounted for", result.stdout)
 
     def test_remote_unavailable_on_one_side_is_unverified_and_fails_closed(self):
         # Hand-crafted snapshots: a remote's ls-remote failed on one side.
@@ -561,39 +507,35 @@ class CompareTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("missing", result.stdout.lower())
 
-    def test_moved_ref_fast_forward_and_granted_exits_zero(self):
+    def test_logged_fast_forward_move_exits_zero(self):
+        old = self._head()
         with open(os.path.join(self.repo, "f.txt"), "a") as fh:
             fh.write("more\n")
         git(self.repo, "commit", "-q", "-am", "fast-forward move")
         git(self.repo, "push", "-q", "origin", "main")
         after = self._snapshot_after()
 
-        grants = os.path.join(self.tmp, "grants.json")
-        with open(grants, "w") as fh:
-            # HEAD (the remote's symbolic default-branch pointer) moves
-            # alongside main and needs its own grant; not the thing under test.
-            json.dump({self.repo: ["refs/heads/main", "HEAD"]}, fh)
-
-        result = run_audit("compare", self.before, after, "--grants", grants)
+        result = run_audit("compare", self.before, after, "--push-log", self._push_log((old, self._head())))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("refs/heads/main", result.stdout)
-        self.assertIn("GRANTED", result.stdout)
+        self.assertIn("[GRANTED]", result.stdout)
         self.assertNotIn("NON-FAST-FORWARD", result.stdout)
+        self.assertIn("every remote change is accounted for", result.stdout)
 
-    def test_non_fast_forward_move_is_a_violation_even_when_granted(self):
+    def test_non_fast_forward_move_is_a_violation_even_when_logged(self):
         # Rewrite history (force push) instead of moving main forward.
+        old = self._head()
         git(self.repo, "commit", "-q", "--amend", "-m", "rewritten")
         git(self.repo, "push", "-q", "--force", "origin", "main")
         after = self._snapshot_after()
 
-        grants = os.path.join(self.tmp, "grants.json")
-        with open(grants, "w") as fh:
-            json.dump({self.repo: ["refs/heads/main"]}, fh)
-
-        result = run_audit("compare", self.before, after, "--grants", grants)
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("refs/heads/main", result.stdout)
-        self.assertIn("NON-FAST-FORWARD", result.stdout)
+        logged = run_audit("compare", self.before, after, "--push-log", self._push_log((old, self._head())))
+        self.assertEqual(logged.returncode, 1, logged.stdout + logged.stderr)
+        self.assertIn("refs/heads/main", logged.stdout)
+        self.assertIn("NON-FAST-FORWARD (granted, but blocked)", logged.stdout)
+        unlogged = run_audit("compare", self.before, after)
+        self.assertEqual(unlogged.returncode, 1, unlogged.stdout + unlogged.stderr)
+        self.assertIn("NON-FAST-FORWARD UNGRANTED", unlogged.stdout)
 
     def test_moved_ref_fetch_failure_is_unverified_and_fails_closed(self):
         with open(os.path.join(self.repo, "f.txt"), "a") as fh:
@@ -616,7 +558,7 @@ class CompareTests(unittest.TestCase):
 
 class RunDirTests(unittest.TestCase):
     """Per-run audit (`begin`/`add`/`closeout`): each loop keeps its snapshots in its own run dir,
-    so concurrent loops never share a before-snapshot."""
+    so concurrent runs never share a before-snapshot."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="loop-pi-audit-run-test-")
@@ -676,520 +618,22 @@ class RunDirTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
 
 
-class AutomationTests(unittest.TestCase):
-    REF = "refs/heads/renovate/ubuntu-26.x"
-    ACTOR = "rknightion-renovate[bot]"
-    OLD = "8acbe4be3d6a8befc190d7da749644624342323b"
-    MID = "2fdc7e7c824b008333936171625b831453646a23"
-    NEW = "e477eecb22e1b97a83d6196eb63fd5da1e92b3e9"
-
-    def activity(self, ref=None, old=None, new=None, actor=None):
-        return {"ref": ref or self.REF, "before": self.OLD if old is None else old,
-                "after": self.NEW if new is None else new, "timestamp": "2026-10-02T15:21:13Z",
-                "activity_type": "force_push", "actor": {"login": actor or self.ACTOR}}
-
-    def compare(self, entries, ref=None, old=None, new=None, items=None, unavailable=False,
-                pages=None):
-        ref = ref or self.REF
-        old = self.OLD if old is None else old
-        new = self.NEW if new is None else new
+class RemovedOptionTests(unittest.TestCase):
+    def test_compare_and_closeout_reject_the_removed_options(self):
         with tempfile.TemporaryDirectory() as tmp:
-            repo = os.path.join(tmp, "repo")
-            os.mkdir(repo)
-            subprocess.run(["git", "init", "-q", repo], check=True)
-            git(repo, "remote", "add", "origin", "https://github.com/export/audit-fixture.git")
-            paths = []
-            for label, sha, timestamp in (("before", old, "2026-10-02T14:00:00Z"),
-                                          ("after", new, "2026-10-02T16:00:00Z")):
-                refs = {ref: sha} if sha else {}
-                path = os.path.join(tmp, label + ".json")
-                with open(path, "w") as fh:
-                    json.dump({"taken_at": timestamp, "repos": {repo: {
-                        "remotes": {"origin": {"available": True, "refs": refs,
-                                                "symrefs": {"HEAD": "refs/heads/trunk"}}},
-                        "tags": {"available": True, "tags": {}},
-                        "releases": {"available": True, "releases": []}}}}, fh)
-                paths.append(path)
-            grants = os.path.join(tmp, "grants.json")
-            with open(grants, "w") as fh:
-                json.dump({repo: {"automation": items if items is not None else [
-                    {"ref_prefix": "refs/heads/renovate/", "actor": self.ACTOR}]}}, fh)
-            fake = make_bin_with_gh_stub(tmp)
-            # Recorded SHAs have no local objects. Keep refusal tests offline and simulate
-            # a verified non-fast-forward, so the CLI must actually report UNGRANTED.
-            os.unlink(os.path.join(fake, "git"))
-            with open(os.path.join(fake, "git"), "w") as fh:
-                fh.write('#!/bin/sh\ncase "$*" in *" fetch "*) exit 0;; '
-                         '*" merge-base --is-ancestor "*) exit 1;; esac\n'
-                         f'exec {GIT} "$@"\n')
-            os.chmod(os.path.join(fake, "git"), 0o755)
-            with open(os.path.join(fake, "gh"), "w") as fh:
-                fh.write("#!/bin/sh\n" + ("exit 1\n" if unavailable else
-                         "printf '%s\\n' '" + json.dumps(pages if pages is not None else [entries]) + "'\n"))
-            return run_audit("compare", *paths, "--grants", grants, env_overrides={"PATH": fake})
-
-    def test_recorded_two_force_push_replay(self):
-        entries = [self.activity(old=self.MID), self.activity(new=self.MID)]
-        entries[1]["timestamp"] = "2026-10-02T14:20:31Z"
-        result = self.compare(entries)
-        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-        self.assertIn("automation", result.stdout)
-        self.assertIn(self.ACTOR, result.stdout)
-
-    def four_hops(self):
-        shas = [self.OLD, "a" * 40, self.MID, "b" * 40, self.NEW]
-        entries = [self.activity(old=old, new=new) for old, new in zip(shas, shas[1:])]
-        for index, entry in enumerate(entries):
-            entry.update(id=index, timestamp=f"2026-10-02T15:{index:02d}:00Z")
-        return entries
-
-    def test_four_hops_with_duplicate_activity_records_across_pages(self):
-        entries = self.four_hops()
-        duplicate = {**entries[1], "id": 100}  # Same transition, distinct API activity ID.
-        pages = [[entries[3], entries[2], duplicate], [entries[1], entries[0]]]
-        result = self.compare([], pages=pages)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn(f"[automation actor={self.ACTOR}]", result.stdout)
-        self.assertNotIn("UNGRANTED", result.stdout)
-
-    def test_four_hop_chain_refuses_ungranted_missing_and_gapped_hops(self):
-        for fault in ("ungranted", "missing", "gap", "duplicate-actor", "duplicate-time",
-                      "duplicate-type", "missing-first", "missing-last"):
-            entries = self.four_hops()
-            if fault == "ungranted":
-                entries[1]["actor"] = {"login": "other-app[bot]"}
-            elif fault.startswith("missing"):
-                del entries[{"missing": 1, "missing-first": 0, "missing-last": 3}[fault]]
-            elif fault == "gap":
-                entries[2]["before"] = "c" * 40
-            else:
-                duplicate = {**entries[1], "id": 100}
-                if fault == "duplicate-actor":
-                    duplicate["actor"] = {"login": "other-app[bot]"}
-                elif fault == "duplicate-time":
-                    duplicate["timestamp"] = "2026-10-02T15:01:01Z"
-                else:
-                    duplicate["activity_type"] = "push"
-                entries.insert(2, duplicate)
-            with self.subTest(fault=fault):
-                result = self.compare(list(reversed(entries)))
-                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-                self.assertIn("NON-FAST-FORWARD UNGRANTED", result.stdout)
-                self.assertNotIn("[automation actor=", result.stdout)
-
-    def test_duplicate_does_not_hide_intervening_untrusted_move(self):
-        entries = self.four_hops()
-        untrusted = self.activity(old=entries[1]["after"], new=entries[1]["before"],
-                                  actor="other-app[bot]")
-        untrusted["timestamp"] = entries[1]["timestamp"]
-        entries[2:2] = [untrusted, {**entries[1], "id": 100}]
-        result = self.compare(list(reversed(entries)))
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("NON-FAST-FORWARD UNGRANTED", result.stdout)
-
-    def test_creation_and_deletion(self):
-        zero = "0" * 40
-        for old, new in (("", self.NEW), (self.OLD, "")):
-            with self.subTest(old=old):
-                result = self.compare([self.activity(old=old or zero, new=new or zero)], old=old, new=new)
-                self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-
-    def test_untrusted_or_missing_activity_fails(self):
-        # The mixed-actor response is otherwise a complete, valid SHA chain.
-        cases = ([self.activity(old=self.MID), self.activity(new=self.MID, actor="other")], [],
-                 [self.activity(old=self.MID)], [self.activity(ref="refs/heads/other")])
-        for entries in cases:
-            with self.subTest(entries=entries):
-                self.assertEqual(self.compare(entries).returncode, 1)
-        self.assertEqual(self.compare([], unavailable=True).returncode, 1)
-
-    def test_invalid_items_are_usage_errors(self):
-        items = [{"ref": "refs/pull/1/head", "actor": self.ACTOR},
-                 {"ref_prefix": "refs/tags/", "actor": self.ACTOR},
-                 {"ref_prefix": "refs/heads/", "actor": self.ACTOR},
-                 {"ref_prefix": "refs/heads/renovate", "actor": self.ACTOR},
-                 {"ref": self.REF}, {"ref": self.REF, "actor": self.ACTOR, "unknown": True},
-                 {"ref": self.REF, "ref_prefix": "refs/heads/renovate/", "actor": self.ACTOR}]
-        for item in items:
-            with self.subTest(item=item):
-                self.assertEqual(self.compare([], items=[item]).returncode, 2)
-
-    def test_protected_and_ungranted_refs_fail(self):
-        for ref in ("refs/heads/main", "refs/heads/trunk", "refs/tags/v1", "refs/heads/root"):
-            with self.subTest(ref=ref):
-                items = [{"ref": ref, "actor": self.ACTOR}] if not ref.startswith("refs/tags/") else [
-                    {"ref_prefix": "refs/heads/renovate/", "actor": self.ACTOR}]
-                result = self.compare([self.activity(ref=ref)], ref=ref,
-                                      items=None if ref.endswith("root") else items)
-                self.assertEqual(result.returncode, 1)
-
-    def test_human_actor_grant_is_a_usage_error_even_with_matching_push_records(self):
-        actor = "rknightion"
-        for selector in ({"ref": self.REF}, {"ref_prefix": "refs/heads/renovate/"}):
-            with self.subTest(selector=selector):
-                result = self.compare([self.activity(actor=actor)],
-                                      items=[{**selector, "actor": actor}])
-                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
-                self.assertNotIn("[automation actor=", result.stdout)
-
-    def test_automation_actor_requires_a_nonempty_name_and_literal_bot_suffix(self):
-        for actor in ("", "[bot]", "dependency", "dependency[BOT]", "dependency[bot]-other"):
-            with self.subTest(actor=actor):
-                result = self.compare([], items=[{"ref": self.REF, "actor": actor}])
-                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
-
-    def test_exact_ref_only(self):
-        item = {"ref": self.REF, "actor": self.ACTOR}
-        self.assertEqual(self.compare([self.activity()], items=[item]).returncode, 0)
-        other = self.REF + "-other"
-        self.assertEqual(self.compare([self.activity(ref=other)], ref=other, items=[item]).returncode, 1)
-
-
-class ReleaseAutomationTests(unittest.TestCase):
-    """Real snapshot/compare CLI and git tags; only GitHub identity/API responses are fake."""
-
-    ACTOR = "release-please[bot]"
-    RC_ACTOR = "github-actions[bot]"
-
-    def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="loop-pi-audit-release-test-")
-        self.repo, self.remote = init_repo_with_remote(self.tmp, "repo")
-        git(self.remote, "symbolic-ref", "HEAD", "refs/heads/main")
-        self.fake = make_bin_with_gh_stub(self.tmp)
-        os.unlink(os.path.join(self.fake, "git"))
-        self.url = "https://github.com/export/audit-fixture.git"
-        self.write_git_stub()
-        self.feed = os.path.join(self.tmp, "release.json")
-        self.calls = os.path.join(self.tmp, "calls.jsonl")
-        self.listing = []
-        self.set_api({})
-        self.before = os.path.join(self.tmp, "before.json")
-        self.after = os.path.join(self.tmp, "after.json")
-        self.env = {"PATH": self.fake}
-        snapshot(self.before, self.repo, env_overrides=self.env)
-
-    def tearDown(self):
-        shutil.rmtree(self.tmp, ignore_errors=True)
-
-    def write_git_stub(self):
-        path = os.path.join(self.fake, "git")
-        with open(path, "w") as fh:
-            fh.write('#!/bin/sh\ncase "$*" in *"remote get-url"*) echo ' + self.url
-                     + f'; exit 0;; esac\nexec {GIT} "$@"\n')
-        os.chmod(path, 0o755)
-
-    def set_api(self, response, fails=False, raw=None):
-        with open(self.feed, "w") as fh:
-            fh.write(json.dumps(response) if raw is None else raw)
-        with open(os.path.join(self.fake, "gh"), "w") as fh:
-            fh.write(f'#!{sys.executable}\nimport json, sys\n'
-                     f'with open({self.calls!r}, "a") as f: f.write(json.dumps(sys.argv[1:]) + "\\n")\n'
-                     'if sys.argv[1] == "api":\n'
-                     + ('    sys.exit(1)\n' if fails else
-                        f'    print(open({self.feed!r}).read()); sys.exit(0)\n'))
-            fh.write(f'print({json.dumps(self.listing)!r})\n')
-
-    def release(self, tag, actor=None, annotated=False):
-        git(self.repo, "tag", *(["-a", "-m", "release"] if annotated else []), tag)
-        git(self.repo, "push", "-q", "origin", tag)
-        self.listing = [{"tagName": tag}]
-        self.set_api({"tag_name": tag, "author": {"login": actor or self.ACTOR}})
-        snapshot(self.after, self.repo, env_overrides=self.env)
-
-    def compare(self, items=None):
-        grants = os.path.join(self.tmp, "grants.json")
-        with open(grants, "w") as fh:
-            json.dump({self.repo: {"automation": items if items is not None else [
-                {"ref_prefix": "refs/tags/v", "actor": self.ACTOR},
-                {"ref_prefix": "refs/tags/v", "actor": self.RC_ACTOR}]}}, fh)
-        return run_audit("compare", self.before, self.after, "--grants", grants,
-                         env_overrides=self.env)
-
-    def test_stable_and_rc_release_authors_cover_all_added_surfaces(self):
-        # Includes annotated peel, local tag and release; these are the actual closeout surfaces.
-        self.release("v1.2.3", annotated=True)
-        result = self.compare()
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(result.stdout.count(f"[automation actor={self.ACTOR}]"), 4)
-        with open(self.calls) as fh:
-            calls = [json.loads(line) for line in fh if json.loads(line)[0] == "api"]
-        self.assertEqual(calls, [["api", "--hostname", "github.com",
-                                 "repos/export/audit-fixture/releases/tags/v1.2.3"]])
-        os.remove(self.calls)
-        git(self.repo, "tag", "-d", "v1.2.3")
-        git(self.repo, "push", "-q", "origin", "--delete", "v1.2.3")
-        self.release("v1.2.4-rc.7", actor=self.RC_ACTOR)
-        result = self.compare()
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(result.stdout.count(f"[automation actor={self.RC_ACTOR}]"), 3)
-
-    def test_untrusted_missing_and_failed_release_lookups_refuse(self):
-        tag = "v1.2.3"
-        self.release(tag)
-        cases = [{"tag_name": tag, "author": {"login": "other-app[bot]"}},
-                 {"tag_name": tag, "author": {"login": "someone"}},
-                 {"tag_name": tag}, {"tag_name": tag, "author": None},
-                 {"tag_name": "v9.9.9", "author": {"login": self.ACTOR}}, [], None]
-        for response in cases:
-            with self.subTest(response=response):
-                self.set_api(response)
-                result = self.compare()
-                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-                self.assertNotIn("[automation actor=", result.stdout)
-                self.assertEqual(result.stdout.count("[UNGRANTED]"), 3)
-        for kwargs in ({"fails": True}, {"raw": "not-json"}):
-            with self.subTest(kwargs=kwargs):
-                self.set_api({}, **kwargs)
-                self.assertEqual(self.compare().returncode, 1)
-
-    def test_exact_tag_grant_does_not_cover_another_tag(self):
-        self.release("v1.2.3")
-        self.assertEqual(self.compare([{"ref": "refs/tags/v1.2.3", "actor": self.ACTOR}]).returncode, 0)
-        self.assertEqual(self.compare([{"ref": "refs/tags/v1.2.4", "actor": self.ACTOR}]).returncode, 1)
-        self.assertEqual(self.compare([{"ref_prefix": "refs/heads/v", "actor": self.ACTOR}]).returncode, 2)
-
-    def test_existing_release_author_does_not_authorize_deletion_or_retag(self):
-        self.release("v1.2.3")
-        shutil.copyfile(self.after, self.before)
-        git(self.repo, "commit", "-q", "--allow-empty", "-m", "retag")
-        git(self.repo, "tag", "-f", "v1.2.3")
-        git(self.repo, "push", "-q", "--force", "origin", "v1.2.3")
-        snapshot(self.after, self.repo, env_overrides=self.env)
-        result = self.compare()
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertNotIn("[automation actor=", result.stdout)
-        git(self.repo, "tag", "-d", "v1.2.3")
-        git(self.repo, "push", "-q", "origin", "--delete", "v1.2.3")
-        self.listing = []
-        self.set_api({"tag_name": "v1.2.3", "author": {"login": self.ACTOR}})
-        snapshot(self.after, self.repo, env_overrides=self.env)
-        result = self.compare()
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("release removed: v1.2.3 [UNGRANTED]", result.stdout)
-        self.assertNotIn("[automation actor=", result.stdout)
-
-    def test_tag_author_does_not_cover_branch_or_unknown_remote_identity(self):
-        self.release("v1.2.3")
-        git(self.repo, "commit", "-q", "--allow-empty", "-m", "unlogged")
-        git(self.repo, "push", "-q", "origin", "main")
-        snapshot(self.after, self.repo, env_overrides=self.env)
-        result = self.compare()
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("UNGRANTED derived HEAD", result.stdout)
-        self.assertIn("ref moved: refs/heads/main", result.stdout)
-        for url in ("https://forge.example.org/export/audit-fixture.git", self.remote):
-            with self.subTest(url=url):
-                self.url = url
-                self.write_git_stub()
-                for path in (self.before, self.after):
-                    with open(path) as fh:
-                        data = json.load(fh)
-                    data["repos"][self.repo]["remotes"]["origin"]["url"] = url
-                    with open(path, "w") as fh:
-                        json.dump(data, fh)
-                result = self.compare()
-                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-                self.assertNotIn("[automation actor=", result.stdout)
-
-    def test_lookup_uses_snapshot_identity_not_a_reconfigured_live_remote(self):
-        self.release("v1.2.3")
-        self.url = "https://github.com/other/unrelated.git"
-        self.write_git_stub()
-        result = self.compare()
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        with open(self.calls) as fh:
-            calls = [json.loads(line) for line in fh if json.loads(line)[0] == "api"]
-        self.assertEqual(calls, [["api", "--hostname", "github.com",
-                                 "repos/export/audit-fixture/releases/tags/v1.2.3"]])
-
-    def test_missing_or_changed_snapshot_identity_cannot_attribute_tags(self):
-        self.release("v1.2.3")
-        with open(self.after) as fh:
-            original = json.load(fh)
-        for url in (None, "https://github.com/other/unrelated.git"):
-            with self.subTest(url=url):
-                data = json.loads(json.dumps(original))
-                remote = data["repos"][self.repo]["remotes"]["origin"]
-                if url is None:
-                    remote.pop("url")
-                else:
-                    remote["url"] = url
-                with open(self.after, "w") as fh:
-                    json.dump(data, fh)
-                result = self.compare()
-                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-                self.assertNotIn("[automation actor=", result.stdout)
-
-
-class OpsReleaseTests(unittest.TestCase):
-    """`--ops`: a release-kind ops entry covers tags and releases added during the run, nothing else."""
-
-    def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="loop-pi-audit-ops-test-")
-        self.repo, self.remote = init_repo_with_remote(self.tmp, "repo")
-        self.gh_bin = make_bin_with_gh_stub(self.tmp, '[{"tagName": "v8"}]')
-        self.before = os.path.join(self.tmp, "before.json")
-        snapshot(self.before, self.repo, env_overrides={"PATH": self.gh_bin})
-
-    def tearDown(self):
-        shutil.rmtree(self.tmp, ignore_errors=True)
-
-    def set_releases(self, releases_json):
-        with open(os.path.join(self.gh_bin, "gh"), "w", encoding="utf-8") as fh:
-            fh.write(f"#!/bin/sh\necho '{releases_json}'\n")
-
-    def ops_file(self, *kinds, raw=None, holder=None):
-        """The ops file at `<holder>/codex/ops-c-loop1.json` (default holder: this suite's repo);
-        `holder=False` writes it outside any codex/ directory."""
-        if holder is False:
-            path = os.path.join(self.tmp, "ops.json")
-        else:
-            codex = os.path.join(self.repo if holder is None else holder, "codex")
-            os.makedirs(codex, exist_ok=True)
-            path = os.path.join(codex, "ops-c-loop1.json")
-        with open(path, "w", encoding="utf-8") as fh:
-            if raw is not None:
-                fh.write(raw)
-            else:
-                json.dump({"v": 1, "ops": [{"surface": f"{k}:svc", "kind": k, "allow": ["^x$"]} for k in kinds]}, fh)
-        return path
-
-    def release_v9(self):
-        """A run that pushed tag v9 and published its release (v8 stays)."""
-        git(self.repo, "tag", "v9")
-        git(self.repo, "push", "-q", "origin", "v9")
-        self.set_releases('[{"tagName": "v8"}, {"tagName": "v9"}]')
-        after = os.path.join(self.tmp, "after.json")
-        snapshot(after, self.repo, env_overrides={"PATH": self.gh_bin})
-        return after
-
-    def test_new_tag_and_release_without_ops_are_ungranted(self):
-        result = run_audit("compare", self.before, self.release_v9())
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("refs/tags/v9", result.stdout)
-        self.assertIn("release added: v9 [UNGRANTED]", result.stdout)
-
-    def test_ops_without_a_release_entry_covers_nothing(self):
-        result = run_audit("compare", self.before, self.release_v9(), "--ops", self.ops_file("deploy", "secret-write"))
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertNotIn("GRANTED ops release", result.stdout)
-
-    def test_release_entry_covers_the_new_tag_and_release(self):
-        result = run_audit("compare", self.before, self.release_v9(), "--ops", self.ops_file("deploy", "release"))
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("ref added: refs/tags/v9", result.stdout)
-        self.assertIn("release added: v9 [GRANTED ops release]", result.stdout)
-        self.assertNotIn("UNGRANTED", result.stdout)
-
-    def test_release_entry_does_not_cover_a_removed_release_or_a_branch(self):
-        git(self.repo, "push", "-q", "origin", "HEAD:refs/heads/stray")
-        self.set_releases("[]")
-        after = os.path.join(self.tmp, "after.json")
-        snapshot(after, self.repo, env_overrides={"PATH": self.gh_bin})
-        result = run_audit("compare", self.before, after, "--ops", self.ops_file("release"))
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("release removed: v8 [UNGRANTED]", result.stdout)
-        self.assertIn("refs/heads/stray", result.stdout)
-
-    def test_release_entry_covers_only_the_ops_files_own_repo(self):
-        other, _ = init_repo_with_remote(self.tmp, "other")
-        before = os.path.join(self.tmp, "before-two.json")
-        snapshot(before, self.repo, other, env_overrides={"PATH": self.gh_bin})
-        for repo in (self.repo, other):
-            git(repo, "tag", "v9")
-            git(repo, "push", "-q", "origin", "v9")
-        self.set_releases('[{"tagName": "v8"}, {"tagName": "v9"}]')
-        after = os.path.join(self.tmp, "after-two.json")
-        snapshot(after, self.repo, other, env_overrides={"PATH": self.gh_bin})
-        result = run_audit("compare", before, after, "--ops", self.ops_file("release"))
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn(f"[{self.repo}] release added: v9 [GRANTED ops release]", result.stdout)
-        self.assertIn(f"[{other}] release added: v9 [UNGRANTED]", result.stdout)
-        self.assertIn(f"[{other}] remote 'origin' ref added: refs/tags/v9", result.stdout)
-        other_lines = [line for line in result.stdout.splitlines() if line.startswith(f"[{other}]")]
-        self.assertTrue(other_lines)
-        self.assertFalse([line for line in other_lines if "GRANTED ops release" in line], other_lines)
-
-    def test_release_entry_outside_codex_covers_nothing(self):
-        result = run_audit("compare", self.before, self.release_v9(), "--ops", self.ops_file("release", holder=False))
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertNotIn("GRANTED ops release", result.stdout)
-        self.assertIn("release added: v9 [UNGRANTED]", result.stdout)
-        self.assertIn("not in a codex/ directory", result.stderr)
-
-    def test_malformed_ops_file_is_a_usage_error(self):
-        after = self.release_v9()
-        for raw in ('{"v": 2, "ops": []}', '{"v": 1, "ops": [{"surface": "x", "kind": "anything"}]}', "not json"):
-            result = run_audit("compare", self.before, after, "--ops", self.ops_file(raw=raw))
-            self.assertEqual(result.returncode, 2, raw + result.stdout + result.stderr)
-            self.assertIn("invalid ops file", result.stderr)
-
-    def test_grants_schema_is_unchanged_alongside_ops(self):
-        grants = os.path.join(self.tmp, "grants.json")
-        with open(grants, "w", encoding="utf-8") as fh:
-            json.dump({self.repo: ["refs/tags/v9"]}, fh)
-        result = run_audit("compare", self.before, self.release_v9(), "--grants", grants, "--ops", self.ops_file("deploy"))
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("release added: v9 [GRANTED]", result.stdout)
-
-    def test_closeout_passes_ops_through(self):
-        run_dir = os.path.join(self.tmp, "run")
-        os.makedirs(run_dir)
-        env = {"PATH": self.gh_bin, "LOOP_PI_RUN_DIR": run_dir}
-        self.assertEqual(run_audit("begin", self.repo, env_overrides=env).returncode, 0)
-        git(self.repo, "tag", "v9")
-        git(self.repo, "push", "-q", "origin", "v9")
-        self.set_releases('[{"tagName": "v8"}, {"tagName": "v9"}]')
-        without = run_audit("closeout", env_overrides=env)
-        self.assertEqual(without.returncode, 1, without.stdout + without.stderr)
-        result = run_audit("closeout", "--ops", self.ops_file("release"), env_overrides=env)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("GRANTED ops release", result.stdout)
-
-    def sha256_of(self, path):
-        with open(path, "rb") as fh:
-            return hashlib.sha256(fh.read()).hexdigest()
-
-    def test_ops_sha256_must_match_the_ops_file(self):
-        after = self.release_v9()
-        ops = self.ops_file("release")
-        good = run_audit("compare", self.before, after, "--ops", ops, "--ops-sha256", self.sha256_of(ops))
-        self.assertEqual(good.returncode, 0, good.stdout + good.stderr)
-        self.assertIn("GRANTED ops release", good.stdout)
-        self.assertNotIn("unverified", good.stderr)
-        bad = run_audit("compare", self.before, after, "--ops", ops, "--ops-sha256", "0" * 64)
-        self.assertEqual(bad.returncode, 2, bad.stdout + bad.stderr)
-        self.assertIn("does not match", bad.stderr)
-        self.assertNotIn("GRANTED ops release", bad.stdout)
-
-    def test_ops_without_a_sha256_works_but_warns_unverified(self):
-        result = run_audit("compare", self.before, self.release_v9(), "--ops", self.ops_file("release"))
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("unverified", result.stderr)
-
-    def test_closeout_refuses_an_ops_file_that_changed_since_launch(self):
-        run_dir = os.path.join(self.tmp, "run")
-        os.makedirs(run_dir)
-        env = {"PATH": self.gh_bin, "LOOP_PI_RUN_DIR": run_dir}
-        self.assertEqual(run_audit("begin", self.repo, env_overrides=env).returncode, 0)
-        ops = self.ops_file("deploy")
-        frozen = self.sha256_of(ops)
-        git(self.repo, "tag", "v9")
-        git(self.repo, "push", "-q", "origin", "v9")
-        self.set_releases('[{"tagName": "v8"}, {"tagName": "v9"}]')
-        self.ops_file("release")  # rewritten mid-run to grant a release
-        result = run_audit("closeout", "--ops", ops, "--ops-sha256", frozen, env_overrides=env)
-        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
-        self.assertIn("does not match", result.stderr)
-        self.assertNotIn("GRANTED ops release", result.stdout)
+            for option in ("--grants", "--grants-sha256", "--ops", "--ops-sha256"):
+                for argv in (["compare", os.path.join(tmp, "before.json"), os.path.join(tmp, "after.json")],
+                             ["closeout", "--run-dir", tmp]):
+                    with self.subTest(command=argv[0], option=option):
+                        result = run_audit(*argv, option, os.path.join(tmp, "x.json"))
+                        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                        self.assertIn(f"unrecognized arguments: {option}", result.stderr)
+            self.assertFalse(os.path.exists(os.path.join(tmp, "audit-after.json")))
 
 
 class ProtoDefaultBranchTests(unittest.TestCase):
-    """Protocol 2 (`loop-pi-proto` in the run dir): a move of the default branch is granted by the
-    push log, `backlog/`-only commits or a bot actor, never by a `refs/heads/<default>` grant."""
-
-    BOT = "renovate[bot]"
-    BOT_EMAIL = "29139614+renovate[bot]@users.noreply.github.com"
+    """With the run dir's `loop-pi-proto` marker, or protocol evidence retained in a snapshot, a move
+    of the default branch is accounted for only by the push log or `backlog/`-only commits."""
 
     def setUp(self):
         self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="loop-pi-audit-proto-test-"))
@@ -1238,32 +682,27 @@ class ProtoDefaultBranchTests(unittest.TestCase):
         with open(self.log_path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(entry) + "\n")
 
-    def grants(self, data, name="grants.json"):
-        path = os.path.join(self.tmp, name)
-        with open(path, "w", encoding="utf-8") as fh:
-            json.dump(data, fh)
-        with open(path, "rb") as fh:
-            return path, hashlib.sha256(fh.read()).hexdigest()
+    def closeout(self, *extra):
+        return run_audit("closeout", *extra, env_overrides=self.env)
 
-    def closeout(self, grants=None, *extra):
-        args = ["closeout"]
-        if grants:
-            args += ["--grants", grants[0], "--grants-sha256", grants[1]]
-        return run_audit(*args, *extra, env_overrides=self.env)
+    def note_names(self, result, sha):
+        """The commit-by-commit verdict ran: a `note:` line names the unaccounted commit."""
+        return any(" note: " in line and f"commit {sha[:12]} " in line for line in result.stdout.splitlines())
 
     def ready(self):
         self.proto()
         self.begin()
         self.start = self.head(self.repo)
 
-    def test_a_logged_push_grants_the_default_branch_move(self):
+    def test_a_logged_push_accounts_for_the_default_branch_move(self):
         self.ready()
         c1 = self.commit(self.repo, "f.txt", "one")
         c2 = self.commit(self.repo, "f.txt", "two")
         self.logged_push(self.repo, self.start, c2)
-        result = self.closeout(self.grants({self.repo: ["HEAD"]}))
+        result = self.closeout()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("refs/heads/main", result.stdout)
+        self.assertIn("GRANTED derived HEAD", result.stdout)
         self.assertNotIn("UNGRANTED", result.stdout)
         self.assertTrue(c1)
 
@@ -1304,20 +743,25 @@ class ProtoDefaultBranchTests(unittest.TestCase):
 
     def test_deleting_the_marker_cannot_downgrade_an_armed_snapshot(self):
         self.ready()
-        self.commit(self.other, "g.txt", "unlogged")
-        git(self.other, "push", "-q", "origin", "main")
+        c = self.commit(self.repo, "f.txt", "ours")
+        self.logged_push(self.repo, self.start, c)
         os.unlink(os.path.join(self.run_dir, "loop-pi-proto"))
-        result = self.closeout(self.grants({self.repo: ["refs/heads/main", "HEAD"]}))
+        result = self.closeout()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("UNGRANTED", result.stdout)
+        git(self.other, "pull", "-q", "--ff-only", "origin", "main")
+        unlogged = self.commit(self.other, "g.txt", "unlogged")
+        git(self.other, "push", "-q", "origin", "main")
+        result = self.closeout()
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("UNGRANTED", result.stdout)
-        self.assertIn("ignored", result.stderr)
+        self.assertTrue(self.note_names(result, unlogged), result.stdout)
 
     def test_arm_retains_pre_arm_snapshot_without_resnapshotting(self):
         self.begin()
         before_path = os.path.join(self.run_dir, "audit-before.json")
         with open(before_path, encoding="utf-8") as fh:
             original = json.load(fh)
-        self.commit(self.other, "g.txt", "unlogged before arm")
+        unlogged = self.commit(self.other, "g.txt", "unlogged before arm")
         git(self.other, "push", "-q", "origin", "main")
         self.proto()
         retained = run_audit("retain-protocol", env_overrides=self.env)
@@ -1325,10 +769,10 @@ class ProtoDefaultBranchTests(unittest.TestCase):
         with open(before_path, encoding="utf-8") as fh:
             self.assertEqual(json.load(fh), {**original, "protocol": 2})
         os.unlink(os.path.join(self.run_dir, "loop-pi-proto"))
-        result = self.closeout(self.grants({self.repo: ["refs/heads/main", "HEAD"]}))
+        result = self.closeout()
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("UNGRANTED", result.stdout)
-        self.assertIn("ignored", result.stderr)
+        self.assertTrue(self.note_names(result, unlogged), result.stdout)
 
     def test_protocol_retention_requires_marker_and_never_invents_a_snapshot(self):
         result = run_audit("retain-protocol", env_overrides=self.env)
@@ -1343,13 +787,16 @@ class ProtoDefaultBranchTests(unittest.TestCase):
         # The launcher takes the initial snapshot before continuation arms the root.
         self.begin()
         self.proto()
-        self.commit(self.other, "g.txt", "unlogged")
+        unlogged = self.commit(self.other, "g.txt", "unlogged")
         git(self.other, "push", "-q", "origin", "main")
         os.unlink(os.path.join(self.run_dir, "loop-pi-proto"))
-        result = self.closeout(self.grants({self.repo: ["refs/heads/main", "HEAD"]}),
-                               "--push-log", self.log_path)
+        legacy = self.closeout()
+        self.assertEqual(legacy.returncode, 1, legacy.stdout + legacy.stderr)
+        self.assertFalse(self.note_names(legacy, unlogged), legacy.stdout)
+        result = self.closeout("--push-log", self.log_path)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("UNGRANTED", result.stdout)
+        self.assertTrue(self.note_names(result, unlogged), result.stdout)
 
     def test_a_foreign_commit_between_two_logged_pushes_is_flagged(self):
         self.ready()
@@ -1361,7 +808,7 @@ class ProtoDefaultBranchTests(unittest.TestCase):
         git(self.repo, "pull", "-q", "--ff-only", "origin", "main")
         g = self.commit(self.repo, "f.txt", "ours two")
         self.logged_push(self.repo, foreign, g)
-        result = self.closeout(self.grants({self.repo: ["HEAD"]}))
+        result = self.closeout()
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("UNGRANTED", result.stdout)
         self.assertIn(foreign[:12], result.stdout)
@@ -1374,7 +821,7 @@ class ProtoDefaultBranchTests(unittest.TestCase):
         git(self.other, "pull", "-q", "--ff-only", "origin", "main")
         late = self.commit(self.other, "g.txt", "late")
         git(self.other, "push", "-q", "origin", "main")
-        result = self.closeout(self.grants({self.repo: ["HEAD"]}))
+        result = self.closeout()
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn(late[:12], result.stdout)
 
@@ -1382,7 +829,7 @@ class ProtoDefaultBranchTests(unittest.TestCase):
         self.ready()
         task = self.commit(self.other, "backlog/tasks/x.md", "task note")
         git(self.other, "push", "-q", "origin", "main")
-        result = self.closeout(self.grants({self.repo: ["HEAD"]}))
+        result = self.closeout()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("UNGRANTED", result.stdout)
         self.assertTrue(task)
@@ -1395,113 +842,8 @@ class ProtoDefaultBranchTests(unittest.TestCase):
         git(self.other, "add", "--", "backlog/y.md", "code.txt")
         git(self.other, "commit", "-q", "-m", "mixed")
         git(self.other, "push", "-q", "origin", "main")
-        again = self.closeout(self.grants({self.repo: ["HEAD"]}))
+        again = self.closeout()
         self.assertEqual(again.returncode, 1, again.stdout + again.stderr)
-
-    def github_fixture(self, entries, gh_fails=False):
-        """Make the remote look like a GitHub repo and `gh api` answer with `entries` (activity records).
-        `git remote get-url` is the only git call faked; everything else is the real git."""
-        for name in ("git", "gh"):
-            path = os.path.join(self.gh_bin, name)
-            if os.path.lexists(path):
-                os.unlink(path)
-        feed = os.path.join(self.tmp, "activity.json")
-        with open(feed, "w", encoding="utf-8") as fh:
-            json.dump([entries], fh)
-        with open(os.path.join(self.gh_bin, "git"), "w", encoding="utf-8") as fh:
-            fh.write('#!/bin/sh\ncase "$*" in *"remote get-url"*) echo https://github.com/export/audit-fixture.git; '
-                     f'exit 0;; esac\nexec {GIT} "$@"\n')
-        with open(os.path.join(self.gh_bin, "gh"), "w", encoding="utf-8") as fh:
-            fh.write('#!/bin/sh\ncase "$1" in api) ' + ("exit 1" if gh_fails else f"/bin/cat {feed}; exit 0")
-                     + ";; esac\necho '[]'\n")
-        for name in ("git", "gh"):
-            os.chmod(os.path.join(self.gh_bin, name), 0o755)
-
-    def activity(self, before, after, actor=None, kind="push", ref="refs/heads/main"):
-        return {"ref": ref, "before": before, "after": after, "activity_type": kind,
-                "timestamp": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "actor": {"login": actor or self.BOT}}
-
-    def bot_commit_on_main(self):
-        """A commit on main whose author AND committer metadata name the bot, pushed by a human."""
-        self.ready()
-        env = {"GIT_COMMITTER_NAME": self.BOT, "GIT_COMMITTER_EMAIL": self.BOT_EMAIL}
-        sha = self.commit(self.other, "dep.txt", "bump", author=f"{self.BOT} <{self.BOT_EMAIL}>", env=env)
-        git(self.other, "push", "-q", "origin", "main")
-        time.sleep(1.1)  # snapshot times have one-second resolution and the window must be non-empty
-        return sha
-
-    def test_bot_metadata_alone_grants_nothing(self):
-        sha = self.bot_commit_on_main()
-        self.github_fixture([])
-        declared = self.grants({self.repo: {"refs": ["HEAD"], "bot_actors": [self.BOT]}})
-        result = self.closeout(declared)
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn(sha[:12], result.stdout)
-
-    def test_a_commit_in_a_range_the_declared_bot_pushed_or_merged_is_granted(self):
-        sha = self.bot_commit_on_main()
-        declared = self.grants({self.repo: {"refs": ["HEAD"], "bot_actors": [self.BOT]}})
-        for kind in ("push", "force_push", "pr_merge", "merge_queue_merge"):
-            with self.subTest(kind=kind):
-                self.github_fixture([self.activity(self.start, sha, kind=kind)])
-                result = self.closeout(declared)
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-
-    def test_activity_that_does_not_show_the_declared_bot_grants_nothing(self):
-        sha = self.bot_commit_on_main()
-        declared = self.grants({self.repo: {"refs": ["HEAD"], "bot_actors": [self.BOT]}})
-        elsewhere = "1" * 40
-        cases = {
-            "other actor": ([self.activity(self.start, sha, actor="other-app[bot]")], False),
-            "human actor": ([self.activity(self.start, sha, actor="someone")], False),
-            "range excludes the commit": ([self.activity(self.start, elsewhere)], False),
-            "ref mismatch": ([self.activity(self.start, sha, ref="refs/heads/other")], False),
-            "creation record": ([self.activity("0" * 40, sha)], False),
-            "unrelated type": ([self.activity(self.start, sha, kind="branch_creation")], False),
-            "api failure": ([], True),
-        }
-        for label, (entries, fails) in cases.items():
-            with self.subTest(label):
-                self.github_fixture(entries, gh_fails=fails)
-                result = self.closeout(declared)
-                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-                self.assertIn(sha[:12], result.stdout)
-
-    def test_an_undeclared_bot_is_not_granted_even_with_its_push_records(self):
-        sha = self.bot_commit_on_main()
-        self.github_fixture([self.activity(self.start, sha)])
-        self.assertEqual(self.closeout(self.grants({self.repo: ["HEAD"]}, "plain.json")).returncode, 1)
-        wrong = self.grants({self.repo: {"refs": ["HEAD"], "bot_actors": ["other-app[bot]"]}}, "wrong.json")
-        self.assertEqual(self.closeout(wrong).returncode, 1)
-
-    def test_every_bot_actors_entry_must_be_an_exact_bot_login(self):
-        self.ready()
-        for bad in ("renovate", "[bot]", "", "renovate[BOT]", "a b[bot]", "renovate[bot]x", "ren.ovate[bot]"):
-            with self.subTest(entry=bad):
-                grants = self.grants({self.repo: {"refs": [], "bot_actors": [self.BOT, bad]}}, "bad.json")
-                result = self.closeout(grants)
-                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
-                self.assertIn("bot_actors", result.stderr)
-
-    def test_a_default_branch_ref_grant_is_ignored_with_a_warning(self):
-        self.ready()
-        self.commit(self.other, "g.txt", "unlogged")
-        git(self.other, "push", "-q", "origin", "main")
-        result = self.closeout(self.grants({self.repo: ["refs/heads/main", "HEAD"]}))
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("refs/heads/main", result.stderr)
-        self.assertIn("ignored", result.stderr)
-
-    def test_a_wrong_grants_sha256_fails_and_grants_nothing(self):
-        self.ready()
-        c = self.commit(self.repo, "f.txt", "ours")
-        self.logged_push(self.repo, self.start, c)
-        path, _ = self.grants({self.repo: ["HEAD"]})
-        result = self.closeout((path, "0" * 64))
-        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
-        self.assertIn("does not match", result.stderr)
-        self.assertNotIn("GRANTED", result.stdout)
 
     def test_explicit_push_log_path_is_used(self):
         self.ready()
@@ -1509,51 +851,55 @@ class ProtoDefaultBranchTests(unittest.TestCase):
         self.logged_push(self.repo, self.start, c)
         elsewhere = os.path.join(self.tmp, "elsewhere.jsonl")
         os.rename(self.log_path, elsewhere)
-        grants = self.grants({self.repo: ["HEAD"]})
-        self.assertEqual(self.closeout(grants).returncode, 1)
-        result = self.closeout(grants, "--push-log", elsewhere)
+        self.assertEqual(self.closeout().returncode, 1)
+        result = self.closeout("--push-log", elsewhere)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_a_push_logged_for_an_independent_clone_grants_nothing(self):
+    def test_a_push_logged_for_an_independent_clone_accounts_for_nothing(self):
         self.ready()
         c = self.commit(self.other, "f.txt", "clone work")
         self.logged_push(self.other, self.start, c, log_repo=self.other)
-        result = self.closeout(self.grants({self.repo: ["HEAD"]}))
+        result = self.closeout()
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn(c[:12], result.stdout)
 
     def test_compare_keeps_snapshot_protocol_without_run_dir(self):
         self.ready()
-        self.commit(self.other, "g.txt", "unlogged")
+        self.commit(self.other, "backlog/tasks/x.md", "task note")
         git(self.other, "push", "-q", "origin", "main")
-        self.closeout()
+        self.assertEqual(self.closeout().returncode, 0)
         before = os.path.join(self.run_dir, "audit-before.json")
         after = os.path.join(self.run_dir, "audit-after.json")
-        path, digest = self.grants({self.repo: ["refs/heads/main", "HEAD"]})
-        result = run_audit("compare", before, after, "--grants", path, "--grants-sha256", digest,
-                           env_overrides=self.env)
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("UNGRANTED", result.stdout)
+        # Without protocol evidence this backlog-only move would be UNGRANTED.
+        result = run_audit("compare", before, after, env_overrides=self.env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("UNGRANTED", result.stdout)
+        self.assertIn("no push log", result.stderr)
 
-    def test_a_push_logged_for_another_repo_or_ref_grants_nothing(self):
+    def test_a_push_logged_for_another_repo_or_ref_accounts_for_nothing(self):
         self.ready()
         c = self.commit(self.repo, "f.txt", "ours")
         self.logged_push(self.repo, self.start, c, log_repo=os.path.join(self.tmp, "elsewhere"))
-        self.assertEqual(self.closeout(self.grants({self.repo: ["HEAD"]})).returncode, 1)
+        self.assertEqual(self.closeout().returncode, 1)
 
-    def test_other_branches_keep_their_ref_grants(self):
+    def test_other_branches_are_not_accounted_for_by_the_push_log(self):
         self.ready()
-        git(self.repo, "push", "-q", "origin", "HEAD:refs/heads/feature")
-        self.assertEqual(self.closeout(self.grants({self.repo: ["refs/heads/feature"]})).returncode, 0)
+        c = self.commit(self.repo, "f.txt", "feature")
+        self.logged_push(self.repo, None, c, ref="refs/heads/feature")
+        result = self.closeout()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertTrue(any("ref added: refs/heads/feature " in line and "[UNGRANTED]" in line
+                            for line in result.stdout.splitlines()), result.stdout)
 
-    def test_without_the_marker_a_default_branch_grant_still_covers_the_move(self):
+    def test_without_protocol_evidence_a_logged_default_branch_move_is_ungranted(self):
         self.begin()
-        self.commit(self.other, "g.txt", "unlogged")
-        git(self.other, "push", "-q", "origin", "main")
-        path, _ = self.grants({self.repo: ["refs/heads/main", "HEAD"]})
-        result = run_audit("closeout", "--grants", path, env_overrides=self.env)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertNotIn("ignored", result.stderr)
+        start = self.head(self.repo)
+        c = self.commit(self.repo, "f.txt", "ours")
+        self.logged_push(self.repo, start, c)
+        result = self.closeout()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("UNGRANTED", result.stdout)
+        self.assertNotIn(" note: ", result.stdout)
 
 
 class AbsoluteEndpointTests(unittest.TestCase):
@@ -1572,7 +918,7 @@ class AbsoluteEndpointTests(unittest.TestCase):
 
 
 class AliasEndpointTests(unittest.TestCase):
-    """Protocol 2 alias reconciliation: a second checkout whose remote URL is byte-identical to the
+    """Alias reconciliation: a second checkout whose remote URL is byte-identical to the
     canonical repository's receives only the canonical's journaled root-push ranges. Anything else
     (other URL spellings, changed endpoints, unjournaled watcher pushes, foreign commits) stays
     UNGRANTED. The remote is a real local bare repository; only snapshot URL text is rewritten for
@@ -1797,293 +1143,6 @@ class AliasEndpointTests(unittest.TestCase):
                 if expected:
                     self.assert_alias_ungranted(result, c)
                     self.assertIn("[GRANTED]", self.lines(result, self.repo))
-
-
-class InducedEffectsTests(unittest.TestCase):
-    """Real compare CLI and local ancestry; gh is faked only at the subprocess edge."""
-
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="audit-induced-")
-        self.addCleanup(self.tmp.cleanup)
-        self.repo, self.remote = init_repo_with_remote(self.tmp.name, "repo")
-        git(self.remote, "symbolic-ref", "HEAD", "refs/heads/main")
-        self.ref = "refs/heads/automation/exact"
-        self.old = git(self.repo, "rev-parse", "HEAD").stdout.strip()
-        self.publication = self.old
-        git(self.repo, "push", "-q", "origin", f"HEAD:{self.ref}")
-        self.fake = make_bin_with_gh_stub(self.tmp.name)
-        self.env = {"PATH": self.fake}
-        self.before = os.path.join(self.tmp.name, "before.json")
-        self.after = os.path.join(self.tmp.name, "after.json")
-        snapshot(self.before, self.repo, env_overrides=self.env)
-        git(self.repo, "commit", "--allow-empty", "-q", "-m", "effect")
-        self.new = git(self.repo, "rev-parse", "HEAD").stdout.strip()
-        self.set_after()
-        self.url = "https://github.com/export/audit-fixture.git"
-        for path in (self.before, self.after):
-            with open(path) as fh:
-                data = json.load(fh)
-            data["repos"][self.repo]["remotes"]["origin"]["url"] = self.url
-            with open(path, "w") as fh:
-                json.dump(data, fh)
-        self.envelope = {
-            "v": 1, "repository_id": 101, "repository": "export/audit-fixture",
-            "remote": "origin", "remote_url": self.url, "publication_sha": self.publication,
-            "workflow_id": 7, "workflow_path": ".github/workflows/writer.yml",
-            "workflow_sha256": hashlib.sha256(b"approved pinned dedicated writer\n").hexdigest(),
-            "actor": {"id": 9, "login": "approved-initiator"}, "event": "push",
-            "run_attempt": 1, "writer_job": "approved dedicated writer",
-            "valid_from": "2000-01-01T00:00:00Z", "valid_until": "2100-01-01T00:00:00Z",
-            "destinations": [{"ref": self.ref, "old": self.old, "allow_non_fast_forward": False}],
-        }
-        self.run_record = {
-            "id": 11, "workflow_id": 7, "path": self.envelope["workflow_path"],
-            "repository": {"id": 101, "full_name": "export/audit-fixture"},
-            "head_sha": self.publication, "run_attempt": 1, "event": "push",
-            "actor": self.envelope["actor"], "triggering_actor": self.envelope["actor"],
-            "status": "completed", "conclusion": "success",
-            "run_started_at": "2026-10-02T15:00:00Z", "updated_at": "2026-10-02T15:01:00Z",
-        }
-        self.job = {"id": 13, "run_id": 11, "head_sha": self.publication,
-                    "name": self.envelope["writer_job"], "status": "completed", "conclusion": "success"}
-        self.log = f"To {self.url}\n \trefs/heads/source:{self.ref}\t{self.old}..{self.new}\nDone\n"
-        self.calls = os.path.join(self.tmp.name, "calls.jsonl")
-        self.extra_grants = {}
-        self.response_overrides = {}
-        for path, timestamp in ((self.before, "2026-10-02T14:00:00Z"), (self.after, "2026-10-02T16:00:00Z")):
-            with open(path) as fh:
-                data = json.load(fh)
-            data["taken_at"] = timestamp
-            with open(path, "w") as fh:
-                json.dump(data, fh)
-
-    def set_after(self):
-        git(self.repo, "push", "-q", "--force", "origin", f"HEAD:{self.ref}")
-        snapshot(self.after, self.repo, env_overrides=self.env)
-
-    def compare(self, frozen=True):
-        responses = {
-            f"repos/export/audit-fixture/actions/runs?head_sha={self.publication}&per_page=100":
-                {"total_count": 1, "workflow_runs": [self.run_record]},
-            "repos/export/audit-fixture/actions/runs/11/attempts/1": self.run_record,
-            "repos/export/audit-fixture/actions/runs/11/attempts/1/jobs?per_page=100":
-                {"total_count": 1, "jobs": [self.job]},
-            "repos/export/audit-fixture/actions/jobs/13/logs": self.log,
-            f"repos/export/audit-fixture/contents/{self.envelope['workflow_path']}?ref={self.publication}":
-                {"type": "file", "encoding": "base64", "content": "YXBwcm92ZWQgcGlubmVkIGRlZGljYXRlZCB3cml0ZXIK"},
-            "repos/export/audit-fixture/git/ref/heads/automation/exact":
-                {"ref": self.ref, "object": {"type": "commit", "sha": self.new}},
-        }
-        responses.update(self.response_overrides)
-        feed = os.path.join(self.tmp.name, "provider.json")
-        with open(feed, "w") as fh:
-            json.dump(responses, fh)
-        stub = os.path.join(self.fake, "gh")
-        with open(stub, "w") as fh:
-            fh.write(f'#!{sys.executable}\nimport json,sys\n'
-                     f'with open({self.calls!r},"a") as f: f.write(json.dumps(sys.argv[1:])+"\\n")\n'
-                     f'feed=json.load(open({feed!r}))\n'
-                     'value=feed.get(sys.argv[-1])\n'
-                     'if value is None: sys.exit(1)\n'
-                     'print(value if isinstance(value,str) else json.dumps(value))\n')
-        os.chmod(stub, 0o755)
-        grants = os.path.join(self.tmp.name, "grants.json")
-        with open(grants, "w") as fh:
-            json.dump({self.repo: {"induced_effects": self.envelope, **self.extra_grants}}, fh)
-        with open(grants, "rb") as fh:
-            digest = hashlib.sha256(fh.read()).hexdigest()
-        result = run_audit("compare", self.before, self.after, "--grants", grants,
-                           *(["--grants-sha256", digest] if frozen else []), env_overrides=self.env)
-        with open(grants, "rb") as fh:
-            self.assertEqual(hashlib.sha256(fh.read()).hexdigest(), digest)
-        return result
-
-    def test_approved_exact_sha_effect_passes(self):
-        result = self.compare()
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("GRANTED induced", result.stdout)
-        with open(self.calls) as fh:
-            calls = [json.loads(line) for line in fh]
-        self.assertTrue(any(call[-1].endswith("/actions/jobs/13/logs") for call in calls))
-        self.assertTrue(all(call[:5] == ["api", "--hostname", "github.com", "--method", "GET"] for call in calls))
-
-    def test_command_echo_cannot_attest_write(self):
-        complete = self.log
-        for timestamp in ("", "2026-10-02T15:00:01.1234567Z "):
-            with self.subTest(timestamp=timestamp):
-                echo = "##[group]Run : <<'EXPECTED'\n" + complete + "EXPECTED\n##[endgroup]\n"
-                self.log = "".join(timestamp + line + "\n" for line in echo.splitlines())
-                result = self.compare()
-                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-                self.assertNotIn("[GRANTED", result.stdout)
-
-    def test_command_echo_followed_by_real_output_passes(self):
-        complete = self.log
-        self.log = "##[group]Run git push --porcelain\nshell: /bin/sh -e\n##[endgroup]\n" + complete
-        self.log = "".join("2026-10-02T15:00:01Z " + line + "\n" for line in self.log.splitlines())
-        result = self.compare()
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("GRANTED induced", result.stdout)
-
-    def test_ambiguous_group_framing_fails_closed(self):
-        complete = self.log
-        for log in ("##[endgroup]\n" + complete,
-                    complete + "##[group]Run unfinished\n",
-                    "##[group]Run outer\n##[group]Run nested\n##[endgroup]\n" + complete + "##[endgroup]\n",
-                    complete.replace("Done\n", "##[group]Run interrupted\n##[endgroup]\nDone\n")):
-            with self.subTest(log=log):
-                self.log = log
-                result = self.compare()
-                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-                self.assertNotIn("[GRANTED", result.stdout)
-
-    def test_truncated_and_ambiguous_porcelain_fail_closed(self):
-        complete = self.log
-        for log in (complete.removesuffix("Done\n"), complete + f"To {self.url}\n",
-                    complete.replace("Done\n", f"To {self.url}\nDone\n"),
-                    "Done\n" + complete,
-                    complete.replace("Done\n", "unexpected output\nDone\n")):
-            with self.subTest(log=log):
-                self.log = log
-                result = self.compare()
-                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-                self.assertNotIn("[GRANTED", result.stdout)
-
-    def test_malformed_porcelain_ref_fields_fail_closed(self):
-        complete = self.log
-        for refs in (self.ref, ":" + self.ref, "refs/heads/source::" + self.ref,
-                     "refs/heads/bad..source:" + self.ref, "refs/heads/source:" + self.ref + "\textra"):
-            with self.subTest(refs=refs):
-                self.log = complete.replace("refs/heads/source:" + self.ref, refs)
-                result = self.compare()
-                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-                self.assertNotIn("[GRANTED", result.stdout)
-
-    def test_real_ancestry_rejects_lying_fast_forward_output(self):
-        git(self.repo, "checkout", "-q", "--orphan", "unrelated")
-        git(self.repo, "commit", "-q", "-m", "unrelated")
-        self.new = git(self.repo, "rev-parse", "HEAD").stdout.strip()
-        self.set_after()
-        with open(self.after) as fh:
-            data = json.load(fh)
-        data["repos"][self.repo]["remotes"]["origin"]["url"] = self.url
-        with open(self.after, "w") as fh:
-            json.dump(data, fh)
-        self.log = f"To {self.url}\n \trefs/heads/source:{self.ref}\t{self.old}..{self.new}\nDone\n"
-        result = self.compare()
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("NON-FAST-FORWARD (granted, but blocked)", result.stdout)
-        self.assertIn("induced: ancestry unverified or non-fast-forward not approved", result.stdout)
-
-    def test_mismatched_run_head_sha_flagged(self):
-        self.run_record["head_sha"] = "a" * 40
-        result = self.compare()
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("induced: run head_sha mismatch", result.stdout)
-
-    def test_unapproved_actor_and_destination_flagged(self):
-        for fault in ("actor", "destination"):
-            with self.subTest(fault=fault):
-                original = self.log
-                if fault == "actor":
-                    self.run_record["actor"] = {"id": 10, "login": "other"}
-                else:
-                    self.run_record["actor"] = self.envelope["actor"]
-                    self.log = self.log.replace(self.ref, self.ref + "-other")
-                result = self.compare()
-                self.assertEqual(result.returncode, 1)
-                self.assertIn("induced: " + ("run actor mismatch" if fault == "actor" else "unapproved destination"), result.stdout)
-                self.log = original
-
-    def test_non_fast_forward_flagged(self):
-        git(self.repo, "checkout", "-q", "--orphan", "unrelated")
-        git(self.repo, "commit", "-q", "-m", "unrelated")
-        self.new = git(self.repo, "rev-parse", "HEAD").stdout.strip()
-        self.set_after()
-        with open(self.after) as fh:
-            data = json.load(fh)
-        data["repos"][self.repo]["remotes"]["origin"]["url"] = self.url
-        with open(self.after, "w") as fh:
-            json.dump(data, fh)
-        self.log = f"To {self.url}\n+\trefs/heads/source:{self.ref}\t{self.old}...{self.new} (forced update)\nDone\n"
-        result = self.compare()
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("induced: non-fast-forward not approved", result.stdout)
-
-    def test_envelope_without_publication_sha_error(self):
-        del self.envelope["publication_sha"]
-        result = self.compare()
-        self.assertEqual(result.returncode, 2)
-        self.assertIn("induced_effects needs publication_sha", result.stderr)
-
-    def test_no_write_and_incomplete_log_fail_closed(self):
-        for log in ("all checks passed\n", f"To {self.url}\nSuccessfully updated reference {self.ref} to {self.new}\n",
-                    f"To {self.url}\n \trefs/heads/source:{self.ref}\t{self.old[:12]}..{self.new[:12]}\nDone\n"):
-            with self.subTest(log=log):
-                self.log = log
-                result = self.compare()
-                self.assertEqual(result.returncode, 1)
-                self.assertIn("induced: incomplete successful write output", result.stdout)
-
-    def test_unfrozen_envelope_is_error(self):
-        result = self.compare(frozen=False)
-        self.assertEqual(result.returncode, 2)
-        self.assertIn("induced_effects requires --grants-sha256", result.stderr)
-
-    def test_legacy_grants_cannot_replace_missing_write_evidence(self):
-        self.log = "all jobs green, no write\n"
-        self.extra_grants = {"refs": [self.ref], "allow_non_fast_forward": [self.ref],
-                             "automation": [{"ref_prefix": "refs/heads/automation/", "actor": "other[bot]"}]}
-        result = self.compare()
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("induced: incomplete successful write output", result.stdout)
-        self.assertNotIn("[GRANTED", result.stdout)
-
-    def test_provider_destination_and_job_membership_fail_closed(self):
-        for fault in ("destination", "job"):
-            with self.subTest(fault=fault):
-                self.response_overrides.clear()
-                self.job["run_id"] = 99 if fault == "job" else 11
-                if fault == "destination":
-                    self.response_overrides["repos/export/audit-fixture/git/ref/heads/automation/exact"] = {
-                        "ref": self.ref, "object": {"type": "commit", "sha": "a" * 40}}
-                result = self.compare()
-                self.assertEqual(result.returncode, 1)
-                self.assertIn("induced: " + ("destination endpoint mismatch" if fault == "destination"
-                                             else "writer job identity or outcome mismatch"), result.stdout)
-
-    def test_execution_outside_snapshot_window(self):
-        self.run_record["run_started_at"] = "2026-10-01T15:00:00Z"
-        self.run_record["updated_at"] = "2026-10-01T15:01:00Z"
-        result = self.compare()
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("induced: execution outside snapshot window", result.stdout)
-
-    def test_extra_unapproved_write_invalidates_all_receipts(self):
-        self.log += f" \trefs/heads/source:refs/heads/automation/other\t{self.old}..{self.new}\n"
-        result = self.compare()
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("induced: unapproved destination", result.stdout)
-        self.assertNotIn("[GRANTED", result.stdout)
-
-    def test_provider_failure_and_oversized_log_are_unverified(self):
-        for fault in ("missing", "oversized"):
-            with self.subTest(fault=fault):
-                self.response_overrides["repos/export/audit-fixture/actions/jobs/13/logs"] = (
-                    None if fault == "missing" else "x" * (2 * 1024 * 1024 + 1))
-                result = self.compare()
-                self.assertEqual(result.returncode, 1)
-                self.assertIn("induced: provider evidence unavailable", result.stdout)
-
-    def test_wrong_attempt_and_workflow_pin_fail_closed(self):
-        for fault in ("attempt", "pin"):
-            with self.subTest(fault=fault):
-                self.run_record["run_attempt"] = 2 if fault == "attempt" else 1
-                if fault == "pin":
-                    self.envelope["workflow_sha256"] = "0" * 64
-                result = self.compare()
-                self.assertEqual(result.returncode, 1)
-                self.assertIn("induced: " + ("run run_attempt mismatch" if fault == "attempt" else "workflow source pin mismatch"), result.stdout)
 
 
 if __name__ == "__main__":

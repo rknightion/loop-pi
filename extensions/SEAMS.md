@@ -111,8 +111,7 @@ selected agent's maximum. A senior delegates only when its brief grants a count.
 ## Role by entry point
 
 The model root loads `loop-guard/root.ts`; children receive `loop-guard/lane.ts` through
-required-child registration, including agents declaring `extensions: []`. The dispatcher uses
-`dispatcher/index.ts` without an LLM root, and registers the required lane extensions too.
+required-child registration, including agents declaring `extensions: []`.
 
 ### Unverified
 
@@ -126,13 +125,12 @@ The installer's `DEFAULT_ROOT_ROUTE` is
 `{provider: "openai", model: "gpt-6.1-sol", thinking: "high"}`. Settings
 `loopPi.rootRoute` override those defaults. The generated model-root launcher places caller
 arguments last, after its provider, model and thinking flags, so explicit caller flags win.
-This is the model-root route, not the dispatcher's in-process idle model.
 
 ## Recorded timing seam
 
 `extensions/call-timing/index.ts` retains assistant metadata `loopPiTiming` with
 `{firstTokenAt: epoch ms | null, attempts: null, processingMs: int | null, headers: {x-request-id?, x-ratelimit-remaining-requests?, x-ratelimit-reset-requests?, service-tier?}}`.
-The root launcher loads it, and both loop-guard root and dispatcher register it as a required
+The root launcher loads it, and loop-guard root registers it as a required
 child extension (including children declaring `extensions: []`).
 
 - pi 1.1.0 supports `after_provider_response` with response headers before stream consumption,
@@ -505,13 +503,12 @@ before any `await`. A missing reply means the provider extension is not loaded; 
 - `loop-wait:arm-timer` `{ at: string /*ISO*/; reason: string; reply(r: { id: string; at: string }) }`
   - loop-wait root arms a timer exactly as `wake_at` would.
 - `loop-wait:query-watchers` `{ reply(ws: { id: string; label: string; pid: number; phase: string }[]) }`
-- `loop-continuation:query-launch` `{ cwd?: string; reply(r: { reportPath: string; opsPath: string | null; ops: object | null } | null) }`
+- `loop-continuation:query-launch` `{ cwd?: string; reply(r: { reportPath: string | null; standingPath: string | null; standingSha256: string | null; rootContext?: object; concurrency?: number }) }`
   - loop-continuation answers from its frozen launch state. `reportPath` is the launch's closeout
-    path (`codex/closeout-<name>-loop<N>.md`, v3 seam S1; the key keeps its v2 name). The state log
-    is derived from it (S3): `closeout-` becomes `state-` and `.md` becomes `.jsonl`
-    (`loop-state/core.ts` `deriveLogPath`, the one implementation; any other name derives none).
-  - `opsPath` and `ops` are always null: v3 has no ops lane, and a launch carrying an `Ops grants:`
-    line is refused at arm. They stay in the reply so older readers see "no grants".
+    path (`codex/closeout-<name>-loop<N>.md`, v3 seam S1; the key is named for the persisted launch
+    state). The state log is derived from it (S3): `closeout-` becomes `state-` and `.md` becomes
+    `.jsonl` (`loop-state/core.ts` `deriveLogPath`, the one implementation; any other name derives
+    none).
   - The reply may also carry `concurrency: number`, the charter's `lanes:` value: a bare
     positive integer (digits only), frozen at arm and restored with the continuation state on a
     resumed session. The key is absent, not null, when no launch is armed or the value is missing or
@@ -558,7 +555,7 @@ before any `await`. A missing reply means the provider extension is not loaded; 
   120 s for the lock. A python wrapper inside the detached process group bounds each upload
   (checkpoint 90 s, lifecycle 180 s) and kills the group, lock included, so a hung upload outlives
   neither its bound nor the pi process. Lanes load required child extensions even when their agent
-  files declare `extensions: []`: the dispatcher registers `loop-guard/lane.ts` and, when present,
+  files declare `extensions: []`: the root guard registers `loop-guard/lane.ts` and, when present,
   `loop-wait/lane.ts` at `session_start` with `requireForAllRunners: true`. Registration failure
   refuses dispatch; runners that cannot honour the required extensions are refused, and required
   extension load or startup failure aborts the child before its task runs. This does not load
@@ -606,20 +603,17 @@ before any `await`. A missing reply means the provider extension is not loaded; 
   - A restarted root uses the recorded binding, not its own new run dir. A binding is valid only
     with the exact allocated layout under a `root` that is still its own realpath. With no run dir
     (`LOOP_PI_RUN_DIR`) no resume is requested and the return is recorded failed.
-  The dispatcher retains immediate failed behavior. `loop-state` folds a `gate-runner` dispatch into
-  a live lane only, never a task.
 - Root extensions also include `loop-state/index.ts`: it appends `dispatch` and `return` to
   `codex/state-<stem>-loop<N>.jsonl` (sibling of the closeout, S3) through `<agentDir>/bin/loop-state`
   for `subagent` calls whose brief starts `Lane: <id> · Task: <id> [(<title>)] · Tier: ...`, and injects the
   recovery digest (`loop-state-digest`, no turn) after compaction and at session start.
-  Admit metadata may include resolved `tier` (`routine` or `guarded`) and `surfaces` (explicit
-  ops surfaces or guarded owned-path matches). Dispatch metadata preserves `tier`, `surface`,
-  `kind` and explicit constituent `tasks`. `Ops surface:` takes precedence over `Surface:` in
-  a brief. Native reviewer launches emit `kind: review`; a `Tasks:` line or comma-separated task
-  header identifies constituents, whose admitted maximum tier is used only when every tier is
-  known. Historical missing metadata stays unknown, never inferred from an agent name.
-  `append` warns on stderr, without rejecting, for an `admit` without `tier` and an `ops` or
-  `ops-probe` `dispatch` without `surface`; the root extension shows such warnings through notify.
+  Admit metadata may include resolved `tier` (`routine` or `guarded`) and `surfaces` (guarded
+  owned-path matches). Dispatch metadata preserves `tier`, `surface` (a brief's `Surface:` line),
+  `kind` and explicit constituent `tasks`. Native reviewer launches emit `kind: review`; a
+  `Tasks:` line or comma-separated task header identifies constituents, whose admitted maximum tier
+  is used only when every tier is known. Historical missing metadata stays unknown, never inferred
+  from an agent name. `append` warns on stderr, without rejecting, for an `admit` without `tier`;
+  the root extension shows such warnings through notify.
   Digest/query audit counts split implementation dispatches, review dispatches and reported
   CodeRabbit reviews by known tier, with a separate unknown bucket. These fields are telemetry,
   not authority or enforcement inputs.
@@ -640,50 +634,20 @@ before any `await`. A missing reply means the provider extension is not loaded; 
   closeout or `PAUSED:` releases. The nudge text never leads with an owner control phrase.
   WAITING and PAUSED lines are matched after stripping leading `[\s*_`>-]` and trailing
   `[\s.!*_`)]` decoration.
-- Ops lanes: the root binds `{"loop-pi.guard/1":{"agent":"ops","surface":"<id>","entry":{...}}}`
-  only for a surface in the frozen ops file with no active ops run on it. `ops-probe` binds the same
-  way, only to a `kind: probe` entry. Allow patterns need no leading `^`: the lane full-matches. The lane allows a
-  lane-forbidden command only on a full `^(?:pattern)$` match of `entry.allow`, a secret write only to
-  an exact `entry.secret_paths` member, and credential creation only for kind `credential-create`.
-  Single-flight is a kernel flock under `~/.local/state/loop-pi/ops-locks/<surface>.lock` (override
-  `LOOP_PI_OPS_LOCK_DIR`); coverage is per machine. Every lane is refused writes to `codex/ops-*`,
-  `codex/state-*` and `codex/goal-*`, and under protocol 2 `codex/grants-*`.
-- Dispatcher: `loop-pi-dispatch[-variant]` runs a pi session with only `dispatcher/index.ts` and the
-  in-process `loop-dispatch/idle` model, which answers pi-subagents' completion turns without a
-  model call. It spawns lanes over the `subagents:rpc:v1` bus with the same identity binding and
-  fail-closed child registration, writes every state event itself, and runs `loop-pi-audit
-  closeout` and `loopPi.onClose` (argv lists with `{log}` and `{report}`) before it exits.
-  A composed gate is green only for a parsed return with status `complete`, `exit` 0 and a `sha`
-  that is null or the gated tip; the `gate` event records the reported exit (null stays null) and
-  SHA. A run pi-subagents reports failed or timed out (`success: false` at the top level or on
-  `results[0]`, `results[0].timedOut`, or `results[0].outputPartial`, which pi-subagents emits since
-  0.76.0) never counts as complete, whatever its lane-return block says.
-  - Dispatcher: a failed gate run is red with its exit recorded as null; a failed triager parks its
-    task. A work lane that may have pushed without finishing parks for its owner and stops new work
-    (never gated, never retried, closes `blocked`): a failed run whose block claims landed, a
-    `partial` or `blocked` return that claims landed, or any return without a complete landed claim
-    whose task's owned files changed on main since its dispatch base (owned files are disjoint across
-    live lanes, so such a change is this lane's). A fetch that fails throws instead of reading a
-    stale `origin/<branch>`: before a spawn it refuses that spawn, parks the task with the fetch error
-    and stops new work (closes `blocked`); a park whose main check fails says so in its reason.
-  - `loop-state` (model roots) records a failed run's return as failed but keeps the block's
-    `landed`, `sha` and other fields, so its digest never re-admits a task whose lane may already
-    have pushed, and shows such a task as `landed:<status>` rather than a clean `landed`.
-  Every land is `mode=after-green`; there is no land before green. The dispatcher reads LOOP.md exactly as `loop-state` does (nothing stripped).
-- Red baseline: LOOP.md may carry `baseline-red: <TASK-ID> - <reason>` (main is known red; the named
-  task owns making it green). The dispatcher predicate refuses that repo before `open`, so only an
-  LLM root runs it. That root's composed
-  gate runs on the batch's base SHA and on the integrated SHA, counts as green when every check or
-  test failing on the integrated SHA also fails on the base SHA, and records both failing lists in a
-  `judgement` event. `gate-runner` gates both SHAs when the brief's Gate line names a base.
+- Loop control files: every lane is refused writes to `codex/state-*`, `codex/charter-*`,
+  `codex/launch-*` and `codex/closeout-*` (exact for edit/write, best effort for bash).
+- `loop-state` records a failed run's return as failed but keeps the block's `landed`, `sha` and
+  other fields, so its digest never re-admits a task whose lane may already have pushed, and shows
+  such a task as `landed:<status>` rather than a clean `landed`.
 - Runtime entry: each session appends `loop-pi-runtime` `{v:1, variant, models:{<id>:{service_tier}}}`
   at `session_start` (variant from the home receipt's `variant`).
 
-## Protocol 2
+## Launch arming
 
-A root armed by this build writes `$LOOP_PI_RUN_DIR/loop-pi-proto` (`2\n`). Pre-execution refusals
-remain marker-gated; a lane that observed protocol 2 retains that decision for its session. Arming
-also retains protocol evidence in the existing audit snapshot without resnapshotting remote refs.
+A root armed by this build writes the run marker `$LOOP_PI_RUN_DIR/loop-pi-proto` (`2\n`; the
+content is a format version). Pre-execution refusals remain marker-gated; a lane that observed the
+marker retains that decision for its session. Arming also retains the marker's evidence
+(`protocol: 2`) in the existing audit snapshot without resnapshotting remote refs.
 Deleting the marker cannot downgrade or suppress closeout, including after session restoration;
 this does not enable marker-gated root or newly loaded child refusals retroactively. A root armed
 by an older build keeps its old behaviour after an install. Arm-time refusals cannot be gated
@@ -691,32 +655,30 @@ by an older build keeps its old behaviour after an install. Arm-time refusals ca
 paths are exact, bash write detection is best-effort.
 
 - **Arming** happens in the `input` hook: "You are the root" plus exactly one closeout path
-  `codex/closeout-<name>-loop<N>.md` (v3 seam S1; a v2 `report-*` token never arms), or a bare
+  `codex/closeout-<name>-loop<N>.md` (v3 seam S1; no other token shape arms), or a bare
   `launch-*` path whose contents match. The charter is the one `codex/charter-*-loop<N>.md` the
   launch names, else the closeout's sibling (`closeout-` replaced by `charter-`). Its keys are the
   `key: value` lines between its `# Charter:` title and its first `## ` heading. Arming refuses
   (returns `handled`, no model turn) with no run dir, a cwd whose git toplevel is not the charter's
-  repository, an optional charter `host:` other than this machine, a missing charter, any launch
-  `Ops grants:` line (v3 has no ops lane), an `open` already in the state log whose `goal_sha256`
-  is not the charter's sha256, or a launch `Audit grants:` / `Standing:` line whose path or sha256
-  differs from the charter's `audit grants:` / `standing:` key (`none` or no key means the launch
-  carries none; a relative charter path resolves against the charter's repository; more than one
-  launch line or a malformed one is a mismatch); incident
+  repository, an optional charter `host:` other than this machine, a missing charter, an `open`
+  already in the state log whose `charter_sha256` is not the charter's sha256, or a launch
+  `Standing:` line whose path or sha256 differs from the charter's `standing:` key (`none` or no
+  key means the launch carries none; a relative charter path resolves against the charter's
+  repository; more than one launch line or a malformed one is a mismatch); incident
   `incidents/root/<sid>-<UTC>-arm-refused.json`. A first input naming a
   `codex/charter-*.md` path that does not arm gets a visible relaunch warning. On success it writes the
-  marker, freezes the optional `Audit grants: <abs> sha256=<hex>` (copy at
-  `<run dir>/audit-grants.json`; a bad hash gives none and an `incidents/ops/` record of class
-  `loop-audit-grants-rejected`), freezes the optional `Standing: <abs> sha256=<hex>` (the
-  standing-authority registry entry; copy at `<run dir>/standing.md`; a missing file or bad hash
-  gives none and an `incidents/ops/` record of class `loop-standing-rejected`, and the arm still
-  succeeds), and appends `open` `--by ext` when the log has none; the root never writes it. The
-  open keeps the loop-state schema's v2 field names: `goal_sha256` is the charter's sha256 (the
-  closeout header's `Charter:` value), `envelope` the charter's `## First wave` task ids, `root`
-  `llm`, `root_model` the charter's `root:` value (`unknown` when absent) and `tier` `routine`
-  (the charter has no run tier; `tier: guarded` in the charter header gives `guarded`). Telemetry
-  only, never a gate.
-  `loop-continuation:query-launch` adds optional `auditGrantsPath`, `auditGrantsSha256`,
-  `standingPath` (the frozen copy) and `standingSha256`.
+  marker, freezes the optional `Standing: <abs> sha256=<hex>` (the standing-authority registry
+  entry; copy at `<run dir>/standing.md`; a missing file or bad hash gives none and an
+  `incidents/standing/` record of class `loop-standing-rejected`, and the arm still succeeds), and
+  appends `open` `--by ext` when the log has none; the root never writes it. The open carries
+  `charter_sha256` (the charter's sha256, the closeout header's `Charter:` value), `first_wave` (the
+  charter's `## First wave` task ids), `root` `llm`, `root_model` (the charter's `root:` value,
+  `unknown` when absent) and `tier` only when the charter header states `tier: routine|guarded`
+  (the charter has no run tier). Telemetry only, never a gate.
+  `loop-continuation:query-launch` answers `standingPath` (the frozen copy) and `standingSha256`.
+
+## Run-dir files and return caps
+
 - **Run-dir files** (root and lanes may not write them, except inside `worktrees/l<32 hex>/`):
   `loop-pi-proto`; `harness-facts.jsonl`
   `{v:1, ts, kind: compaction-failed|quota-exhausted|context-overflow, session, detail}`;
@@ -730,14 +692,8 @@ paths are exact, bash write detection is best-effort.
   command is logged, so a lane's bash call that runs `git push` or `gh pr merge` inside an
   interpreter's code or stdin script, a git alias's shell body or unparseable text is refused, as is
   any push through `watch_process`; an undetected one (a script file, a task runner) is unlogged and
-  the audit reports it UNGRANTED; `audit-grants.json`; `standing.md`;
+  the audit reports it UNGRANTED; `standing.md`;
   `returns/<runId>.md`; `worktrees/l<32 hex>/`. The lane binding carries optional `runDir`.
-- **Ops command forms**: known interpreter network clients require a match against the frozen
-  surface's full enclosing command. Compound commands, nested shells and stdin scripts cannot
-  inherit a grant for only an inner invocation; wrapped forms require their complete form to be
-  explicitly allowed. Unparseable known-network commands always fail closed, including wildcard
-  grants. Granted literal curl/ssh forms and local-only parsing
-  remain usable. This is an honest-mistake fence, not a sandbox or a new endpoint permission.
 - **Idle-parent wake (pi-subagents 0.77.0):** a notice to an idle root is appended with
   `triggerTurn: false`, which pi emits to RPC/UI listeners but to no extension `message_start` or
   `message_end`; pi-subagents then starts the turn with the extension-sourced user message
@@ -747,8 +703,7 @@ paths are exact, bash write detection is best-effort.
   `Subagent updates above.`; `wake.test.ts` pins it against the installed package. A busy root still
   gets the notice as a steer with message events. So: loop-continuation counts that wake input as
   the push that resets the nudge chain; loop-guard releases a run for `watch_process` on
-  `subagent:async-complete`, never on a notify message; the dispatcher lets the wake prompt through
-  to its idle model; and the lane caps its own return (below).
+  `subagent:async-complete`, never on a notify message; and the lane caps its own return (below).
 - **Completion reminders (pi-subagents 0.77.0):** when a completion-woken turn ends with no tool call
   and no text, pi-subagents' own `agent_before_settle` handler appends a
   `subagent-completion-unanswered` reminder and continues the run once; if that turn is silent too it
@@ -756,8 +711,7 @@ paths are exact, bash write detection is best-effort.
   (`src/runs/background/notify.js` `handleBeforeSettle`). Neither is a push. The package skips a
   settle that an earlier handler already continues, and loop-continuation skips its nudge when
   `continue` is already set, so one silent turn never gets both; after the terminal notice the nudge
-  chain still applies. In the dispatcher every completion therefore costs up to two extra idle-model
-  turns; dispatch, return and close are unaffected.
+  chain still applies.
 - **Subagent `options` (pi-subagents 0.77.0):** a model `subagent` call carries most fields inside
   one `options` object, which the package flattens to `{...topLevel, ...options}` only inside its
   execute (`src/extension/subagent-options.js`). Every loop-pi `tool_call` reader of a subagent call
@@ -780,8 +734,7 @@ paths are exact, bash write detection is best-effort.
     from it, and the full text is behind the lane's omission line.
   - Root: a `subagent-notify` message over 16,384 bytes becomes up to its first 6,144 bytes, an
     omission line naming the full copy, up to its last 8,192 bytes and the last `lane-return` block
-    if not wholly kept in the head or tail. With no run dir it is left uncapped. The dispatcher's RPC completion path applies the same
-    cap. The full copy is pi-subagents' saved output only when its structured completion (the
+    if not wholly kept in the head or tail. With no run dir it is left uncapped. The full copy is pi-subagents' saved output only when its structured completion (the
     async-complete payload's single result `savedOutputPath`) matches the notify's sole valid
     `details.runs[].runId`. Absent structured runs, the notify's last `Retention-managed async
     directory:` line supplies the legacy identity and directory check. A reference-only marker
@@ -795,11 +748,10 @@ paths are exact, bash write detection is best-effort.
     computed with the full input byte count, and three newline bytes before allocating the head,
     then the tail from the remaining budget. Every non-null capped result stays within its cap,
     including the protected block and marker. A cut is supported when that reserve fits the cap
-    and both real consumers, `loop-state/core.ts` and `dispatcher/brief.ts` `parseLaneReturn`,
-    preserve their exact outcomes before and after the cut. Their fence grammar and malformed-block
-    handling differ; neither outcome may change. For example a usable 12 KiB last block fits the lane cap with a full-copy
+    and the real consumer, `loop-state/core.ts` `parseLaneReturn`, preserves its exact outcome
+    before and after the cut. For example a usable 12 KiB last block fits the lane cap with a full-copy
     path of up to 1,024 UTF-8 bytes (and an input byte count of up to 16 decimal digits). If the
-    block or marker cannot fit, or the cut changes either parser outcome, leave the text whole
+    block or marker cannot fit, or the cut changes the parser outcome, leave the text whole
     rather than truncate the structured return, promote a stale success or lose the full-copy
     reference. In particular, the last fenced block can be malformed or otherwise unusable;
     protecting it alone must not hide an earlier latest usable failed return. Both cap boundaries
@@ -816,16 +768,16 @@ paths are exact, bash write detection is best-effort.
     lane's whole (lane-capped) output.
   - Block first: because the root model sees only that preview, every lane's final message puts its
     one `lane-return` block first and at most a few lines of prose after it (home agent files). The
-    parsers take the last, here the only, block, and both caps keep a block at the start in the
+    parser takes the last, here the only, block, and both caps keep a block at the start in the
     head.
   - Limit: an idle-wake notify (no root extension can rewrite it) holds one previewed lane return
     with its framing, but pi-subagents batches completions that finish together into one notify,
     which is stored at the sum of their previews. The `context` hook still caps what the model sees.
-### loop-closeout
+## Closeout and root fences
 
 - **Closeout**: `/loop-closeout` (loop-wait) emits `pi.events.emit("loop-closeout", {lines, pending})`
   after its sweep; loop-continuation runs
-  `loop-pi-audit closeout --run-dir <rd> [--grants <rd>/audit-grants.json --grants-sha256 <hex>] --push-log <rd>/push-log.jsonl`,
+  `loop-pi-audit closeout --run-dir <rd> --push-log <rd>/push-log.jsonl`,
   lane-worktrees adds its sweep, and the root gets one `loop-closeout-audit` custom message (a push
   that resets the nudge chain).
 - **Incidents**: `incidents/root/<sid>-<UTC>-context-overflow.json`
@@ -850,7 +802,7 @@ paths are exact, bash write detection is best-effort.
   the recorded allocation base. After session start, earlier runs remain live
   until their async `status.json` is terminal; absent status keeps them. Merged branches may be
   removed on authorised release, unmerged branches retained. State entry: `lane-worktrees-state`.
-  Under protocol 2, governed named single-agent tool launches not intercepted for root-owned
+  While the marker exists, governed named single-agent tool launches not intercepted for root-owned
   retention (including omitted worktree flags resolved by package defaults and missing or
   unsupported Landing) bind version-1 lane metadata with an opaque `r<32hex>l<32hex>` key derived
   from the canonical run directory and original lane/task pair. Explicit shared-cwd requests,
@@ -864,7 +816,7 @@ paths are exact, bash write detection is best-effort.
   not allocation or cleanup authority: it neither rewrites old refs nor changes package cleanup
   or guarantees native resumability. Existing root-owned retained-worktree release rules are unchanged.
   Durable patch retention is separate: `lane-patches-state` correlates named single-agent tool
-  and dispatcher RPC runs. Lifecycle completion, startup reconciliation and shutdown copy patch
+  and package RPC runs. Lifecycle completion, startup reconciliation and shutdown copy patch
   bytes into `<run-dir>/lane-patches/<sha256(run-id)>/` outside the package's prunable async tree.
   Content-addressed blobs and a locked, fsynced manifest preserve versions and exact lane/run/task
   identity. Capture rejects symlink/conflicting authority and warns on journal failure without
@@ -911,32 +863,21 @@ paths are exact, bash write detection is best-effort.
     something else and the identity is not found, when two ledger paths record one dev/ino, or when
     the search budget runs out. Linked worktrees of the registered repositories and the session
     repository that nobody registered are listed with source `discovered` and never touched.
-- **loop-guard, root**: refuses `loop-state` with `--by ext|daemon|dispatcher`, a `by=` field other
+- **loop-guard, root**: refuses `loop-state` with `--by ext|daemon`, a `by=` field other
   than `root`, `--run-dir`, a stdin `by` field or an `append` event on stdin from a file (`< file`),
   edit/write into the run dir, `~/repos/agent-docs/authority/` or the planner's
-  `codex/ops-*`, `codex/grants-*`, `codex/launch-*` and `codex/goal-*` (exact for edit/write, best
-  effort for bash), a second `subagent` status for the same target with no wake since (a return,
+  `codex/charter-*` and `codex/launch-*` (exact for edit/write, best effort for bash), a second `subagent` status for the same target with no wake since (a return,
   `loop-watch`, `loop-wake`, input, session start or compaction), and `bash` timeouts over 900 s.
-  **Per-loop tier cap** (not marker-gated; applies whenever `loop-continuation:query-launch` names a
-  `report-<name>.md`): a single `{agent, task}` launch of a SUPER agent beyond the 2nd, or of a
-  MEGASUPER agent beyond the 1st, is refused with exactly
-  `loop-guard: per-loop cap reached (2 SUPER, 1 MEGASUPER); park the task needs=owner`. The count is
-  the distinct `run` ids of `dispatch` rows in the loop's state log whose `agent` is in the tier
-  set, excluding rows with `recovery_of`, plus launches this root process allowed whose run id is
-  not in the log yet (a burst in one message, or a brief without the lane header). A restarted root
-  therefore keeps the count. A native `resume` is never refused, but the dispatch row loop-state
-  writes for it counts. An unreadable (not absent) log refuses tier launches.
-  **Lanes**: `codex/grants-*` and authority writes, `gh pr merge` outside an ops `release` surface.
+  **Lanes**: authority writes and `gh pr merge`.
 - **loop-state**: `land` is `after-green` only (legacy `pre-green` lines still check and digest);
   `revert` by root with `reason=root-decision`; `park needs=budget`; `close reason=budget` needs a
   `compaction-failed` or `quota-exhausted` fact; judgements up to 4 KB; one `open` per log.
-- **loop-pi-audit**: under retained protocol 2 evidence a default-branch move is granted only when every commit in
-  `before..after` lies in a push-log `old..new` range for that repo and ref, touches only
-  `backlog/`, or lies in a range a declared `bot_actors` login (`<login>[bot]`) itself pushed or
-  merged, per GitHub's activity API; commit metadata grants nothing. A default-branch grant entry is
-  ignored with a warning. Another snapshotted remote whose unchanged URL is byte-identical to the
-  canonical repository's (no scheme, user, host-case or path normalisation) receives only that
-  canonical's exact `actor: root` `old..new` ranges, never its bot actors or grants. Only absolute
+- **loop-pi-audit**: under retained marker evidence a default-branch move is accounted for only when every commit in
+  `before..after` lies in a push-log `old..new` range for that repo and ref or touches only
+  `backlog/`; commit metadata grants nothing. Every other added, moved or deleted ref, tag or
+  release fails the audit, except `refs/pull/*` (foreign). Another snapshotted remote whose
+  unchanged URL is byte-identical to the canonical repository's (no scheme, user, host-case or
+  path normalisation) receives only that canonical's exact `actor: root` `old..new` ranges. Only absolute
   URLs qualify (`scheme://`, scp-like `host:path`, absolute local path); a relative URL such as
   `../up.git` never transfers. A push the log
   never saw (watcher, subprocess, script) is UNGRANTED; author, committer and current SHA are never
@@ -980,14 +921,13 @@ The frozen version-1 state-log bodies are `watch {op: "start" | "stop", what: st
 - Heartbeats observe root `turn_start`, root tool execution start/end, and assistant `message_end` only when a launch is armed. Session startup, timers, receipt polls, custom notifications and idle ticks are not root activity. There is no heartbeat timer. The log writer serializes and deduplicates heartbeat attempts under its append lock: first activity is recorded, then only activity at least 300 seconds after the last recorded heartbeat (including across restart, with backward clocks suppressed).
 - `loop-state check` accepts new and old logs. Digests preserve legacy task/lane classification and expose new watch/heartbeat information only in logs that have these events; old digest output stays unchanged.
 
-The protocol event table is owned by the protocol source. No authority fences, budgets, pins, model selection or dispatcher behavior are changed.
+The protocol event table is owned by the protocol source. No authority fences, budgets, pins or model selection are changed.
 
 ## State-aware root context budget
 
 The model root's continuation state freezes the accepted charter text, its SHA-256 and source path
-(under the `rootContext` field names `goalText`, `goalSha256`, `goalPath`; `opsSha256` is always
-null), root cwd and run directory at arm. `loop-continuation:query-launch` exposes this optional
-`rootContext` snapshot; old sessions without it do not acquire it by reading a moving Goal.
+(under the persisted `rootContext` field names `goalText`, `goalSha256`, `goalPath`), root cwd and run directory at arm. `loop-continuation:query-launch` exposes this optional
+`rootContext` snapshot; old sessions without it do not acquire it by reading a moving charter.
 The native system prompt remains Pi-owned. No authority is inferred from a model summary.
 
 - `loop-state` checks Pi 1.1.0's public `ctx.getContextUsage()` at `agent_settled`, only when
@@ -1014,7 +954,7 @@ The native system prompt remains Pi-owned. No authority is inferred from a model
   latch; reload never resets them. Unknown legacy consumption conservatively exhausts the allowance.
 - The extension drains its state append queue, obtains the CLI's bounded state digest and freezes
   the dispatch-count projection (implementation runs excluding `kind: review` and `recovery_of`,
-  without resetting any consumed attempt). The summary consists only of frozen Goal/root/run
+  without resetting any consumed attempt). The summary consists only of frozen charter/root/run
   identity, frozen authority references/hashes, digest and that projection, at most 32,768 UTF-8
   bytes. Larger or unreadable state refuses this compaction; no structured state is cut to fit.
   The append-only state log stays authoritative for admits, dispatches, returns, parks and budgets.
@@ -1042,12 +982,12 @@ The native system prompt remains Pi-owned. No authority is inferred from a model
 
 ## Durable return artifact
 
-The optional version-1 `return.artifact` field is an absolute nonempty path without NUL. It is extension-owned metadata from the sole native completion result, never projected from lane-authored return JSON or a notification body. Existing return fields, event framing and all thirteen event schemas remain strict; readers accept only this additive optional field. The path names the complete resolved native package artifact after acceptance metadata extraction and terminal whitespace normalization. It is not the native display envelope, which appends a saved-output reference. The existing lane cap may retain an even larger original response behind its omission marker; that separate full copy and marker remain unchanged, and the package artifact is never presented as that original response. Missing or invalid native metadata leaves the field absent, never invents a path. The CLI and catalogue reader validate its type without dereferencing it. Producers must ship only after the compatible reader has been adopted.
+The optional version-1 `return.artifact` field is an absolute nonempty path without NUL. It is extension-owned metadata from the sole native completion result, never projected from lane-authored return JSON or a notification body. Existing return fields, event framing and all twelve event schemas remain strict; readers accept only this additive optional field. The path names the complete resolved native package artifact after acceptance metadata extraction and terminal whitespace normalization. It is not the native display envelope, which appends a saved-output reference. The existing lane cap may retain an even larger original response behind its omission marker; that separate full copy and marker remain unchanged, and the package artifact is never presented as that original response. Missing or invalid native metadata leaves the field absent, never invents a path. The CLI and catalogue reader validate its type without dereferencing it. Producers must ship only after the compatible reader has been adopted.
 
 ## Loop status line
 
 `extensions/loop-status/` is a root-only extension (listed in the installer's root extension set
-only; lanes and the dispatcher never load it). It is the sole owner of the status key `loop-status`,
+only; lanes never load it). It is the sole owner of the status key `loop-status`,
 set with `ctx.ui.setStatus`; it sets no widget and clears the key at `session_shutdown`.
 
 - It reads, and writes nothing to, existing seams: `loop-wait:query-timers` and

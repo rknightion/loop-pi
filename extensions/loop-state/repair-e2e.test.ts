@@ -33,7 +33,7 @@ const sha = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
 
 after(() => cleanupAll());
 
-/** A repo, an agent home with the real package and a lane-worker, and an observer extension. */
+/** A repo, an agent home with the real package and a worker, and an observer extension. */
 function scaffold(observer: (repo: string) => string = () => "", delayClosingAppend = false) {
   const repo = freshDir("loop-state-repair-repo-");
   const agentDir = freshDir("loop-state-repair-agent-");
@@ -71,7 +71,7 @@ function scaffold(observer: (repo: string) => string = () => "", delayClosingApp
   const stub = join(extDir, "launch-stub.ts");
   writeFileSync(stub, `import { appendFileSync } from "node:fs";
     export default function (pi) {
-      pi.events.on("loop-continuation:query-launch", (d) => d.reply({ reportPath: ${JSON.stringify(report)}, opsPath: null, ops: null }));
+      pi.events.on("loop-continuation:query-launch", (d) => d.reply({ reportPath: ${JSON.stringify(report)} }));
       pi.events.on("subagents:rpc:v1:request", d => {
         if (d.method === "resume") appendFileSync(${JSON.stringify(requests)}, JSON.stringify(d) + "\\n");
       });
@@ -82,8 +82,8 @@ function scaffold(observer: (repo: string) => string = () => "", delayClosingApp
   const fastState = join(extDir, "fast-state.ts");
   writeFileSync(fastState, `import state from ${JSON.stringify(STATE_EXTENSION)};\nexport default (pi) => state(pi, (job) => setTimeout(job, 2000));\n`);
   writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [PI_SUBAGENTS_PACKAGE_DIR], subagents: { agentExcludeDirs: ["~/.agents"] } }));
-  writeFileSync(join(agentDir, "agents", "lane-worker.md"), [
-    "---", "name: lane-worker", "description: Test lane worker for the repair proof", "tools: bash", "timeoutMs: 60000",
+  writeFileSync(join(agentDir, "agents", "worker.md"), [
+    "---", "name: worker", "description: Test lane worker for the repair proof", "tools: bash", "timeoutMs: 60000",
     "extensions: []", `subagentOnlyExtensions: ${FAUX_EXTENSION}`, "model: faux/faux-1", "---", "", "You are a test lane worker.",
   ].join("\n"));
   return { repo, agentDir, log, requests, stub, fastState };
@@ -91,7 +91,7 @@ function scaffold(observer: (repo: string) => string = () => "", delayClosingApp
 
 function laneRules(spawnArgs: Record<string, unknown>, childText: string, repairDelayMs: number): FauxRule[] {
   return [
-    { match: "SPAWN_LANE", once: true, toolCalls: [{ name: "subagent", args: { agent: "lane-worker", task: "Lane: L1 · Task: T1 · Tier: routine\nObjective: CHILD_LANE_MARKER", ...spawnArgs } }] },
+    { match: "SPAWN_LANE", once: true, toolCalls: [{ name: "subagent", args: { agent: "worker", task: "Lane: L1 · Task: T1 · Tier: routine\nObjective: CHILD_LANE_MARKER", ...spawnArgs } }] },
     { match: "CHILD_LANE_MARKER", once: true, text: childText },
     { match: "Return only the missing fenced lane-return", delayMs: repairDelayMs, text: BLOCK("complete") },
     { match: ".*", text: "ok" },

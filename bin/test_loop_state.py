@@ -11,7 +11,7 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(HERE, "loop-state")
 
-OPEN = ["open", "goal_sha256=" + "a" * 64, "tier=routine", "root=llm", "root_model=m", 'envelope=["T1","T2"]']
+OPEN = ["open", "charter_sha256=" + "a" * 64, "tier=routine", "root=llm", "root_model=m", 'first_wave=["T1","T2"]']
 
 
 def legacy_audit(lanes):
@@ -62,7 +62,7 @@ class Base(unittest.TestCase):
 
     def seed(self):
         self.append(*OPEN)
-        self.append("admit", "task=T1", "source=envelope", 'owned=["a/**"]', "accept=ok")
+        self.append("admit", "task=T1", "source=first-wave", 'owned=["a/**"]', "accept=ok")
         self.append("admit", "task=T2", "source=loop-created", "owned=b.txt", "accept=ok")
 
 
@@ -77,13 +77,13 @@ class TierSurfaceTests(Base):
 
     def test_tier_surface_audit_and_legacy(self):
         self.append(*OPEN)
-        self.append("admit", "task=T1", "source=envelope", 'owned=["src/auth/**"]',
+        self.append("admit", "task=T1", "source=first-wave", 'owned=["src/auth/**"]',
                     "accept=ok", "tier=guarded", 'surfaces=["**/auth/**"]')
-        self.append("admit", "task=T2", "source=envelope", "owned=b.ts", "accept=ok", "tier=routine")
-        self.append("dispatch", "lane=L1", "task=T1", "agent=lane-worker", "run=r1", "base=abc", "surface=**/auth/**")
+        self.append("admit", "task=T2", "source=first-wave", "owned=b.ts", "accept=ok", "tier=routine")
+        self.append("dispatch", "lane=L1", "task=T1", "agent=worker", "run=r1", "base=abc", "surface=**/auth/**")
         self.append("return", "lane=L1", "run=r1", "status=complete",
                     'coderabbit={"ran":true,"major":0,"unreviewed":0}')
-        self.append("dispatch", "lane=L2", "task=T2", "agent=lane-worker", "run=r2", "base=abc")
+        self.append("dispatch", "lane=L2", "task=T2", "agent=worker", "run=r2", "base=abc")
         self.append("dispatch", "lane=L3", "task=T1,T2", 'tasks=["T1","T2"]',
                     "agent=reviewer", "run=r3", "base=abc", "kind=review")
         self.append("dispatch", "lane=L4", "task=old", "agent=reviewer", "run=r4", "base=abc")
@@ -102,33 +102,23 @@ class TierSurfaceTests(Base):
 
 
 class MissingTelemetryWarningTests(Base):
-    """Warn mode: a missing admit tier or ops dispatch surface is accepted but named on stderr."""
+    """Warn mode: a missing admit tier is accepted but named on stderr."""
 
     def test_admit_without_tier_is_accepted_with_a_warning_naming_the_field(self):
         self.append(*OPEN)
-        r = self.append("admit", "task=T1", "source=envelope", "owned=a.txt", "accept=ok")
+        r = self.append("admit", "task=T1", "source=first-wave", "owned=a.txt", "accept=ok")
         self.assertEqual(self.events()[-1]["task"], "T1")
         self.assertIn("warning", r.stderr)
         self.assertIn("admit T1 has no tier", r.stderr)
-        quiet = self.append("admit", "task=T2", "source=envelope", "owned=b.txt", "accept=ok", "tier=routine")
+        quiet = self.append("admit", "task=T2", "source=first-wave", "owned=b.txt", "accept=ok", "tier=routine")
         self.assertEqual(quiet.stderr, "")
 
-    def test_ops_dispatch_without_surface_is_accepted_with_a_warning_from_either_input(self):
-        self.seed()
-        for agent, run_id in (("ops", "r1"), ("ops-probe", "r2")):
-            body = {"ev": "dispatch", "lane": "L" + run_id, "task": "T1", "agent": agent, "run": run_id, "base": "b"}
-            r = self.append("--by", "ext", stdin=json.dumps(body))
-            self.assertEqual(self.events()[-1]["run"], run_id)
-            self.assertIn("dispatch %s (%s) has no surface" % (run_id, agent), r.stderr)
-        kv = self.append("dispatch", "lane=L3", "task=T1", "agent=ops", "run=r3", "base=b", "tier=guarded")
-        self.assertIn("has no surface", kv.stderr)
-
-    def test_no_warning_where_the_field_is_present_or_no_surface_applies(self):
+    def test_no_warning_for_a_dispatch_with_or_without_a_surface(self):
         self.append(*OPEN)
-        self.append("admit", "task=T1", "source=envelope", "owned=a.txt", "accept=ok", "tier=guarded")
+        self.append("admit", "task=T1", "source=first-wave", "owned=a.txt", "accept=ok", "tier=guarded")
         quiet = [
-            self.append("dispatch", "lane=L1", "task=T1", "agent=ops", "run=r1", "base=b", "surface=deploy:x"),
-            self.append("dispatch", "lane=L2", "task=T1", "agent=lane-worker", "run=r2", "base=b"),
+            self.append("dispatch", "lane=L1", "task=T1", "agent=senior", "run=r1", "base=b", "surface=deploy:x"),
+            self.append("dispatch", "lane=L2", "task=T1", "agent=worker", "run=r2", "base=b"),
             self.append("dispatch", "lane=L3", "task=T1", "agent=reviewer", "run=r3", "base=b", "kind=review"),
         ]
         self.assertEqual([r.stderr for r in quiet], ["", "", ""])
@@ -138,15 +128,15 @@ class MissingTelemetryWarningTests(Base):
 class ResumeIdentityTests(Base):
     def test_stale_landed_claim_constrains_only_its_original_task(self):
         self.seed()
-        self.append("dispatch", "lane=L1", "task=T1", "agent=lane-worker-push", "run=original", "base=b")
+        self.append("dispatch", "lane=L1", "task=T1", "agent=worker", "run=original", "base=b")
         self.append("return", "lane=L1", "run=original", "status=partial", "landed=false")
-        self.append("dispatch", "lane=L1", "task=T1", "agent=lane-worker-push", "run=revived", "base=b")
+        self.append("dispatch", "lane=L1", "task=T1", "agent=worker", "run=revived", "base=b")
         self.append("return", "lane=L1", "run=original", "status=partial", "landed=true", "sha=pushed")
         self.assertIn("T1: dispatched lane=L1 run=revived", run("digest", self.log).stdout)
         self.assertEqual(json.loads(run("digest", self.log, "--json").stdout)["live_lanes"], 1)
         self.append("return", "lane=L1", "run=revived", "status=failed", "landed=false")
         self.assertNotIn("T1", json.loads(run("digest", self.log, "--json").stdout)["admissible"])
-        self.append("dispatch", "lane=L1", "task=T2", "agent=lane-worker", "run=other", "base=b")
+        self.append("dispatch", "lane=L1", "task=T2", "agent=worker", "run=other", "base=b")
         self.append("return", "lane=L1", "run=original", "status=failed", "landed=true", "sha=pushed")
         self.append("return", "lane=L1", "run=other", "status=failed", "landed=false")
         self.assertIn("T2", json.loads(run("digest", self.log, "--json").stdout)["admissible"])
@@ -156,7 +146,7 @@ class ResumeIdentityTests(Base):
             with self.subTest(original_first=original_first):
                 log = self.log + str(original_first)
                 for run_id in ("original", "revived"):
-                    self.assertEqual(run("append", log, "dispatch", "lane=L1", "task=T1", "agent=lane-worker",
+                    self.assertEqual(run("append", log, "dispatch", "lane=L1", "task=T1", "agent=worker",
                                          "run=" + run_id, "base=b").returncode, 0)
                 returns = [("original", "failed"), ("revived", "complete")]
                 if not original_first:
@@ -170,8 +160,8 @@ class ResumeIdentityTests(Base):
 
     def test_linked_recovery_is_live_but_never_replaces_the_work_outcome(self):
         self.seed()
-        self.append("dispatch", "lane=L1", "task=T1", "agent=lane-worker", "run=original", "base=b")
-        self.append("dispatch", "lane=L1", "task=T1", "agent=lane-worker", "run=revived", "base=b", "recovery_of=original")
+        self.append("dispatch", "lane=L1", "task=T1", "agent=worker", "run=original", "base=b")
+        self.append("dispatch", "lane=L1", "task=T1", "agent=worker", "run=revived", "base=b", "recovery_of=original")
         self.assertIn("T1: dispatched lane=L1 run=original", run("digest", self.log).stdout)
         self.append("return", "lane=L1", "run=original", "status=failed")
         summary = json.loads(run("digest", self.log, "--json").stdout)
@@ -224,23 +214,40 @@ class ValidationTests(Base):
 
     def test_valid_event_of_every_type(self):
         self.seed()
-        self.append("dispatch", "lane=L1", "task=T1", "agent=lane-worker", "run=r1", "base=abc", "model=m")
+        self.append("dispatch", "lane=L1", "task=T1", "agent=worker", "run=r1", "base=abc", "model=m")
         self.append(
             "return", "lane=L1", "run=r1", "status=partial", "sha=null", "landed=false", "exit=null",
             'coderabbit={"ran":true,"major":0,"unreviewed":1}', 'questions=["why?"]',
         )
-        self.append("gate", "scope=composed", "sha=abc", "cmd=just check", "exit=0")
         self.append("accept", "task=T1", "accepted=false", "reason=needs work")
         self.append("park", "task=T1", "reason=waiting", "needs=owner", "until=2026-10-04T00:00:00Z")
         self.append("land", "task=T2", "sha=abc", "gate=just check", "mode=after-green", "ci=123")
         self.append("revert", "sha=abc", "reverted_by=def", "reason=ci-red", "task=T2")
         self.append("judgement", "text=fine", "task=T1")
         self.append("close", "reason=nothing-admissible")
-        self.assertEqual([e["seq"] for e in self.events()], list(range(1, 13)))
-        self.assertEqual(sum(1 for _ in self.events()), 12)
+        self.assertEqual([e["seq"] for e in self.events()], list(range(1, 12)))
+        self.assertEqual(sum(1 for _ in self.events()), 11)
+
+    def test_open_tier_is_optional(self):
+        self.append(*OPEN[:2], *OPEN[3:])
+        self.assertNotIn("tier", self.events()[0])
+        self.assertEqual(run("check", self.log).returncode, 0)
+        self.assertIn("charter " + "a" * 64 + ", root llm (m)", run("digest", self.log).stdout)
+
+    def test_retired_names_are_refused(self):
+        self.reject("open", "goal_sha256=" + "a" * 64, "root=llm", "root_model=m", "first_wave=T1",
+                    needle="unknown field goal_sha256")
+        self.reject("open", "charter_sha256=x", "root=llm", "root_model=m", "envelope=T1",
+                    needle="unknown field envelope")
+        self.reject("open", "charter_sha256=x", "root=dispatcher", "root_model=m", "first_wave=T1",
+                    needle="root must be one of llm")
+        self.reject("gate", "scope=lane", "sha=a", "cmd=c", "exit=0", needle="ev must be one of")
+        self.reject("dispatch", "lane=L", "task=T", "agent=a", "run=r", "base=b", "kind=gate",
+                    needle="kind must be one of work|review")
+        self.reject("close", "reason=budget", "--by", "dispatcher", needle="by must be one of root|ext|daemon")
 
     def test_missing_required_field(self):
-        self.reject("admit", "task=T1", "source=envelope", "owned=x", needle="missing required field accept")
+        self.reject("admit", "task=T1", "source=first-wave", "owned=x", needle="missing required field accept")
 
     def test_enum_violations(self):
         self.reject(*OPEN[:2], "tier=sloppy", *OPEN[3:], needle="tier must be one of")
@@ -250,9 +257,9 @@ class ValidationTests(Base):
         self.reject("return", "lane=L", "run=r", "status=done", needle="status must be one of")
 
     def test_type_violations(self):
-        self.reject("gate", "scope=lane", "sha=a", "cmd=c", "exit=zero", needle="exit must be an integer")
+        self.reject("return", "lane=L", "run=r", "status=partial", "exit=zero", needle="exit must be an integer")
         self.reject("accept", "task=T", "accepted=maybe", "reason=r", needle="accepted must be true or false")
-        self.reject(*OPEN[:5], "envelope=[1,2]", needle="envelope must be a list of strings")
+        self.reject(*OPEN[:5], "first_wave=[1,2]", needle="first_wave must be a list of strings")
         self.reject(
             "return", "lane=L", "run=r", "status=complete", "coderabbit={}", needle="coderabbit must be"
         )
@@ -279,8 +286,8 @@ class ValidationTests(Base):
             self.assertIn(field, r.stderr.split("allowed fields:")[1])
 
     def test_string_list_accepts_a_comma_separated_string(self):
-        self.append(*OPEN[:5], "envelope=T1, T2,T3")
-        self.assertEqual(self.events()[0]["envelope"], ["T1", "T2", "T3"])
+        self.append(*OPEN[:5], "first_wave=T1, T2,T3")
+        self.assertEqual(self.events()[0]["first_wave"], ["T1", "T2", "T3"])
         self.append("return", "lane=L", "run=r", "status=partial", "questions=why?")
         self.assertEqual(self.events()[1]["questions"], ["why?"])
         self.append("return", "lane=L2", "run=r2", "status=partial", 'questions=["a,b","c"]')
@@ -290,10 +297,10 @@ class ValidationTests(Base):
         self.reject("nope", needle="ev must be one of")
         self.reject("close", "reason", needle="expected k=v")
 
-    def test_envelope_fields_set_by_tool(self):
-        self.append(*OPEN, "--by", "dispatcher")
+    def test_framing_fields_set_by_tool(self):
+        self.append(*OPEN, "--by", "ext")
         e = self.events()[0]
-        self.assertEqual((e["v"], e["seq"], e["by"], e["ev"]), (1, 1, "dispatcher", "open"))
+        self.assertEqual((e["v"], e["seq"], e["by"], e["ev"]), (1, 1, "ext", "open"))
         self.assertRegex(e["ts"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
         self.append("close", "reason=budget")
         self.assertEqual(self.events()[1]["by"], "root")
@@ -465,7 +472,7 @@ class OpenAndParkTests(Base):
 
     def test_a_second_open_is_refused_from_stdin_too(self):
         self.append(*OPEN)
-        body = {"ev": "open", "goal_sha256": "b" * 64, "tier": "guarded", "root": "llm", "root_model": "m", "envelope": []}
+        body = {"ev": "open", "charter_sha256": "b" * 64, "tier": "guarded", "root": "llm", "root_model": "m", "first_wave": []}
         r = self.append(stdin=json.dumps(body), ok=False)
         self.assertEqual(r.returncode, 2)
         self.assertEqual(len(self.events()), 1)
@@ -657,17 +664,17 @@ class DigestTests(Base):
 
     def test_folds_task_state(self):
         self.seed()
-        self.append("admit", "task=T3", "source=envelope", "owned=c", "accept=ok")
-        self.append("admit", "task=T4", "source=envelope", "owned=d", "accept=ok")
-        self.append("admit", "task=T5", "source=envelope", "owned=e", "accept=ok")
-        self.append("dispatch", "lane=L1", "task=T1", "agent=lane-worker", "run=r1", "base=b", "deadline=2026-10-03T12:00:00Z")
-        self.append("dispatch", "lane=L2", "task=T3", "agent=lane-worker", "run=r2", "base=b")
+        self.append("admit", "task=T3", "source=first-wave", "owned=c", "accept=ok")
+        self.append("admit", "task=T4", "source=first-wave", "owned=d", "accept=ok")
+        self.append("admit", "task=T5", "source=first-wave", "owned=e", "accept=ok")
+        self.append("dispatch", "lane=L1", "task=T1", "agent=worker", "run=r1", "base=b", "deadline=2026-10-03T12:00:00Z")
+        self.append("dispatch", "lane=L2", "task=T3", "agent=worker", "run=r2", "base=b")
         self.append("return", "lane=L2", "run=r2", "status=complete", "sha=" + "c" * 40)
         self.append("accept", "task=T3", "accepted=true", "reason=ok")
         self.append("park", "task=T4", "reason=needs a human", "needs=owner")
         self.append("land", "task=T5", "sha=" + "d" * 40, "gate=g", "mode=after-green")
         text = self.digest()
-        self.assertIn("goal " + "a" * 64, text)
+        self.assertIn("charter " + "a" * 64, text)
         self.assertIn("tier routine", text)
         self.assertIn("## Live lanes (1)", text)
         self.assertIn("- L1 task T1 run r1 deadline 2026-10-03T12:00:00Z", text)
@@ -685,7 +692,7 @@ class DigestTests(Base):
 
     def test_landed_task_whose_run_failed_shows_its_status(self):
         self.seed()
-        self.append("dispatch", "lane=L1", "task=T1", "agent=lane-worker", "run=r1", "base=b")
+        self.append("dispatch", "lane=L1", "task=T1", "agent=worker", "run=r1", "base=b")
         self.append("return", "lane=L1", "run=r1", "status=failed", "landed=true", "sha=" + "e" * 40)
         text = self.digest()
         self.assertIn("- T1: landed:failed sha=" + "e" * 12, text)
@@ -715,13 +722,11 @@ class DigestTests(Base):
         self.assertIn("- T1: reverted", text)
         self.assertEqual(json.loads(self.digest("--json"))["admissible"], ["T1", "T2"])
 
-    def test_close_and_last_gate_shown(self):
+    def test_close_shown(self):
         self.seed()
-        self.append("gate", "scope=composed", "sha=" + "9" * 40, "cmd=c", "exit=1")
         self.append("close", "reason=blocked")
         text = self.digest()
         self.assertIn("closed: blocked", text)
-        self.assertIn("last gate: composed " + "9" * 12 + " exit 1", text)
 
     def test_only_last_five_judgements(self):
         self.seed()
@@ -735,7 +740,7 @@ class DigestTests(Base):
     def test_truncation_drops_oldest_judgements_before_task_detail(self):
         self.append(*OPEN)
         for i in range(10):
-            self.append("admit", "task=T%d" % i, "source=envelope", "owned=x", "accept=ok")
+            self.append("admit", "task=T%d" % i, "source=first-wave", "owned=x", "accept=ok")
         for i in range(5):
             self.append("judgement", "text=" + ("%d" % i) * 390)
         full = self.digest()
@@ -754,10 +759,10 @@ class DigestTests(Base):
     def test_truncation_reduces_task_detail_last(self):
         self.append(*OPEN)
         for i in range(300):
-            self.append("admit", "task=Task-number-%d" % i, "source=envelope", "owned=x", "accept=ok")
+            self.append("admit", "task=Task-number-%d" % i, "source=first-wave", "owned=x", "accept=ok")
         text = self.digest()
         self.assertLessEqual(len(text.encode("utf-8")), 4096)
-        self.assertIn("goal " + "a" * 64, text)
+        self.assertIn("charter " + "a" * 64, text)
         self.assertIn("## Admissible (300)", text)
 
     def test_json_digest_on_empty_open_log(self):
@@ -770,24 +775,6 @@ class DigestTests(Base):
     def test_missing_log_exits_1(self):
         r = run("digest", self.log)
         self.assertEqual(r.returncode, 1)
-
-    def test_a_gate_runner_dispatch_is_a_live_lane_not_a_task(self):
-        self.seed()
-        self.append("dispatch", "lane=L5", "task=T1,T2", "agent=gate-runner", "run=r5", "base=b")
-        j = json.loads(self.digest("--json"))
-        self.assertEqual(j["live_lanes"], 1)
-        self.assertEqual(j["admissible"], ["T1", "T2"])
-        self.append("return", "lane=L5", "run=r5", "status=failed", "exit=1")
-        j = json.loads(self.digest("--json"))
-        self.assertEqual(j, {"live_lanes": 0, "open_tasks": 2, "admissible": ["T1", "T2"], "parked": [],
-                             **legacy_audit([("L5", "r5", ["T1,T2"])])})
-        self.assertNotIn("T1,T2", self.digest())
-
-    def test_a_gate_exit_may_be_null(self):
-        self.seed()
-        self.append("gate", "scope=composed", "sha=" + "9" * 40, "cmd=c", "exit=null")
-        self.assertIsNone(self.events()[-1]["exit"])
-        self.assertIn("exit null", self.digest())
 
     def test_digest_tolerates_a_bad_line(self):
         self.seed()
@@ -804,7 +791,7 @@ if __name__ == "__main__":
 class ReturnArtifactTests(Base):
     def test_native_artifact_round_trip_and_invalid_types(self):
         self.seed()
-        self.append("dispatch", "lane=L1", "task=T1", "agent=lane-worker", "run=r1", "base=b")
+        self.append("dispatch", "lane=L1", "task=T1", "agent=worker", "run=r1", "base=b")
         artifact = os.path.join(self.repo, "full return.md")
         self.append("return", "lane=L1", "run=r1", "status=complete", "artifact=" + artifact)
         self.assertEqual(self.events()[-1]["artifact"], artifact)

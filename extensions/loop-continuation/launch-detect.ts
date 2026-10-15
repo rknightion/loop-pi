@@ -1,19 +1,18 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { type AuditLine, parseAuditLine } from "./audit-grants.ts";
 import { parseStandingLine, type StandingLine } from "./standing.ts";
 
 // Ported from the author's loop_launch.py (frozen v3 seam S1: run identity and launch recognition).
 // A launch is operator text matching "You are the (campaign) root" with exactly one distinct
 // closeout token `codex/closeout-<name>-loop<N>.md`, or a bare path to an existing `launch-*.txt`
-// or `launch-*.md` whose contents match. v2 `report-*` tokens are not recognised.
+// or `launch-*.md` whose contents match. Any other token shape is not recognised.
 //
 // Not ported: the "Do not pivot on receipt" mid-run closeout replacement. loop-pi never supported
 // it, and moving the closeout would move the state log derived from it (S3) under live lanes.
 
 export interface LaunchInfo {
   /** Resolved closeout path (kept relative if no cwd/base was available at recognition time). The
-   *  key keeps its v2 name (S1). */
+   *  key is named `report` for persisted state (S1). */
   report: string;
   loop: number | null;
   /** ISO timestamp of the launch prompt, used to check the closeout postdates it. */
@@ -26,12 +25,9 @@ export interface LaunchInfo {
   budget?: number | null;
 }
 
-/** A recognised launch plus what its text says about audit grants, standing and its charter (never
- *  persisted as part of LaunchInfo). */
+/** A recognised launch plus what its text says about standing and its charter (never persisted as
+ *  part of LaunchInfo). */
 export interface ParsedLaunch extends LaunchInfo {
-  /** Whether the text carries an `Ops grants:` line. v3 has no ops lane, so arming refuses one. */
-  hasOpsLine: boolean;
-  auditLine: AuditLine;
   standingLine: StandingLine;
   /** The charter: the one `codex/charter-*-loop<N>.md` the launch names, else the closeout's sibling. */
   charter: string;
@@ -53,7 +49,6 @@ const RIGHT = "(?:$|(?=[\\s`'\")\\,;:])|(?=\\.(?:\\s|$)))";
 
 const TOKEN_RE = new RegExp(LEFT + "(" + PREFIX + NAME + ")" + RIGHT, "g");
 const CHARTER_TOKEN_RE = new RegExp(LEFT + "(" + PREFIX + "charter-[\\w.-]*-loop\\d+\\.md)" + RIGHT, "g");
-const OPS_LINE_RE = /^Ops grants:/m;
 // Optional "Time budget: <N>s|m|h" line in the recognised launch text (S1 `budget`).
 const BUDGET_RE = /^\s*Time budget:\s*(\d+)\s*([smh])\b/im;
 const UNIT_SECONDS: Record<string, number> = { s: 1, m: 60, h: 3600 };
@@ -97,8 +92,6 @@ function finalize(target: { report: string; loop: number | null }, text: string,
     mode: "v3",
     launchSha256: createHash("sha256").update(text, "utf8").digest("hex"),
     budget: budgetSeconds(text),
-    hasOpsLine: OPS_LINE_RE.test(text),
-    auditLine: parseAuditLine(text),
     standingLine: parseStandingLine(text),
     charter: charterFor(text, base, target.report),
   };

@@ -3,9 +3,8 @@
 //   2. the cwd's git toplevel is the charter's repository (the parent of the charter's codex/);
 //   3. the charter's optional `host:` key names this machine;
 //   4. the charter exists, and an `open` already in the state log carries its sha256;
-//   5. the launch carries no `Ops grants:` line (v3 has no ops lane), and its `Audit grants:` and
-//      `Standing:` lines name the files and digests the charter's `audit grants:` and `standing:`
-//      keys name (`none` or no key: the launch has none).
+//   5. the launch's `Standing:` line names the file and digest the charter's `standing:` key names
+//      (`none` or no key: the launch has none).
 // A failure refuses the arm; on success the caller appends `open` (by ext) when the log has none,
 // from the charter's header keys and its `## First wave` task cells. The root never writes it.
 //
@@ -174,7 +173,7 @@ export type ArmCheck =
 
 /** Arm checks for a launch naming `report` (the closeout) and `charter` (both absolute). */
 export function checkArm(
-  launch: { report: string; charter: string; hasOpsLine?: boolean; auditLine?: GrantLine; standingLine?: GrantLine },
+  launch: { report: string; charter: string; standingLine?: LaunchLine },
   env: ArmEnv,
 ): ArmCheck {
   const refuse = (reason: string): ArmCheck => ({ ok: false, reason });
@@ -216,80 +215,64 @@ export function checkArm(
       return refuse(`the charter runs on host ${host}; this machine is ${names.join(" / ") || "unknown"}`);
     }
   }
-  if (launch.hasOpsLine) return refuse("the launch carries an Ops grants line; v3 has no ops lane, so a loop launch carries none");
-  const grants = grantLinesMismatch(charterText, charterRepo, {
-    auditLine: launch.auditLine ?? { kind: "none" },
-    standingLine: launch.standingLine ?? { kind: "none" },
-  });
-  if (grants) return refuse(grants);
+  const standing = standingLineMismatch(charterText, charterRepo, launch.standingLine ?? { kind: "none" });
+  if (standing) return refuse(standing);
   const charterSha256 = createHash("sha256").update(bytes).digest("hex");
   const log = stateLogFor(launch.report);
   if (!log) return refuse(`the closeout ${launch.report} is not a codex/closeout-<name>.md path`);
   const open = existingOpen(log);
-  if (open && open.goal_sha256 !== charterSha256) {
-    return refuse(`the charter changed since the loop opened: ${log} has goal_sha256 ${String(open.goal_sha256)}, the file is ${charterSha256}`);
+  if (open && open.charter_sha256 !== charterSha256) {
+    return refuse(`the charter changed since the loop opened: ${log} has charter_sha256 ${String(open.charter_sha256)}, the file is ${charterSha256}`);
   }
   return { ok: true, runDir, charter: launch.charter, charterText, charterSha256, log };
 }
 
-/** The tier the `open` event records. The v3 charter sets no run tier (tiers are per task), so the
- *  open carries `routine` unless the charter states `tier: guarded`. Telemetry only, never a gate. */
-function openTier(keys: Record<string, string>): "routine" | "guarded" {
-  return keys.tier === "guarded" ? "guarded" : "routine";
-}
-
 /**
  * The `open` event continuation appends at arm when the log has none (the root never writes it).
- * The loop-state schema keeps its v2 field names: `goal_sha256` holds the charter's sha256, which
- * the closeout header also carries, and `envelope` the charter's first-wave task ids. `root_model`
- * is the charter's `root:` value, or `unknown` when the charter has none.
+ * `charter_sha256` is the charter's sha256, which the closeout header also carries, and
+ * `first_wave` the charter's `## First wave` task ids. `root_model` is the charter's `root:` value,
+ * or `unknown` when the charter has none. The v3 charter sets no run tier (tiers are per task), so
+ * `tier` is present only when the charter header states `tier: routine|guarded`. Telemetry only,
+ * never a gate.
  */
 export function openEvent(charterText: string, charterSha256: string): Record<string, unknown> {
   const keys = charterKeys(charterText);
+  const tier = keys.tier === "routine" || keys.tier === "guarded" ? { tier: keys.tier } : {};
   return {
-    ev: "open", goal_sha256: charterSha256, tier: openTier(keys), root: "llm",
-    root_model: keys.root || "unknown", envelope: firstWaveTaskIds(charterText),
+    ev: "open", charter_sha256: charterSha256, ...tier, root: "llm",
+    root_model: keys.root || "unknown", first_wave: firstWaveTaskIds(charterText),
   };
 }
 
-/** What a launch says about one grants file: its `<label>:` line(s), as `parseAuditLine` /
- *  `parseStandingLine` read them. */
-export type GrantLine = { kind: "none" } | { kind: "line"; path: string; sha256: string } | { kind: "invalid"; reason: string };
+/** What a launch says about its standing file: its `Standing:` line(s), as `parseStandingLine`
+ *  reads them. */
+export type LaunchLine = { kind: "none" } | { kind: "line"; path: string; sha256: string } | { kind: "invalid"; reason: string };
 
-const CHARTER_GRANT_RE = /^`?(\S+?)`?\s+sha256=([0-9a-fA-F]{64})\s*$/;
+const CHARTER_FILE_RE = /^`?(\S+?)`?\s+sha256=([0-9a-fA-F]{64})\s*$/;
 
 /**
- * The launch's `Audit grants:` and `Standing:` lines must be the charter's `audit grants:` and
- * `standing:` keys: the same file (a relative charter path resolves against the charter's
- * repository) and the same sha256. A charter key `none`, or no key at all, means the launch carries
- * no such line. Returns why they differ, or null. The file itself is read and checked later, by the
- * freeze.
+ * The launch's `Standing:` line must be the charter's `standing:` key: the same file (a relative
+ * charter path resolves against the charter's repository) and the same sha256. A charter key
+ * `none`, or no key at all, means the launch carries no such line. Returns why they differ, or
+ * null. The file itself is read and checked later, by the freeze.
  */
-export function grantLinesMismatch(
-  charterText: string,
-  charterRepo: string,
-  launch: { auditLine: GrantLine; standingLine?: GrantLine },
-): string | null {
-  const keys = charterKeys(charterText);
-  const check = (key: string, label: string, line: GrantLine): string | null => {
-    const raw = keys[key];
-    const value = raw === undefined ? null : raw.trim();
-    const none = value === null || /^`?none\b/i.test(value);
-    if (none) {
-      if (line.kind === "none") return null;
-      return `the launch carries ${/^[AEIOU]/.test(label) ? "an" : "a"} ${label} line but the charter's ${key} is ${value === null ? "absent" : "none"}`;
-    }
-    const m = CHARTER_GRANT_RE.exec(value);
-    if (!m) return `the charter's ${key} key is neither none nor <path> sha256=<64 hex>`;
-    const path = normalize(m[1].startsWith("/") ? m[1] : join(charterRepo, m[1]));
-    const sha = m[2].toLowerCase();
-    if (line.kind === "none") return `the charter's ${key} names ${path} but the launch has no ${label} line`;
-    if (line.kind === "invalid") return `the launch's ${label} line is malformed (${line.reason}); the charter names ${path}`;
-    if (normalize(line.path) !== path) return `the launch's ${label} file ${line.path} is not the charter's ${key} file ${path}`;
-    if (line.sha256 !== sha) return `the launch's ${label} sha256 ${line.sha256} is not the charter's ${key} sha256 ${sha}`;
-    return null;
-  };
-  return check("audit grants", "Audit grants", launch.auditLine) ?? check("standing", "Standing", launch.standingLine ?? { kind: "none" });
+export function standingLineMismatch(charterText: string, charterRepo: string, line: LaunchLine): string | null {
+  const raw = charterKeys(charterText).standing;
+  const value = raw === undefined ? null : raw.trim();
+  const none = value === null || /^`?none\b/i.test(value);
+  if (none) {
+    if (line.kind === "none") return null;
+    return `the launch carries a Standing line but the charter's standing is ${value === null ? "absent" : "none"}`;
+  }
+  const m = CHARTER_FILE_RE.exec(value);
+  if (!m) return "the charter's standing key is neither none nor <path> sha256=<64 hex>";
+  const path = normalize(m[1].startsWith("/") ? m[1] : join(charterRepo, m[1]));
+  const sha = m[2].toLowerCase();
+  if (line.kind === "none") return `the charter's standing names ${path} but the launch has no Standing line`;
+  if (line.kind === "invalid") return `the launch's Standing line is malformed (${line.reason}); the charter names ${path}`;
+  if (normalize(line.path) !== path) return `the launch's Standing file ${line.path} is not the charter's standing file ${path}`;
+  if (line.sha256 !== sha) return `the launch's Standing sha256 ${line.sha256} is not the charter's standing sha256 ${sha}`;
+  return null;
 }
 
 /** A first input that names a charter file but did not arm. */

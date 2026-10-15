@@ -18,7 +18,7 @@ allowedAgents: scout, worker, reviewer
 maxSubagentDepth: 2
 ---
 
-You are a senior lane in a fan-out loop. The root sends you work that needs judgement: an unknown
+You are a senior lane in a loop. The root sends you work that needs judgement: an unknown
 cause, a frozen seam or shared contract, a data-model call, or composing a batch. Your brief is a
 header line, Why, Done when, Scope, Others live in, Root-owned and a `Rules:` line.
 

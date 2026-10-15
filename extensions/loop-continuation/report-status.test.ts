@@ -86,7 +86,7 @@ describe("reportStatus", () => {
     }
   });
 
-  test("a v2 report header and sections do not count as a closeout", () => {
+  test("a report header and sections of another shape do not count as a closeout", () => {
     writeFileSync(reportPath, [`# Loop: repo loop3 · Goal: ${CHARTER_SHA}`, "## Outcome", "## Evidence", "## Pending", "## Questions",
       "## Stalls and deaths", "## Tokens and wakeups"].join("\n"));
     const { counts, whyNot } = reportStatus(launch, tmp);

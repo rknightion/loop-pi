@@ -345,7 +345,7 @@ function findChildSessionFile(dir: string): string | undefined {
   return undefined;
 }
 
-test("(c) protocol 2 root: with the run dir marker, a write into the run dir and a long bash timeout are refused", async () => {
+test("(c) marked root: with the run dir marker, a write into the run dir and a long bash timeout are refused", async () => {
   const runDir = freshDir("loop-guard-e2e-p2-run-");
   writeFileSync(join(runDir, "loop-pi-proto"), "2\n");
   const cwd = freshDir("loop-guard-e2e-p2-cwd-");

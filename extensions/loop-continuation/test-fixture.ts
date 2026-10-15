@@ -24,7 +24,7 @@ export function setCharterKeys(fixture: { charter: string }, ...lines: string[])
   let text = readFileSync(fixture.charter, "utf8");
   for (const line of lines) {
     const key = line.slice(0, line.indexOf(":")).trim().toLowerCase();
-    // Keys are plain words (`standing`, `audit grants`): no regex escaping needed.
+    // Keys are plain words (`standing`, `lanes`): no regex escaping needed.
     const existing = new RegExp(`^${key}\\s*:.*$`, "mi");
     text = existing.test(text) ? text.replace(existing, () => line) : text.replace(/^## First wave/m, () => `${line}\n\n## First wave`);
   }

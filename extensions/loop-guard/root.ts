@@ -15,7 +15,6 @@ import { installModelFamily, subagentOverrideBlock } from "./model-family.ts";
 import { deleteSubagentField } from "./subagent-view.ts";
 import { installRequestCeiling, installRetryBackoff } from "../request-ceiling/index.ts";
 import { bindLaneIdentity } from "./push-grant.ts";
-import { evaluateOpsLaunch, QUERY_LAUNCH_EVENT } from "./ops.ts";
 import { evaluateBashCommand, evaluateBgWait, evaluateSubagentCall, evaluateWatchProcess, isAsyncSubagentLaunch, wrappedGateCommands, bindGateExecution } from "./rules.ts";
 import { loadGateDeclarations } from "./gates.ts";
 import { bashProtectedPath, protoActive, runDirFromEnv, toolWriteRefusal } from "./guard-paths.ts";
@@ -23,7 +22,7 @@ import { capturePushExecutions, planPushes, recordPushes, unloggedPushRefusal, t
 
 const ASYNC_COMPLETE_EVENT = "subagent:async-complete";
 
-/** Protocol 2: the longest `bash` timeout (seconds) the root may set; longer waits go through
+/** With the run marker: the longest `bash` timeout (seconds) the root may set; longer waits go through
  *  `watch_start`, so the watchdog never reads a long silent turn as a stall. */
 export const ROOT_BASH_TIMEOUT_MAX_S = 900;
 
@@ -44,8 +43,8 @@ export function launchedRunId(result: unknown): string | undefined {
 }
 
 export default function (pi: ExtensionAPI) {
-  // The loop run dir the launcher exported. Protocol 2 refusals and the push log apply only while
-  // its `loop-pi-proto` marker exists (SEAMS S0), which loop-continuation writes when it arms.
+  // The loop run dir the launcher exported. Marker-gated refusals and the push log apply only while
+  // its `loop-pi-proto` marker exists, which loop-continuation writes when it arms.
   const runDir = runDirFromEnv();
   const proto = () => protoActive(runDir);
   // Pushes planned at tool_call (remote branches read before the command runs), by tool call id.
@@ -66,31 +65,14 @@ export default function (pi: ExtensionAPI) {
   // the rest of this session rather than merely logged and allowed through.
   let childRegistrationFailed = false;
 
-  // Ops runs active in this session, by surface: launches between tool_call and the end of their
-  // tool execution (by tool call id), then started runs (by run id) until `subagent:async-complete`.
-  const pendingOps = new Map<string, { surface: string; async: boolean }>();
-  const runningOps = new Map<string, string>();
+  // Runs `subagent:async-complete` already named, so a late launch result is not tracked as live.
   const completedRuns = new Set<string>();
-  const isSurfaceActive = (surface: string) =>
-    [...pendingOps.values()].some((p) => p.surface === surface) || [...runningOps.values()].includes(surface);
-
-  /** The frozen ops grants from loop-continuation, or undefined when nothing answers. */
-  const queryFrozenOps = (): unknown => {
-    let ops: unknown;
-    pi.events.emit(QUERY_LAUNCH_EVENT, {
-      reply: (launch: { ops?: unknown } | null | undefined) => {
-        ops = launch?.ops ?? null;
-      },
-    });
-    return ops;
-  };
 
   pi.events.on(ASYNC_COMPLETE_EVENT, (data) => {
     const event = data as { runId?: unknown; id?: unknown } | null;
     const runId = typeof event?.runId === "string" ? event.runId : typeof event?.id === "string" ? event.id : undefined;
     if (!runId) return;
     completedRuns.add(runId);
-    runningOps.delete(runId);
     activeAsyncRuns.delete(runId);
   });
 
@@ -150,19 +132,6 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("tool_execution_end", (event) => {
-    const pending = pendingOps.get(event.toolCallId);
-    if (pending !== undefined) {
-      const surface = pending.surface;
-      pendingOps.delete(event.toolCallId);
-      const runId = launchedRunId(event.result);
-      if (runId !== undefined) {
-        if (!completedRuns.has(runId)) runningOps.set(runId, surface);
-      } else if (!event.isError && pending.async) {
-        // An async launch that reported no run id can never be seen completing: keep the
-        // surface active for the rest of the session rather than lose track of it.
-        runningOps.set(`call:${event.toolCallId}`, surface);
-      }
-    }
     if (!pendingAsyncLaunches.delete(event.toolCallId) || event.isError) return;
     const runId = launchedRunId(event.result);
     if (runId === undefined) activeAsyncRuns.add(`call:${event.toolCallId}`);
@@ -310,15 +279,10 @@ export default function (pi: ExtensionAPI) {
       if (decision.block) {
         return { block: true, reason: decision.reason };
       }
-      const ops = evaluateOpsLaunch(input, queryFrozenOps(), isSurfaceActive);
-      if (ops.block) {
-        return { block: true, reason: ops.reason };
-      }
       if (input.action === undefined && typeof input.agent === "string" && typeof input.task === "string") {
         // A model-supplied binding inside pi-subagents 0.77.0 `options` would conflict with the bound one.
         deleteSubagentField(input, "extensionBindings");
-        bindLaneIdentity(input, input.agent, ops.entry, { runDir });
-        if (ops.entry) pendingOps.set(event.toolCallId, { surface: ops.entry.surface, async: isAsyncSubagentLaunch(input) });
+        bindLaneIdentity(input, input.agent, { runDir });
       } else {
         // Only a single launch is bound; a model-supplied binding never reaches any other shape.
         deleteSubagentField(input, "extensionBindings");

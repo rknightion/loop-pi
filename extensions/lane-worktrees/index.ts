@@ -232,7 +232,7 @@ export default function (pi: ExtensionAPI) {
     patchRpcReplies.clear();
   }
 
-  // Supported package RPC bus (also used by dispatcher). Observe the unredacted request and its
+  // Supported package RPC bus. Observe the unredacted request and its
   // exact success reply; async-started.task is redacted and cannot establish lane/task identity.
   // This observer supplies no authority, changes no params, and never rewrites package refs.
   pi.events.on("subagents:rpc:v1:request", (data) => {
@@ -477,8 +477,7 @@ export default function (pi: ExtensionAPI) {
     return r.code === 0 && r.stdout.trim() ? r.stdout.trim() : null;
   }
 
-  // The dispatcher composes this extension too (dispatcher/index.ts) and has no use for a root
-  // tool; a host API without tool registration still gets the retention and teardown hooks.
+  // A host API without tool registration still gets the retention and teardown hooks.
   if (typeof pi.registerTool === "function") pi.registerTool({
     name: SCRATCH_TOOL,
     label: "Register scratch path",

@@ -38,7 +38,7 @@ function scaffold() {
   const stub = join(stubDir, "launch-stub.ts");
   writeFileSync(
     stub,
-    `export default function (pi) { pi.events.on("loop-continuation:query-launch", (d) => d.reply({ reportPath: ${JSON.stringify(report)}, opsPath: null, ops: null })); }\n`,
+    `export default function (pi) { pi.events.on("loop-continuation:query-launch", (d) => d.reply({ reportPath: ${JSON.stringify(report)} })); }\n`,
   );
   return { repo, agentDir, report, log, stub };
 }
@@ -48,8 +48,8 @@ const append = (log: string, ...args: string[]) => execFileSync(BIN, ["append", 
 test("a forced compaction is followed by a fresh loop-state-digest message", async () => {
   const s = scaffold();
   writeFileSync(join(s.agentDir, "settings.json"), JSON.stringify({ compaction: { keepRecentTokens: 20 } }));
-  append(s.log, "open", "goal_sha256=" + "a".repeat(64), "tier=routine", "root=llm", "root_model=m", 'envelope=["T1"]');
-  append(s.log, "admit", "task=T1", "source=envelope", "owned=x", "accept=ok");
+  append(s.log, "open", "charter_sha256=" + "a".repeat(64), "root=llm", "root_model=m", 'first_wave=["T1"]');
+  append(s.log, "admit", "task=T1", "source=first-wave", "owned=x", "accept=ok");
   const session = startPiRpc({
     extensions: [FAUX_EXTENSION, STATE_EXTENSION, s.stub],
     fauxScriptPath: writeFauxScript([{ match: ".*", text: "FAUX reply" }]),
@@ -116,10 +116,10 @@ test(`each real package recovery has its own dispatch and return: ${outcome}`, a
     JSON.stringify({ packages: [PI_SUBAGENTS_PACKAGE_DIR], subagents: { agentExcludeDirs: ["~/.agents"] } }),
   );
   writeFileSync(
-    join(s.agentDir, "agents", "lane-worker.md"),
+    join(s.agentDir, "agents", "worker.md"),
     [
       "---",
-      "name: lane-worker",
+      "name: worker",
       "description: Test lane worker for the loop-state e2e proof",
       "tools: bash",
       "timeoutMs: 60000",
@@ -140,7 +140,7 @@ test(`each real package recovery has its own dispatch and return: ${outcome}`, a
       toolCalls: [
         {
           name: "subagent",
-          args: { agent: "lane-worker", task: "Lane: L1 · Task: T1 · Tier: routine\nObjective: CHILD_LANE_MARKER" },
+          args: { agent: "worker", task: "Lane: L1 · Task: T1 · Tier: routine\nObjective: CHILD_LANE_MARKER" },
         },
       ],
     },
@@ -177,7 +177,7 @@ test(`each real package recovery has its own dispatch and return: ${outcome}`, a
     assert.equal(dispatch.ev, "dispatch");
     assert.deepEqual(
       { by: dispatch.by, lane: dispatch.lane, task: dispatch.task, agent: dispatch.agent },
-      { by: "ext", lane: "L1", task: "T1", agent: "lane-worker" },
+      { by: "ext", lane: "L1", task: "T1", agent: "worker" },
     );
     assert.match(dispatch.run, /\S/);
     assert.equal(ret.run, dispatch.run, "the return carries the run id the dispatch recorded");

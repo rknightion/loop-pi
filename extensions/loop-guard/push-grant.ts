@@ -1,31 +1,44 @@
-// Async child identity is supplied by the trusted root tool_call handler (or the dispatcher),
-// never by the model or by prompt text. Missing/invalid identity denies ops grants. No identity
-// grants a push: only the root pushes (SEAMS S6), so the lane guard refuses `git push` outright.
-import { GUARD_NAMESPACE, OPS_AGENTS, OPS_PROBE_AGENT, PROBE_KIND, isBindableRunDir, validateOpsEntry, type OpsEntry } from "./ops.ts";
+// Async child identity is supplied by the trusted root tool_call handler, never by the model or by
+// prompt text. No identity grants a push: only the root pushes (SEAMS "Child runtime"), so the lane
+// guard refuses `git push` outright. The binding carries identity and the run dir only.
+
+export const GUARD_NAMESPACE = "loop-pi.guard/1";
 
 export interface BindOptions {
-  /** The loop run dir (SEAMS S1), bound so a lane without `LOOP_PI_RUN_DIR` in its environment
-   *  can still write the push log and refuse writes into the run dir. Ignored unless absolute. */
+  /** The loop run dir (SEAMS "Run-dir files"), bound so a lane without `LOOP_PI_RUN_DIR` in its
+   *  environment can still refuse writes into the run dir. Ignored unless absolute. */
   runDir?: string;
 }
 
-/** Replace, do not merge: no model-supplied namespace may grant authority.
- *  Without `opsEntry` this binds `{agent}`. With it (agents `ops` and `ops-probe` only) it binds
- *  `{agent, surface, entry}` with a copy of the full frozen entry. An ops agent without a valid
- *  entry, `ops-probe` on an entry whose kind is not `probe`, or an entry for any other agent,
- *  throws: the caller must not launch. `options.runDir` adds the optional `runDir` field. */
-export function bindLaneIdentity(input: Record<string, unknown>, agent: string, opsEntry?: OpsEntry, options: BindOptions = {}): void {
+/** True for an absolute, NUL-free path string: the only run dir a binding may carry. */
+export function isBindableRunDir(value: unknown): value is string {
+  return typeof value === "string" && value.startsWith("/") && !value.includes("\u0000");
+}
+
+/** Replace, do not merge: no model-supplied namespace may grant authority. Binds `{agent}`, plus
+ *  the optional `runDir` from `options`. */
+export function bindLaneIdentity(input: Record<string, unknown>, agent: string, options: BindOptions = {}): void {
   const runDir = isBindableRunDir(options.runDir) ? { runDir: options.runDir } : {};
-  if (opsEntry === undefined) {
-    if (OPS_AGENTS.has(agent)) throw new Error(`loop-guard: agent ${agent} requires its ops entry; refusing to bind.`);
-    input.extensionBindings = { [GUARD_NAMESPACE]: { agent, ...runDir } };
-    return;
+  input.extensionBindings = { [GUARD_NAMESPACE]: { agent, ...runDir } };
+}
+
+export interface LaneBinding {
+  agent?: string;
+  /** The loop run dir the root bound, when it is an absolute path. */
+  runDir?: string;
+}
+
+/** Parse the child's `PI_SUBAGENT_EXTENSION_BINDINGS`. Missing or malformed input binds nothing. */
+export function parseLaneBinding(raw: string | undefined): LaneBinding {
+  if (!raw) return {};
+  let bindings: unknown;
+  try {
+    bindings = JSON.parse(raw);
+  } catch {
+    return {};
   }
-  if (!OPS_AGENTS.has(agent)) throw new Error(`loop-guard: only agent ops or ops-probe takes an ops entry, not '${agent}'.`);
-  const entry = validateOpsEntry(JSON.parse(JSON.stringify(opsEntry)));
-  if (!entry) throw new Error("loop-guard: the ops entry is malformed; refusing to bind.");
-  if (agent === OPS_PROBE_AGENT && entry.kind !== PROBE_KIND) {
-    throw new Error(`loop-guard: agent ops-probe binds only kind probe, not '${entry.kind}'; refusing to bind.`);
-  }
-  input.extensionBindings = { [GUARD_NAMESPACE]: { agent, surface: entry.surface, entry, ...runDir } };
+  const guard = (bindings as Record<string, unknown> | null)?.[GUARD_NAMESPACE] as Record<string, unknown> | undefined;
+  if (!guard || typeof guard !== "object") return {};
+  const agent = typeof guard.agent === "string" ? guard.agent : undefined;
+  return isBindableRunDir(guard.runDir) ? { agent, runDir: guard.runDir } : { agent };
 }

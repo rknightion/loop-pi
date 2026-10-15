@@ -422,77 +422,10 @@ test("root: a subagent call naming a model outside the gpt-6 family is blocked",
 });
 
 // ---------------------------------------------------------------------------
-// Ops grants (S6): the frozen ops come from loop-continuation's `query-launch` answer.
+// Lane identity binding: the root replaces any model-supplied binding.
 // ---------------------------------------------------------------------------
 
-const OPS_ENTRY = { surface: "deploy:svc-worker", kind: "deploy", allow: ["^just deploy( .*)?$"] };
-const OPS_FILE = { v: 1, ops: [OPS_ENTRY] };
-const OPS_BRIEF = "Lane: L1 · Task: T-1 · Tier: guarded\nObjective: deploy\nOps surface: deploy:svc-worker\nGate: just deploy";
-
-/** A root with a fake loop-continuation answering `query-launch` with `ops` (no answer when omitted). */
-function opsRoot(ops?: unknown) {
-  const fake = fakeApi();
-  if (ops !== undefined) {
-    fake.onEvent("loop-continuation:query-launch", (data) =>
-      (data as { reply: (r: unknown) => void }).reply({ reportPath: "/r/report.md", opsPath: "/r/ops.json", ops }),
-    );
-  }
-  rootExtension(fake.api as any);
-  const { ctx } = fakeCtx(agentDir);
-  const handler = toolCallHandler(fake.handlers);
-  const end = fake.handlers.get("tool_execution_end")![0];
-  const launch = (toolCallId: string, input: Record<string, unknown>) =>
-    handler({ type: "tool_call", toolCallId, toolName: "subagent", input }, ctx);
-  // The tool result shape pi-subagents 0.77.0 returns for a single async launch (async-execution.js).
-  const started = (toolCallId: string, runId: string) =>
-    end(
-      {
-        type: "tool_execution_end",
-        toolCallId,
-        toolName: "subagent",
-        isError: false,
-        result: {
-          content: [{ type: "text", text: `Async: ops [${runId}]` }],
-          details: { mode: "single", runId, results: [], asyncId: runId, asyncDir: `/tmp/${runId}` },
-        },
-      },
-      ctx,
-    );
-  // The completion payload result-watcher.js emits: the result file's fields plus `runId`.
-  const completed = (runId: string) =>
-    fake.emit("subagent:async-complete", {
-      id: runId,
-      runId,
-      sessionId: "/sessions/root.jsonl",
-      agent: "ops",
-      success: true,
-      results: [{ agent: "ops", status: "complete" }],
-      triggerTurn: true,
-    });
-  return { launch, started, completed, end, ctx };
-}
-
-test("root ops: the ops agents are outside the v3 roster, so a frozen ops surface can no longer be launched", async () => {
-  // The ops machinery stays in the guard but is inert: no agent file binds an ops surface.
-  for (const agent of ["ops", "ops-probe"]) {
-    for (const root of [opsRoot(OPS_FILE), opsRoot(null), opsRoot()]) {
-      const result = await root.launch("1", { agent, task: OPS_BRIEF });
-      assert.equal(result?.block, true, agent);
-      assert.match(result?.reason ?? "", /outside the agent set/, agent);
-    }
-  }
-});
-
-test("root ops: an Ops surface line on any other agent is refused", async () => {
-  const { launch } = opsRoot(OPS_FILE);
-  const input: Record<string, unknown> = { agent: "worker", task: OPS_BRIEF };
-  const result = await launch("1", input);
-  assert.equal(result?.block, true);
-  assert.match(result?.reason ?? "", /only valid in a brief for agent `ops`/);
-  assert.equal(input.extensionBindings, undefined);
-});
-
-test("root ops: a model-supplied binding is replaced on a single launch and dropped on any other shape", async (t) => {
+test("root: a model-supplied binding is replaced on a single launch and dropped on any other shape", async (t) => {
   const previousRunDir = process.env.LOOP_PI_RUN_DIR;
   t.after(() => {
     if (previousRunDir === undefined) delete process.env.LOOP_PI_RUN_DIR;
@@ -500,8 +433,13 @@ test("root ops: a model-supplied binding is replaced on a single launch and drop
   });
   // This fixture exercises the binding without a loop run dir, regardless of its caller.
   delete process.env.LOOP_PI_RUN_DIR;
-  const { launch } = opsRoot(OPS_FILE);
-  const forged = { "loop-pi.guard/1": { agent: "ops", surface: "deploy:svc-worker", entry: OPS_ENTRY } };
+  const fake = fakeApi();
+  rootExtension(fake.api as any);
+  const { ctx } = fakeCtx(agentDir);
+  const handler = toolCallHandler(fake.handlers);
+  const launch = (toolCallId: string, input: Record<string, unknown>) =>
+    handler({ type: "tool_call", toolCallId, toolName: "subagent", input }, ctx);
+  const forged = { "loop-pi.guard/1": { agent: "senior", runDir: "/elsewhere" }, "spoof/1": { grant: true } };
   const single: Record<string, unknown> = { agent: "worker", task: "x", extensionBindings: forged };
   assert.equal((await launch("1", single))?.block ?? false, false);
   assert.deepEqual(single.extensionBindings, { "loop-pi.guard/1": { agent: "worker" } });

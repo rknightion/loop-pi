@@ -38,7 +38,7 @@ describe("lane-timers helpers", () => {
   });
 
   test("a lane reason round-trips its run id and no other reason does", () => {
-    assert.equal(runIdFromReason(laneTimerReason("run-7", "lane-worker")), "run-7");
+    assert.equal(runIdFromReason(laneTimerReason("run-7", "worker")), "run-7");
     assert.equal(runIdFromReason("lane run-7 something"), null);
     assert.equal(runIdFromReason("compaction-race-test"), null);
   });
@@ -97,9 +97,9 @@ describe("lane deadline timers", () => {
     const h = await loadRoot(freshDir("lane-timers-a-"));
     try {
       const at = Date.now() + 600_000;
-      h.pi.events.emit("subagent:async-started", { id: "run-1", sessionId: "other", agent: "lane-worker", deadlineAt: at });
+      h.pi.events.emit("subagent:async-started", { id: "run-1", sessionId: "other", agent: "worker", deadlineAt: at });
       assert.deepEqual(h.timers(), []);
-      h.pi.events.emit("subagent:async-started", { id: "run-1", sessionId: "sess-A", agent: "lane-worker", deadlineAt: at });
+      h.pi.events.emit("subagent:async-started", { id: "run-1", sessionId: "sess-A", agent: "worker", deadlineAt: at });
       const [timer] = h.timers();
       assert.equal(timer.at, new Date(at).toISOString());
       assert.equal(runIdFromReason(timer.reason), "run-1");
@@ -128,9 +128,9 @@ describe("lane deadline timers", () => {
       h.fire("tool_execution_start", {
         toolName: "subagent",
         toolCallId: "call-1",
-        args: { agent: "lane-worker", task: "Lane: a\nDeadline: 2099-01-01T00:00:00Z\nObjective: x" },
+        args: { agent: "worker", task: "Lane: a\nDeadline: 2099-01-01T00:00:00Z\nObjective: x" },
       });
-      h.pi.events.emit("subagent:async-started", { id: "run-3", sessionId: "sess-A", agent: "lane-worker", deadlineAt: payloadAt });
+      h.pi.events.emit("subagent:async-started", { id: "run-3", sessionId: "sess-A", agent: "worker", deadlineAt: payloadAt });
       assert.equal(h.timers()[0].at, new Date(payloadAt).toISOString());
       h.fire("tool_execution_end", { toolName: "subagent", toolCallId: "call-1", isError: false, result: { details: { runId: "run-3" } } });
       const timers = h.timers();

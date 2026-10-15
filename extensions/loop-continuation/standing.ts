@@ -1,10 +1,10 @@
 // The standing-authority registry entry frozen at arm (frozen seam S-STANDING). The launch may
 // carry one line
 //   Standing: <absolute path> sha256=<64 hex>
-// parsed exactly like `Audit grants:`, and it must agree with the goal's `## Authority` `standing:`
-// key (arm.ts). At arm the file is read once, checked against the stated digest and copied to
-// `$LOOP_PI_RUN_DIR/standing.md`. A missing file or a mismatch means no standing file and an
-// incident under `incidents/ops/`; the arm still succeeds.
+// and it must agree with the charter's `standing:` key (arm.ts). At arm the file is read once,
+// checked against the stated digest and copied to `$LOOP_PI_RUN_DIR/standing.md`. A missing file
+// or a mismatch means no standing file and an incident under `incidents/standing/`; the arm still
+// succeeds.
 
 import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";

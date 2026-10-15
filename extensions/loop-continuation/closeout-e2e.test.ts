@@ -2,13 +2,12 @@
 // loop-continuation runs the closeout audit and lane-worktrees adds its sweep line, and the root
 // receives one loop-closeout-audit message holding both.
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, readFileSync, realpathSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { cleanupAll, FAUX_EXTENSION, startPiRpc, writeFauxScript } from "../loop-wait/test-helpers.ts";
-import { cleanupFixtures, fakePi, fresh, git, loopFixture, setCharterKeys } from "./test-fixture.ts";
+import { cleanupFixtures, fakePi, fresh, git, loopFixture } from "./test-fixture.ts";
 
 after(cleanupAll);
 after(cleanupFixtures);
@@ -96,11 +95,6 @@ test("/loop-closeout still dispatches a non-downgraded audit after the armed mar
   execFileSync(audit, ["begin", "--run-dir", f.runDir, f.repo], { env, timeout: 15_000 });
   const beforePath = join(f.runDir, "audit-before.json");
   assert.equal(JSON.parse(readFileSync(beforePath, "utf8")).protocol, undefined, "the launcher snapshots before arm");
-  const grants = JSON.stringify({ [realpathSync(f.repo)]: ["refs/heads/main", "HEAD"] });
-  const digest = createHash("sha256").update(grants).digest("hex");
-  const grantsPath = join(f.repo, "codex", "grants-x-loop3.json");
-  writeFileSync(grantsPath, grants);
-  setCharterKeys(f, `audit grants: ${grantsPath} sha256=${digest}`);
   const rpc = startPiRpc({
     extensions: [FAUX_EXTENSION, LOOP_WAIT_ROOT, new URL("./index.ts", import.meta.url).pathname],
     fauxScriptPath: writeFauxScript([
@@ -112,7 +106,7 @@ test("/loop-closeout still dispatches a non-downgraded audit after the armed mar
     extraEnv: { LOOP_PI_RUN_DIR: f.runDir, PATH: env.PATH },
   });
   try {
-    rpc.send({ id: "launch", type: "prompt", message: `${f.launch}\nAudit grants: ${grantsPath} sha256=${digest}` });
+    rpc.send({ id: "launch", type: "prompt", message: f.launch });
     await rpc.waitFor((e) => e.type === "agent_settled", 30_000);
     unlinkSync(join(f.runDir, "loop-pi-proto"));
     git(f.repo, "commit", "--allow-empty", "-qm", "unlogged default-branch work");
@@ -125,10 +119,9 @@ test("/loop-closeout still dispatches a non-downgraded audit after the armed mar
     const content = String((message.message as { content?: unknown }).content);
     assert.match(content, /exited 1 \(NOT clean/);
     assert.match(content, /refs\/heads\/main.*UNGRANTED/);
-    assert.match(content, /ignored/);
     assert.match(content, /--push-log/);
     // The durable before-snapshot also protects direct CLI closeout with no explicit ledger.
-    const direct = spawnSync(audit, ["closeout", "--run-dir", f.runDir, "--grants", grantsPath, "--grants-sha256", digest], { env, encoding: "utf8", timeout: 15_000 });
+    const direct = spawnSync(audit, ["closeout", "--run-dir", f.runDir], { env, encoding: "utf8", timeout: 15_000 });
     assert.equal(direct.status, 1, direct.stdout + direct.stderr);
     assert.match(direct.stdout, /refs\/heads\/main.*UNGRANTED/);
     assert.equal(JSON.parse(readFileSync(beforePath, "utf8")).protocol, 2);

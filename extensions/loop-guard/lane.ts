@@ -4,10 +4,6 @@
 // file"). Applies every-role + lane-only rules; an adapter failure or timeout
 // running the shared hook scripts blocks the call here (root allows it
 // through instead, per C4 item 1).
-//
-// An `ops` or `ops-probe` lane (identity bound by the root with its frozen ops entry) also takes the
-// single-flight surface lock at load and holds it for its whole life; while the lock is not held,
-// every shell command it runs is refused.
 
 import type { ExtensionAPI, ExtensionContext, ToolCallEvent, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, isToolCallEventType } from "@earendil-works/pi-coding-agent";
@@ -17,8 +13,7 @@ import { hasSubagentField } from "./subagent-view.ts";
 import { installRequestCeiling, installRetryBackoff } from "../request-ceiling/index.ts";
 import { evaluateBashCommand, evaluateSubagentPolicyFields, wrappedGateCommands, bindGateExecution } from "./rules.ts";
 import { loadGateDeclarations } from "./gates.ts";
-import { parseLaneBinding } from "./ops.ts";
-import { acquireOpsLock, type OpsLock } from "./ops-lock.ts";
+import { parseLaneBinding } from "./push-grant.ts";
 import { bashProtectedPath, isLoopControlToolPath, protoActive, runDirFromEnv, toolWriteRefusal } from "./guard-paths.ts";
 import { laneIdFromBrief, planPushes, recordPushes, unloggedPushRefusal, type PlannedPush } from "./push-log.ts";
 import { capLaneAssistantMessage } from "../loop-state/return-cap.ts";
@@ -29,40 +24,13 @@ export default function (pi: ExtensionAPI) {
   // Capture once at extension load: later tool calls cannot widen the launch grant.
   const rawBindings = process.env.PI_SUBAGENT_EXTENSION_BINDINGS;
   const binding = parseLaneBinding(rawBindings);
-  const ops = binding.ops;
-  // The run dir: the environment's, else the one the root bound (SEAMS S1). Once observed,
-  // protocol 2 stays active for this child: deleting its marker cannot disable attribution.
+  // The run dir: the environment's, else the one the root bound. Once observed, the run marker
+  // stays active for this child: deleting it cannot disable attribution.
   const runDir = runDirFromEnv() ?? binding.runDir;
   let protocolSeen = protoActive(runDir);
   const proto = () => (protocolSeen ||= protoActive(runDir));
   const pendingPushes = new Map<string, PlannedPush[]>();
   let laneId: string | null | undefined;
-  const opsLock: Promise<OpsLock> | undefined = ops ? acquireOpsLock(ops.surface) : undefined;
-  let heldLock: OpsLock | undefined;
-  if (opsLock) {
-    void opsLock.then((lock) => {
-      heldLock = lock;
-    });
-    const releaseOnExit = () => heldLock?.release();
-    process.once("exit", releaseOnExit);
-    pi.on("session_shutdown", async () => {
-      (await opsLock).release();
-      process.removeListener("exit", releaseOnExit);
-    });
-  }
-
-  const opsLockRefusal = async (): Promise<ToolCallEventResult | void> => {
-    if (!opsLock || !ops) return;
-    const lock = await opsLock;
-    if (lock.isHeld()) return;
-    const why = lock.state === "busy" ? lock.reason : `the surface lock could not be taken (${lock.reason ?? lock.state})`;
-    return {
-      block: true,
-      reason:
-        `loop-guard (ops): surface '${ops.surface}' is single-flight and this lane does not hold its lock: ${why}. ` +
-        "No ops command runs; return blocked.",
-    };
-  };
 
   // Shared path for the builtin `bash` tool and loop-wait's `watch_process`
   // (available to lanes), which spawns a process from a `command` field
@@ -74,13 +42,10 @@ export default function (pi: ExtensionAPI) {
     ctx: ExtensionContext,
     input: Record<string, unknown>,
   ): Promise<ToolCallEventResult | void> => {
-    const locked = await opsLockRefusal();
-    if (locked) return locked;
     const p2 = proto();
     const gates = loadGateDeclarations(ctx.cwd);
     const decision = evaluateBashCommand(command, "lane", 0, {
       gates,
-      ops: ops?.entry,
       cwd: ctx.cwd,
       proto: p2,
       protectedPath: p2 ? bashProtectedPath("lane", ctx.cwd, runDir) : undefined,
@@ -190,7 +155,7 @@ export default function (pi: ExtensionAPI) {
       if (isLoopControlToolPath(path, ctx.cwd)) {
         return {
           block: true,
-          reason: `loop-guard: lanes may not ${event.toolName} '${String(path)}': codex/ops-*, codex/state-* and codex/goal-* belong to the root.`,
+          reason: `loop-guard: lanes may not ${event.toolName} '${String(path)}': codex/state-*, codex/charter-*, codex/launch-* and codex/closeout-* belong to the root.`,
         };
       }
       const agentDir = getAgentDir();

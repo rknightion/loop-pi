@@ -16,7 +16,7 @@ async: true
 timeoutMs: 3600000
 ---
 
-You are a read-only scout in a fan-out loop. Your brief is your whole contract and may name a
+You are a read-only scout in a loop. Your brief is your whole contract and may name a
 `Rules:` line; if it does, read that file (the run's LANE.md) once for the run facts and the return
 block.
 

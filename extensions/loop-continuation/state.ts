@@ -51,8 +51,8 @@ export interface CloseOutDigest {
   timeParkDeadline?: string;
 }
 
-/** Frozen at arm. The `goal*` names are kept for readers of persisted state; under v3 they hold the
- *  charter's path, sha256 and text. `opsSha256` is always null (v3 has no ops lane). */
+/** Frozen at arm. The `goal*` names are kept for readers of persisted state; they hold the
+ *  charter's path, sha256 and text. */
 export interface FrozenRootContext {
   goalPath: string;
   goalSha256: string;
@@ -61,7 +61,6 @@ export interface FrozenRootContext {
   runDir: string;
   sessionId: string;
   sessionFile: string | null;
-  opsSha256: string | null;
 }
 
 export interface ContinuationState {
@@ -73,10 +72,6 @@ export interface ContinuationState {
   nudgeCount: number;
   /** Whether the chain-exhausted incident has already been written for this chain. */
   chainIncidentWritten: boolean;
-  /** The audit grants copy frozen into the run dir at arm (S2), or null. */
-  auditGrantsPath?: string | null;
-  /** The sha256 the launch's `Audit grants:` line stated and the frozen copy matched, or null. */
-  auditGrantsSha256?: string | null;
   /** The standing registry copy frozen into the run dir at arm (S-STANDING), or null. */
   standingPath?: string | null;
   /** The sha256 the launch's `Standing:` line stated and the frozen copy matched, or null. */

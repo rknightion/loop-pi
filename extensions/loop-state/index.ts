@@ -445,7 +445,7 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
         warn(`dispatch for run ${runId} not recorded: ${result.stderr.trim()}`);
         return;
       }
-      // The CLI accepts an ops dispatch with no surface but names the gap on stderr; show it.
+      // The CLI accepts an event with a telemetry gap but names the gap on stderr; show it.
       for (const line of result.stderr.split("\n")) if (line.startsWith("loop-state: warning:")) warn(line.slice("loop-state: ".length));
       recorded = true;
       started.delete(runId);
@@ -651,13 +651,7 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
       }
       if (input.action !== undefined || typeof input.agent !== "string") return;
       const brief = parseBrief(input.task);
-      if (brief) {
-        // A guard-bound ops surface is an explicit identifier, never inferred from an agent name.
-        const bindings = subagentFields(input).extensionBindings as Record<string, unknown> | undefined;
-        const binding = bindings?.["loop-pi.guard/1"] as { surface?: unknown } | undefined;
-        const surface = typeof binding?.surface === "string" && binding.surface ? binding.surface : brief.surface;
-        briefs.set(event.toolCallId, { ...brief, ...(surface ? { surface } : {}), agent: input.agent });
-      }
+      if (brief) briefs.set(event.toolCallId, { ...brief, agent: input.agent });
     } catch (error) {
       warn(String(error));
     }

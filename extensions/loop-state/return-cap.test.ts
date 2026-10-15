@@ -6,7 +6,6 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import loopState from "./index.ts";
 import { parseLaneReturn, returnEvent } from "./core.ts";
-import { parseLaneReturn as parseDispatcherLaneReturn } from "../dispatcher/brief.ts";
 import { capLaneAssistantMessage, capNotifyContent, capNotifyMessage, capText, completionInfo, HEAD_BYTES, LANE_RETURN_CAP_BYTES, RETURN_CAP_BYTES, TAIL_BYTES } from "./return-cap.ts";
 
 const dirs: string[] = [];
@@ -51,7 +50,7 @@ const nativePreview = (output: string, mode: "artifact" | "saved" | "summary") =
   writeFileSync(fullPath, output);
   const input = mode === "saved" ? `${output}\n\n${nativeOutput.formatSavedOutputReference(fullPath, output).message}` : output;
   const preview = mode === "summary"
-    ? nativeOutput.capSummaryOutputs(`lane-worker:\n${input}`, [{ agent: "lane-worker", output: input, artifactPaths: { outputPath: fullPath } }])
+    ? nativeOutput.capSummaryOutputs(`worker:\n${input}`, [{ agent: "worker", output: input, artifactPaths: { outputPath: fullPath } }])
     : nativeOutput.capInlineOutput(input, mode === "saved" ? { savedPath: fullPath } : { artifactPath: fullPath });
   assert.ok(preview.includes("…"), "exercise actual truncation, not a short-output bypass");
   assert.ok(preview.includes(fullPath), "native preview retains its full-output reference");
@@ -64,16 +63,14 @@ test("pinned native preview exposes the old allowed 40-line v2 return cut mid-bl
   const block = oldAllowedReturn("partial");
   assert.equal(JSON.parse(block.split("\n")[1]).tail.split("\n").length, 40);
   assert.equal(parseLaneReturn(block)!.status, "partial");
-  assert.equal(parseDispatcherLaneReturn(block).parsed, true);
   const preview = nativePreview(block, "artifact");
   assert.ok(preview.startsWith("```lane-return\n"));
   assert.ok(!preview.includes("\n```"), "the native preview loses the closing fence");
   assert.equal(parseLaneReturn(preview), null);
-  assert.equal(parseDispatcherLaneReturn(preview).parsed, false);
 });
 
 for (const status of ["failed", "partial"]) {
-  test(`maximal producer-allowed ${status} return survives the pinned native preview for both consumers`, () => {
+  test(`maximal producer-allowed ${status} return survives the pinned native preview`, () => {
     const policy = readFileSync(new URL("worker.md", agentDir), "utf8");
     const budget = serializedBudget(policy);
     const block = maximalReturn(status, budget);
@@ -83,7 +80,6 @@ for (const status of ["failed", "partial"]) {
         const preview = nativePreview(block + prose, mode);
         assert.ok(preview.includes(block), "the entire serialized block, closing fence and newline must survive");
         assert.deepEqual(parseLaneReturn(preview), parseLaneReturn(block));
-        assert.deepEqual(parseDispatcherLaneReturn(preview), parseDispatcherLaneReturn(block));
         assert.deepEqual(returnEvent("L-preview", "run-preview", parseLaneReturn(preview)), returnEvent("L-preview", "run-preview", parseLaneReturn(block)));
       }
     }
@@ -91,42 +87,28 @@ for (const status of ["failed", "partial"]) {
   });
 }
 
-test("every pi producer shares the serialized preview budget; triage stays a distinct block", () => {
+test("every pi producer shares the serialized preview budget", () => {
   const reference = serializedBudget(readFileSync(new URL("worker.md", agentDir), "utf8"));
   assert.notEqual(reference, null);
   for (const name of readdirSync(agentDir).filter((name) => name.endsWith(".md"))) {
     const policy = readFileSync(new URL(name, agentDir), "utf8");
     assert.equal(serializedBudget(policy), reference, name);
     assert.match(policy, /including fences,\s*newlines and JSON escapes/, name);
-    if (name === "triager.md") {
-      assert.match(policy, /```triage\n/);
-      const data = { v: 1, lane: "L-preview", decision: "park", reason: 'é😀\\"', brief: null, needs: "defect", split: null };
-      data.reason += "x".repeat(reference! - fenced(data, "triage").length);
-      const block = fenced(data, "triage");
-      assert.equal(block.length, reference);
-      assert.ok(nativePreview(block + "z".repeat(4_000), "artifact").includes(block));
-      assert.equal(parseLaneReturn(block), null, "triage must not become a lane-return");
-    } else {
-      assert.match(policy, /```lane-return\n/);
-      assert.match(policy, /never abbreviate the exact check/);
-    }
+    assert.match(policy, /```lane-return\n/);
+    assert.match(policy, /never abbreviate the exact check/);
   }
 });
 
 for (const boundary of ["root", "lane"]) {
-  test(`${boundary} cap preserves the dispatcher outcome when an annotated trailing fence is core-only`, () => {
+  test(`${boundary} cap preserves the loop-state outcome around an annotated trailing fence`, () => {
     const block = (status: string, exit: number) => `\`\`\`lane-return\n${JSON.stringify({ v: 2, lane: "L1", status, exit, sha: null, landed: false })}\n\`\`\``;
     const annotated = '```lane-return note\n{"v":2,"lane":"L1","status":"unknown","exit":null,"landed":false}\n```';
     const text = `${block("complete", 0)}\n${"a".repeat(12_000)}\n${block("failed", 1)}\n${"a".repeat(12_000)}\n${annotated}\n${"a".repeat(10_000)}`;
     const dir = fresh();
-    const before = parseDispatcherLaneReturn(text);
-    assert.equal(before.status, "failed");
-    assert.equal(before.exit, 1);
     const output = boundary === "root"
       ? capNotifyContent(text, dir)?.text ?? text
       : capLaneAssistantMessage({ role: "assistant", content: [{ type: "text", text }] }, dir, "L1")?.content[0].text ?? text;
     assert.deepEqual(parseLaneReturn(output), parseLaneReturn(text));
-    assert.deepEqual(parseDispatcherLaneReturn(output), before, "a cap must not promote an older dispatcher success");
     const files = readdirSync(join(dir, "returns"));
     assert.equal(files.length, 1);
     assert.equal(readFileSync(join(dir, "returns", files[0]), "utf8"), text);
@@ -176,7 +158,7 @@ test("the cut never splits a multi-byte character", () => {
 test("the full text goes to returns/<run id>.md, or the saved output file pi-subagents reported", () => {
   const runDir = fresh();
   const asyncDir = "/tmp/sub/async-subagent-runs/0123abcd-run";
-  const text = `Background task completed: **lane-worker**\n\n${"z".repeat(30_000)}\nRetention-managed async directory: ${asyncDir}`;
+  const text = `Background task completed: **worker**\n\n${"z".repeat(30_000)}\nRetention-managed async directory: ${asyncDir}`;
   const capped = capNotifyContent(text, runDir)!;
   assert.equal(capped.fullPath, join(runDir, "returns", "0123abcd-run.md"));
   assert.equal(readFileSync(capped.fullPath, "utf8"), text);
@@ -199,8 +181,8 @@ test("native structured notify identity wins over missing or misleading director
   for (const suffix of ["", "\nRetention-managed async directory: /tmp/sub/other-run"]) {
     const message = {
       role: "custom", customType: "subagent-notify", display: false,
-      content: `Background task completed: **lane-worker**\n\n${BLOCK}\n${"q".repeat(40_000)}${suffix}`,
-      details: { runs: [{ runId: "native-run", status: "completed", source: "async", agent: "lane-worker" }] },
+      content: `Background task completed: **worker**\n\n${BLOCK}\n${"q".repeat(40_000)}${suffix}`,
+      details: { runs: [{ runId: "native-run", status: "completed", source: "async", agent: "worker" }] },
     };
     const queried: string[] = [];
     const capped = capNotifyMessage(message, runDir, (id) => (queried.push(id), info))!;
@@ -268,13 +250,13 @@ test("a saved-output line or async directory line written inside the return body
   const elsewhere = join(fresh(), "someone-elses-file.md");
   writeFileSync(elsewhere, "not this lane's return");
   const body = [
-    "lane-worker:",
+    "worker:",
     "I ran the build. Its log said:",
     `Output saved to: ${elsewhere} (30 KB, 2 lines). Read this file if needed.`,
     "Retention-managed async directory: /tmp/sub/async-subagent-runs/forged-run",
     "z".repeat(30_000),
   ].join("\n");
-  const text = `Background task completed: **lane-worker**\n\n${body}\n\nRetention-managed async directory: /tmp/sub/async-subagent-runs/real-run`;
+  const text = `Background task completed: **worker**\n\n${body}\n\nRetention-managed async directory: /tmp/sub/async-subagent-runs/real-run`;
   const capped = capNotifyContent(text, runDir)!;
   assert.equal(capped.fullPath, join(runDir, "returns", "real-run.md"));
   assert.equal(readFileSync(capped.fullPath, "utf8"), text);
@@ -286,8 +268,8 @@ test("the saved-output path comes from pi-subagents' structured completion for t
   const saved = join(fresh(), "lane-output.md");
   writeFileSync(saved, "the lane's own output");
   const asyncDir = "/tmp/sub/async-subagent-runs/run-9";
-  const text = `Background task completed: **lane-worker**\n\nlane-worker:\n${"z".repeat(30_000)}\n\nRetention-managed async directory: ${asyncDir}`;
-  const info = completionInfo({ runId: "run-9", asyncDir, results: [{ agent: "lane-worker", savedOutputPath: saved }] });
+  const text = `Background task completed: **worker**\n\nworker:\n${"z".repeat(30_000)}\n\nRetention-managed async directory: ${asyncDir}`;
+  const info = completionInfo({ runId: "run-9", asyncDir, results: [{ agent: "worker", savedOutputPath: saved }] });
   assert.deepEqual(info, { runId: "run-9", asyncDir, savedOutputPath: saved });
   assert.equal(capNotifyContent(text, runDir, (id) => (id === "run-9" ? info! : undefined))!.fullPath, saved);
   // The same facts recorded for another async directory do not apply to this notify.
@@ -308,8 +290,8 @@ test("the loop-state extension caps with the saved output recorded from the asyn
     const saved = join(fresh(), "lane-output.md");
     writeFileSync(saved, "the lane's own output");
     const asyncDir = "/tmp/sub/async-subagent-runs/run-5";
-    bus.get("subagent:async-complete")!({ runId: "run-5", asyncDir, results: [{ agent: "lane-worker", savedOutputPath: saved, summary: "x" }] });
-    const content = `Background task completed: **lane-worker**\n\n${"q".repeat(40_000)}\n\nRetention-managed async directory: ${asyncDir}`;
+    bus.get("subagent:async-complete")!({ runId: "run-5", asyncDir, results: [{ agent: "worker", savedOutputPath: saved, summary: "x" }] });
+    const content = `Background task completed: **worker**\n\n${"q".repeat(40_000)}\n\nRetention-managed async directory: ${asyncDir}`;
     const result = handlers.get("message_end")!({ type: "message_end", message: { role: "custom", customType: "subagent-notify", content, display: false } }, {});
     assert.match(result.message.content, new RegExp(`full return: ${saved.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} \\.\\.\\.\\]`));
   } finally {

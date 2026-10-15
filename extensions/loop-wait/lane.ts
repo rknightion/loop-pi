@@ -1,6 +1,6 @@
 // loop-wait lane entry: registers watch_process only, per SEAMS.md ("Model-facing tools:
 // watch_process (root and lane entries)"). Loaded as a required child extension so every lane
-// and gate-runner gets a real, killable process wait instead of a shell `&`.
+// gets a real, killable process wait instead of a shell `&`.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { runWatchProcess } from "./core.ts";

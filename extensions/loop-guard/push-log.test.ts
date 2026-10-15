@@ -737,7 +737,7 @@ test("lanes never push: the lane reads the run dir from its binding when the env
       return last;
     };
     await fire("before_agent_start", { prompt: "Lane: C2 · Task: T-9 · Tier: guarded\nObjective: x", systemPrompt: "" });
-    // The binding's run dir arms protocol 2 for this lane: the run dir is the harness's, not the lane's.
+    // The binding's run dir arms the marker-gated rules for this lane: the run dir is the harness's, not the lane's.
     const intoRunDir = await fire("tool_call", { toolCallId: "rd", toolName: "bash", input: { command: `echo x > ${runDir}/stray` } });
     assert.equal(intoRunDir?.block, true, "the run dir named by the binding is protected");
     assert.match(intoRunDir.reason, /inside the loop run dir/);
@@ -996,43 +996,5 @@ test("root push log: a successful gh pr merge logs the base branch move to the P
     );
   } finally {
     await session.close();
-  }
-});
-
-test("lane push log: an ops release lane's gh pr merge is logged with its agent and lane id", { timeout: 30_000 }, async () => {
-  const { repo, remote, runDir, log, env, mainBefore } = prFixture();
-  const entry = { surface: "release:widget", kind: "release", allow: ["gh pr merge [0-9]+ --merge"] };
-  const saved = { ...process.env };
-  Object.assign(process.env, env, {
-    LOOP_PI_RUN_DIR: runDir,
-    PI_CODING_AGENT_DIR: freshDir("push-log-lane-agent-"),
-    LOOP_PI_OPS_LOCK_DIR: freshDir("push-log-ops-locks-"),
-    PI_SUBAGENT_EXTENSION_BINDINGS: JSON.stringify({ "loop-pi.guard/1": { agent: "ops", surface: entry.surface, entry, runDir } }),
-  });
-  const handlers = new Map<string, ((event: any, ctx: any) => any)[]>();
-  try {
-    laneExtension({ events: { on() { return () => {}; }, emit() {} }, on: (event: string, h: any) => void handlers.set(event, [...(handlers.get(event) ?? []), h]) } as any);
-    const ctx = { cwd: repo, ui: { notify: () => {} } };
-    const fire = async (event: string, payload: Record<string, unknown>) => {
-      let last: any;
-      for (const h of handlers.get(event) ?? []) last = await h({ type: event, ...payload }, ctx);
-      return last;
-    };
-    await fire("before_agent_start", { prompt: "Lane: R1 · Task: T-4 · Tier: guarded\nObjective: merge", systemPrompt: "" });
-    const command = "gh pr merge 7 --merge";
-    const verdict = await fire("tool_call", { toolCallId: "m1", toolName: "bash", input: { command } });
-    assert.equal(verdict?.block ?? false, false, verdict?.reason);
-    execFileSync("/bin/sh", ["-c", command], { cwd: repo, stdio: "ignore", env: process.env, timeout: 20_000 });
-    await fire("tool_execution_end", { toolCallId: "m1", toolName: "bash", isError: false, result: { content: [] } });
-    const lines = readLog(log);
-    assert.equal(lines.length, 1, JSON.stringify(lines));
-    assert.deepEqual(
-      [lines[0].actor, lines[0].agent, lines[0].lane, lines[0].ref, lines[0].old, lines[0].new],
-      ["lane", "ops", "R1", "refs/heads/main", mainBefore, git(remote, "rev-parse", "refs/heads/main")],
-    );
-  } finally {
-    for (const h of handlers.get("session_shutdown") ?? []) await h({ type: "session_shutdown" }, {});
-    for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
-    Object.assign(process.env, saved);
   }
 });

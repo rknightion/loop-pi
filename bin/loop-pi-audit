@@ -2,123 +2,62 @@
 """Closeout remote-change audit for loop-pi runs.
 
 `snapshot --out FILE REPO...` records, for each repository, every remote's
-`git ls-remote --symref` output, local tags, and `gh release list` (recorded as unavailable rather
-than empty when `gh` cannot be used).
+`git ls-remote --symref` output and URL, local tags, and `gh release list` (recorded as unavailable
+rather than empty when `gh` cannot be used).
 
-`compare BEFORE AFTER [--grants FILE]` diffs two snapshots and lists every
-added, moved or deleted ref, tag and release, marking each as covered or not
-by a grants file (`{"<repo>": ["refs/heads/main", ...]}`, matched by the exact
-repo key used on the snapshot command line). For remote refs, paths whose
-snapshots record the same unchanged remote URL share explicit ref grants:
-a granted move is reported once; ungranted moves remain visible under every
-path. Legacy snapshots without URLs do not share grants. Local tags and
-releases remain path-specific. Exits 1 if any change is not
-covered by a grant. Ungranted refs/pull/* changes are reported as FOREIGN,
-not violations. HEAD and peeled tags inherit their target's grant. A repo's
-grants may also be {"refs": [...], "allow_non_fast_forward": [...]}; the
-latter opts named, granted branches into expected history rewrites.
+`compare BEFORE AFTER [--push-log FILE] [--run-dir DIR]` diffs two snapshots and lists every added,
+moved or deleted remote ref, local tag and release. A default-branch move can be accounted for as
+described below; every other change is UNGRANTED, except refs/pull/* changes, which are reported as
+FOREIGN and are not violations. Peeled tags follow their tag. A repository missing from either
+snapshot, or a remote, tag list or release list unreadable on either side, is UNVERIFIED.
+Exit codes: 0 when nothing changed or every change is accounted for, 1 when any change is not,
+2 on invalid input.
 
-Per-run form, used by the `loop-pi` launcher so concurrent loops never share
-a snapshot. The run dir comes from `--run-dir` or `LOOP_PI_RUN_DIR`:
-- `begin REPO` writes `<run-dir>/audit-before.json`, refusing (exit 1, no
-  file) if any remote, tag list or release list cannot be read;
-- `add REPO` adds another repository to that before-snapshot, same rule;
-- `closeout [--grants FILE] [--ops FILE]` snapshots every repo in it to
-  `<run-dir>/audit-after.json` and compares.
+Per-run form, used by the `loop-pi` launcher so concurrent runs never share a snapshot. The run
+dir comes from `--run-dir` or `LOOP_PI_RUN_DIR`, and a lock in it serialises these commands:
+- `begin REPO` writes `<run-dir>/audit-before.json`, refusing (exit 1, no file) if any remote,
+  tag list or release list cannot be read;
+- `add REPO` adds another repository to that before-snapshot, same rule, never replacing a
+  repository's first snapshot;
+- `retain-protocol` records protocol evidence in an existing before-snapshot without taking a new
+  one (exit 2 without the marker);
+- `closeout [--push-log FILE]` snapshots every repo in it to `<run-dir>/audit-after.json` and
+  compares.
 
-`--ops FILE` (compare and closeout) is the loop's frozen ops grant file,
-`{"v": 1, "ops": [{"surface", "kind", "allow", "secret_paths"?}, ...]}`, kept at
-`<repo>/codex/ops-*.json`. When it holds an entry of kind `release`, a tag (remote
-or local) or a GitHub release that was added during the run is covered (marked
-`GRANTED ops release`) even without a ref grant, but only in the repository that
-holds the ops file (realpath of the `codex/` directory's parent, compared with
-the realpath of each snapshot repository key). An ops file outside a `codex/`
-directory covers no repository. No other kind covers anything, and moved or
-deleted tags and releases still need a ref grant. The `--grants` file is unchanged.
-`--ops-sha256 HEX` is the sha256 the launch froze for that file (the `Ops grants:` line); a file
-whose bytes no longer match is refused (exit 2) before it covers anything. `--ops` without it still
-works, with a warning on stderr that the ops file is unverified.
-
-Protocol 2: when the run dir holds `loop-pi-proto`, `closeout` (and `compare --run-dir DIR`)
-grant a move of a remote's default branch only through the commits themselves, never through a
-`refs/heads/<default>` entry in the grants file (such an entry is ignored, with a warning). Every
-commit in `before..after` must satisfy one of:
+Default-branch moves are judged commit by commit when the run dir holds the `loop-pi-proto`
+marker (written when loop-continuation arms a launch), when either snapshot retains protocol
+evidence (its `protocol` field), or when `--push-log` is passed. Every commit in `before..after`
+must satisfy one of:
 - it lies in some `old..new` range of the push log (`--push-log FILE`, default
-  `<run-dir>/push-log.jsonl`, lines `{"repo", "remote", "ref", "old", "new", ...}`) for that repository, remote and ref;
-- it touches only paths under `backlog/`;
-- it lies in a range that a member of the repository's `bot_actors` list in the grants file (exact
-  bot logins: letters, digits and hyphens followed by `[bot]`) itself pushed or merged inside the snapshot window,
-  according to GitHub's activity API (push records, never author or committer metadata; missing
-  evidence grants nothing).
-Automation entries also accept exact `refs/tags/<tag>` selectors and literal tag prefixes
-(e.g. `{"ref_prefix": "refs/tags/v", "actor": "release-please[bot]"}`). Unlike branch
-prefixes, tag prefixes need not end in `/`, so one prefix can cover stable and rc tags.
-Only added remote tags (including peeled refs), local tags and releases are covered: GitHub's
-Releases API must return that exact tag with an `author.login` matching the granted bot.
-Missing/unreadable evidence grants nothing. Existing release authors never authorize retags
-or deletions. This attribution is independent of protocol 2 and never covers branches.
+  `<run-dir>/push-log.jsonl`, lines `{"repo", "remote", "ref", "old", "new", ...}`) for that
+  repository, remote and ref;
+- it touches only paths under `backlog/`.
+Anything else is UNGRANTED and named in a `note:` line. The fast-forward check still applies. A
+derived `HEAD` move follows the default branch's verdict. Legacy snapshots without protocol
+evidence keep the old behaviour: no default-branch move is accounted for. Protocol evidence is
+retained in the before-snapshot once observed, and an explicit --push-log also requires it, so
+deleting the marker cannot downgrade those audits.
 
 Endpoint-equivalent aliases: a push-log line whose `actor` is `root`, whose `old` is an exact SHA
 and whose `repo` is itself a snapshot key, with that remote's URL unchanged between snapshots, also
 covers the same ref in any other snapshotted remote whose unchanged URL is byte-identical. No URL
 normalisation: a different scheme, SSH user, host case or path spelling is a different endpoint.
 Only absolute URLs qualify (scheme://, scp-like host:path, absolute local path); a relative URL
-such as `../up.git` never transfers.
-An alias receives only those exact `old..new` ranges, never the canonical's bot actors, grants,
-current SHA or commit metadata, and a note names the canonical receipt source.
+such as `../up.git` never transfers. An alias receives only those exact `old..new` ranges, never
+the canonical's backlog verdict, current SHA or commit metadata, and a note names the canonical
+receipt source.
 
 A push the log never saw (a watcher, a subprocess, a script) is UNGRANTED: Git author, committer,
 a checkout's current SHA and the remote's final state are never evidence of a root push. This
 audit-side fail-closed report is deliberate; refusing such pushes before mutation in loop-guard was
 considered and not chosen.
 
-Anything else is UNGRANTED and named in a `note:` line. The fast-forward check still applies. A
-derived `HEAD` move follows the default branch's verdict. Other refs, tags and releases are
-unchanged. Legacy snapshots without protocol evidence keep the old behaviour. Protocol 2 is retained in the
-before-snapshot once observed; an explicit --push-log also requires it. Deleting the marker cannot
-downgrade those audits.
-
-`--grants-sha256 HEX` (compare and closeout) is the sha256 the launch froze for the `--grants`
-file; a file whose bytes differ is refused (exit 2) before it covers anything. Under protocol 2 a
-`--grants` file without it still works, with a warning on stderr.
-
-`induced_effects` in a repository's grants is an opt-in, frozen v1 envelope for
-one approved push-triggered execution at an exact publication SHA. It requires
---grants-sha256, repository ID/name, snapshot remote name/URL, workflow ID/path
-and source SHA-256, exact initiating actor ID/login, run_attempt, dedicated
-trusted writer_job name, valid_from/valid_until and finite destinations:
-[{"ref": "refs/heads/exact", "old": "<full SHA>", "allow_non_fast_forward": false}].
-Optional referenced_workflows pins are exact {path, sha} pairs. Approval of the
-source digest and writer job means the owner trusts that job's write-producing
-code and output channel, including its immutable dependencies; it must not run
-untrusted log-producing code or dry-run writes. Actor means execution initiator,
-NOT the credential/app performing the write.
-
-Only moved non-default branches with full-endpoint successful Git porcelain
-output from provider-retrieved job logs can pass. Grouped log sections (including
-GitHub Run command echoes) are never write evidence. Unambiguous, complete
-To/source:destination/Done framing is required. The approved producer must use
-core.abbrev=no; incomplete/new-only output remains UNVERIFIED. Provider run,
-exact attempt, job membership, workflow source and destination ref are fetched
-with bounded read-only gh api GETs. Caller ledgers are never induced authority.
-An induced envelope disables legacy automation/ops-release shortcuts for that
-repository; its destinations cannot borrow explicit/shared ref grants on failure.
-Tags, releases, creation and deletion are not admitted by this adapter. Existing
-ancestry verification is independent and still applies. No workflow is dispatched
-or instrumented by the audit.
-
 Stdlib only.
 """
 import argparse
-import base64
-from datetime import datetime, timezone
-from urllib.parse import quote, urlparse
 import fcntl
-import hashlib
 import json
 import re
-import resource
-import tempfile
 import os
 import shutil
 import subprocess
@@ -276,7 +215,7 @@ def snapshot_repo(repo: str) -> dict:
             if url.returncode == 0 and url.stdout.strip():
                 remotes[remote]["url"] = url.stdout.strip()
         except (OSError, subprocess.TimeoutExpired):
-            pass  # Missing identity never permits sharing grants.
+            pass  # Missing identity never makes a remote endpoint-equivalent.
     return {
         "remotes": remotes,
         "tags": git_local_tags(repo),
@@ -395,59 +334,21 @@ def cmd_closeout(args: argparse.Namespace) -> int:
     run_dir = run_dir_of(args)
     with open(os.path.join(run_dir, ".audit.lock"), "w", encoding="utf-8") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        return closeout_locked(run_dir, args.grants, args.ops, args.ops_sha256, args.grants_sha256, args.push_log)
+        return closeout_locked(run_dir, args.push_log)
 
 
-OPS_KINDS = {"deploy", "probe", "release", "secret-write", "credential-create"}
-OPS_SHA256_HELP = "The sha256 the launch froze for the --ops file; a mismatch refuses the audit (exit 2)."
-GRANTS_SHA256_HELP = "The sha256 the launch froze for the --grants file; a mismatch refuses the audit (exit 2)."
-PUSH_LOG_HELP = "Protocol 2 push log (default: <run-dir>/push-log.jsonl)."
+PUSH_LOG_HELP = "Push log (default: <run-dir>/push-log.jsonl)."
 
 
-def load_ops_release(path: str | None, sha256: str | None = None) -> set[str]:
-    """Realpaths of the repositories a release-kind entry covers: at most the one holding the ops file.
-    With `sha256`, the file's bytes must hash to it. Raises ValueError on a mismatch or a malformed file."""
-    if path is None:
-        if sha256 is not None:
-            raise ValueError("--ops-sha256 needs --ops")
-        return set()
-    with open(path, "rb") as fh:
-        raw = fh.read()
-    if sha256 is None:
-        print(f"loop-pi-audit: warning: ops file {path} is unverified; pass --ops-sha256 with the sha256 "
-              "the launch froze for it.", file=sys.stderr)
-    else:
-        actual = hashlib.sha256(raw).hexdigest()
-        if actual != sha256.strip().lower():
-            raise ValueError(f"{path} has sha256 {actual}, which does not match --ops-sha256 {sha256}")
-    data = json.loads(raw.decode("utf-8"))
-    if not isinstance(data, dict) or data.get("v") != 1 or not isinstance(data.get("ops"), list):
-        raise ValueError('expected {"v": 1, "ops": [...]}')
-    for entry in data["ops"]:
-        if not isinstance(entry, dict) or not isinstance(entry.get("surface"), str) or entry.get("kind") not in OPS_KINDS:
-            raise ValueError(f"malformed ops entry: {entry!r}")
-    if not any(entry["kind"] == "release" for entry in data["ops"]):
-        return set()
-    # A release grant covers only the repository holding the ops file, `<repo>/codex/ops-*.json`.
-    codex = os.path.realpath(os.path.dirname(os.path.abspath(path)))
-    if os.path.basename(codex) != "codex":
-        print(f"loop-pi-audit: ops file {path} is not in a codex/ directory; its release entry covers no repository.",
-              file=sys.stderr)
-        return set()
-    return {os.path.dirname(codex)}
-
-
-def closeout_locked(run_dir: str, grants: str | None, ops: str | None = None, ops_sha256: str | None = None,
-                    grants_sha256: str | None = None, push_log: str | None = None) -> int:
+def closeout_locked(run_dir: str, push_log: str | None = None) -> int:
     before_path = os.path.join(run_dir, "audit-before.json")
     with open(before_path, "r", encoding="utf-8") as fh:
         repos = sorted(json.load(fh)["repos"])
     after_path = os.path.join(run_dir, "audit-after.json")
     write_json(after_path, {"taken_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                             "repos": {repo: snapshot_repo(repo) for repo in repos}})
-    return cmd_compare(argparse.Namespace(before=before_path, after=after_path, grants=grants, ops=ops,
-                                          ops_sha256=ops_sha256, grants_sha256=grants_sha256,
-                                          push_log=push_log, run_dir=run_dir))
+    return cmd_compare(argparse.Namespace(before=before_path, after=after_path, push_log=push_log,
+                                          run_dir=run_dir))
 
 
 def diff_ref_map(before: dict, after: dict) -> list[tuple[str, str, str, str]]:
@@ -498,12 +399,11 @@ def is_fast_forward(repo: str, before_sha: str, after_sha: str) -> tuple[bool | 
     return None, f"git merge-base --is-ancestor exited {result.returncode}: {result.stderr.strip()}"
 
 
-def moved_ref_mark(repo: str, remote: str, ref: str, before_sha: str, after_sha: str, covered: bool, allow_rewrite: bool = False) -> tuple[str, bool]:
-    """Checks a moved remote ref for fast-forward ancestry (plan C4 item 5:
-    "a moved ref must be checked for fast-forward ... A non-fast-forward move
-    is a violation even when the branch is granted"). Fetches the ref fresh
-    from the remote first so the ancestry check has the objects it needs.
-    Returns (mark, all_covered_contribution)."""
+def moved_ref_mark(repo: str, remote: str, ref: str, before_sha: str, after_sha: str, covered: bool) -> tuple[str, bool]:
+    """Checks a moved remote ref for fast-forward ancestry: a non-fast-forward
+    move is a violation even when every commit in it is accounted for. Fetches
+    the ref fresh from the remote first so the ancestry check has the objects it
+    needs. Returns (mark, all_covered_contribution)."""
     fetched, fetch_reason = fetch_ref(repo, remote, ref)
     if not fetched:
         return f"UNVERIFIED fast-forward: {fetch_reason}", False
@@ -511,8 +411,6 @@ def moved_ref_mark(repo: str, remote: str, ref: str, before_sha: str, after_sha:
     if ff is None:
         return f"UNVERIFIED fast-forward: {ff_reason}", False
     if not ff:
-        if covered and allow_rewrite:
-            return "GRANTED EXPECTED NON-FAST-FORWARD", True
         return ("NON-FAST-FORWARD (granted, but blocked)" if covered else "NON-FAST-FORWARD UNGRANTED"), False
     return ("GRANTED" if covered else "UNGRANTED"), covered
 
@@ -534,459 +432,7 @@ def head_target(entry: dict, other: dict) -> str | None:
     return candidates[0] if len(candidates) == 1 else None
 
 
-def validate_automation(grants_by_repo: dict) -> None:
-    for grants in grants_by_repo.values():
-        if isinstance(grants, dict) and "bot_actors" in grants:
-            actors = grants["bot_actors"]
-            if not isinstance(actors, list) or not all(
-                    isinstance(a, str) and re.fullmatch(r"[A-Za-z0-9-]+\[bot\]", a) for a in actors):
-                raise ValueError("bot_actors must be a list of exact GitHub App bot logins ending in [bot]")
-        if not isinstance(grants, dict) or "automation" not in grants:
-            continue
-        items = grants["automation"]
-        if not isinstance(items, list):
-            raise ValueError("automation must be a list")
-        for item in items:
-            if not isinstance(item, dict) or set(item) not in (
-                    {"ref", "actor"}, {"ref_prefix", "actor"}):
-                raise ValueError("automation item needs exactly actor and ref or ref_prefix")
-            actor = item["actor"]
-            if not isinstance(actor, str) or not re.fullmatch(r"[A-Za-z0-9-]+\[bot\]", actor):
-                raise ValueError("automation actor must be an exact GitHub App bot login ending in [bot]")
-            ref = item.get("ref", item.get("ref_prefix"))
-            namespace = next((ns for ns in ("refs/heads/", "refs/tags/")
-                              if isinstance(ref, str) and ref.startswith(ns)), None)
-            if (namespace is None or len(ref) <= len(namespace) or any(c in ref for c in " *?[:\\")
-                    or any(ord(c) < 33 or ord(c) == 127 for c in ref)
-                    or ".." in ref or "@{" in ref or "//" in ref
-                    or ("ref_prefix" in item and namespace == "refs/heads/" and not ref.endswith("/"))
-                    or ("ref" in item and (ref.endswith(("/", ".", ".lock"))))):
-                raise ValueError("automation ref must be an exact branch or tag; branch prefix must end in /")
-            # Git is the authority for ref syntax, including component restrictions.
-            checked_ref = ref + "automation-probe" if "ref_prefix" in item else ref
-            try:
-                valid = run(["git", "check-ref-format", checked_ref]).returncode == 0
-            except (OSError, subprocess.TimeoutExpired):
-                valid = False
-            if not valid:
-                raise ValueError("automation ref is not a valid branch or tag ref")
-
-
-def validate_induced(grants_by_repo: dict, frozen: str | None) -> None:
-    """Validate owner authority before collecting any induced evidence; no defaults grant it."""
-    required = {"v", "repository_id", "repository", "remote", "remote_url", "publication_sha",
-                "workflow_id", "workflow_path", "workflow_sha256", "actor", "event", "run_attempt",
-                "writer_job", "valid_from", "valid_until", "destinations"}
-    for grants in grants_by_repo.values():
-        if not isinstance(grants, dict) or "induced_effects" not in grants:
-            continue
-        envelope = grants["induced_effects"]
-        if not isinstance(envelope, dict) or "publication_sha" not in envelope:
-            raise ValueError("induced_effects needs publication_sha")
-        if frozen is None:
-            raise ValueError("induced_effects requires --grants-sha256")
-        if not required <= envelope.keys() or envelope.keys() - required - {"referenced_workflows"}:
-            raise ValueError("induced_effects needs the exact v1 authority fields")
-        if type(envelope["v"]) is not int or envelope["v"] != 1 or envelope["event"] != "push":
-            raise ValueError("induced_effects supports only v1 push executions")
-        for key in ("repository_id", "workflow_id", "run_attempt"):
-            if type(envelope[key]) is not int or envelope[key] < 1:
-                raise ValueError(f"induced_effects invalid {key}")
-        for key, pattern in (("repository", r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"),
-                             ("publication_sha", r"[0-9a-f]{40}"),
-                             ("workflow_sha256", r"[0-9a-f]{64}"),
-                             ("workflow_path", r"\.github/workflows/[A-Za-z0-9_-]+\.ya?ml")):
-            if not isinstance(envelope[key], str) or not re.fullmatch(pattern, envelope[key]):
-                raise ValueError(f"induced_effects invalid {key}")
-        if not valid_receipt_remote(envelope["remote"]):
-            raise ValueError("induced_effects invalid remote")
-        if (not isinstance(envelope["remote_url"], str)
-                or github_repository("", "", envelope["remote_url"]) is None
-                or github_repository("", "", envelope["remote_url"])[1] != envelope["repository"]):
-            raise ValueError("induced_effects remote URL must identify its exact repository")
-        actor = envelope["actor"]
-        if (not isinstance(actor, dict) or set(actor) != {"id", "login"}
-                or type(actor["id"]) is not int or actor["id"] < 1
-                or not isinstance(actor["login"], str)
-                or not re.fullmatch(r"[A-Za-z0-9-]+(?:\[bot\])?", actor["login"])):
-            raise ValueError("induced_effects invalid initiating actor")
-        job = envelope["writer_job"]
-        if not isinstance(job, str) or not job or len(job) > 200 or any(ord(c) < 32 for c in job):
-            raise ValueError("induced_effects needs an exact trusted writer_job name")
-        start, end = (snapshot_time(envelope[k]) for k in ("valid_from", "valid_until"))
-        if start >= end:
-            raise ValueError("induced_effects validity window must increase")
-        pins = envelope.get("referenced_workflows", [])
-        if not isinstance(pins, list) or len(pins) > 20:
-            raise ValueError("induced_effects invalid referenced_workflows")
-        for pin in pins:
-            if (not isinstance(pin, dict) or set(pin) != {"path", "sha"}
-                    or not isinstance(pin["path"], str) or not pin["path"]
-                    or not isinstance(pin["sha"], str) or not re.fullmatch(r"[0-9a-f]{40}", pin["sha"])):
-                raise ValueError("induced_effects needs exact reusable workflow source pins")
-        destinations = envelope["destinations"]
-        if not isinstance(destinations, list) or not 1 <= len(destinations) <= 100:
-            raise ValueError("induced_effects needs a finite destination inventory")
-        seen = set()
-        for dest in destinations:
-            if (not isinstance(dest, dict) or set(dest) != {"ref", "old", "allow_non_fast_forward"}
-                    or not isinstance(dest["ref"], str) or not dest["ref"].startswith("refs/heads/")
-                    or dest["ref"] in seen or not isinstance(dest["old"], str)
-                    or not re.fullmatch(r"[0-9a-f]{40}", dest["old"]) or dest["old"] == "0" * 40
-                    or type(dest["allow_non_fast_forward"]) is not bool
-                    or run(["git", "check-ref-format", dest["ref"]]).returncode != 0):
-                raise ValueError("induced_effects needs unique exact moved-branch destinations and old SHAs")
-            seen.add(dest["ref"])
-
-
-INDUCED_BYTES = 2 * 1024 * 1024
-
-
-def induced_api(host: str, endpoint: str, text: bool = False, timeout: float = 60):
-    """Read-only provider entry point, bounded even when a log/JSON body is oversized.
-
-    gh follows the provider's log-download redirect; no caller URL or credential is
-    persisted. POSIX file limits bound subprocess output, not just later parsing.
-    """
-    def limit_output():
-        resource.setrlimit(resource.RLIMIT_FSIZE, (INDUCED_BYTES, INDUCED_BYTES))
-
-    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
-        result = subprocess.run(["gh", "api", "--hostname", host, "--method", "GET", endpoint],
-                                stdout=out, stderr=err, timeout=timeout, preexec_fn=limit_output)
-        if result.returncode or out.tell() >= INDUCED_BYTES:
-            raise ValueError("provider response unavailable or oversized")
-        out.seek(0)
-        body = out.read(INDUCED_BYTES).decode("utf-8")
-    return body if text else json.loads(body)
-
-
-def induced_receipts(repo: str, envelope: dict, before: dict, after: dict,
-                     times: tuple[str, str]) -> tuple[dict, str]:
-    """Provider-attested execution provenance plus trusted pinned writer's exact write output.
-
-    A dedicated trusted job, not arbitrary logged claims, is the authority's output
-    channel. Only a single complete transition per destination is supported. No
-    source HEAD, current ref or green job can substitute for absent old/new output.
-    """
-    deadline = time.monotonic() + 120
-    calls = 0
-
-    def provider_get(endpoint: str, text: bool = False):
-        nonlocal calls
-        calls += 1
-        remaining = deadline - time.monotonic()
-        if calls > 105 or remaining <= 0:
-            raise ValueError("provider evidence budget exhausted")
-        return induced_api(host, endpoint, text, timeout=min(60, remaining))
-
-    try:
-        remote = envelope["remote"]
-        b, a = before.get("remotes", {}).get(remote, {}), after.get("remotes", {}).get(remote, {})
-        if (not b.get("available") or not a.get("available")
-                or b.get("url") != envelope["remote_url"] or a.get("url") != envelope["remote_url"]):
-            return {}, "remote identity mismatch"
-        defaults = {head_target(b, a), head_target(a, b), "refs/heads/main"}
-        if any(dest["ref"] in defaults for dest in envelope["destinations"]):
-            return {}, "default branch cannot be an induced destination"
-        host, path = github_repository(repo, remote, envelope["remote_url"])
-        api = f"repos/{path}"
-        sha = envelope["publication_sha"]
-        listing = provider_get(f"{api}/actions/runs?head_sha={sha}&per_page=100")
-        records = listing["workflow_runs"]
-        if (not isinstance(records, list) or type(listing["total_count"]) is not int
-                or listing["total_count"] != len(records) or len(records) > 100):
-            return {}, "incomplete run inventory"
-        candidates = [r for r in records if r.get("workflow_id") == envelope["workflow_id"]]
-        if len(candidates) != 1 or type(candidates[0].get("id")) is not int or candidates[0]["id"] < 1:
-            return {}, "missing or ambiguous approved execution"
-        run_id = candidates[0]["id"]
-        attempt = envelope["run_attempt"]
-        record = provider_get(f"{api}/actions/runs/{run_id}/attempts/{attempt}")
-        for observed in (candidates[0], record):
-            for key in ("head_sha", "run_attempt", "workflow_id", "event"):
-                expected = sha if key == "head_sha" else envelope[key]
-                if observed.get(key) != expected or type(observed.get(key)) is not type(expected):
-                    return {}, f"run {key} mismatch"
-            if observed.get("id") != run_id:
-                return {}, "run ID mismatch"
-            for key in ("actor", "triggering_actor"):
-                if any(observed.get(key, {}).get(k) != v for k, v in envelope["actor"].items()):
-                    return {}, f"run {key} mismatch"
-            identity = observed["repository"]
-            if identity.get("id") != envelope["repository_id"] or identity.get("full_name") != path:
-                return {}, "repository identity mismatch"
-            if observed.get("path", "").split("@", 1)[0] != envelope["workflow_path"]:
-                return {}, "workflow path mismatch"
-            if observed.get("status") != "completed" or observed.get("conclusion") != "success":
-                return {}, "execution not successfully completed"
-        start, end = map(snapshot_time, (envelope["valid_from"], envelope["valid_until"]))
-        run_start, run_end = map(snapshot_time, (record["run_started_at"], record["updated_at"]))
-        if not start <= run_start <= run_end <= end:
-            return {}, "execution outside approved window"
-        snapshot_start, snapshot_end = map(snapshot_time, times)
-        if not snapshot_start < snapshot_end or not snapshot_start <= run_start <= run_end <= snapshot_end:
-            return {}, "execution outside snapshot window"
-        expected_pins = sorted((p["path"], p["sha"]) for p in envelope.get("referenced_workflows", []))
-        actual_pins = sorted((p["path"], p["sha"]) for p in record.get("referenced_workflows", []))
-        if actual_pins != expected_pins:
-            return {}, "reusable workflow source pin mismatch"
-        source = provider_get(f"{api}/contents/{envelope['workflow_path']}?ref={sha}")
-        if source["type"] != "file" or source["encoding"] != "base64":
-            return {}, "workflow source unavailable"
-        raw = base64.b64decode("".join(source["content"].split()), validate=True)
-        if hashlib.sha256(raw).hexdigest() != envelope["workflow_sha256"]:
-            return {}, "workflow source pin mismatch"
-        listing = provider_get(f"{api}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100")
-        jobs = listing["jobs"]
-        if (not isinstance(jobs, list) or type(listing["total_count"]) is not int
-                or listing["total_count"] != len(jobs) or len(jobs) > 100):
-            return {}, "incomplete job inventory"
-        writers = [j for j in jobs if j.get("name") == envelope["writer_job"]]
-        if len(writers) != 1:
-            return {}, "missing or ambiguous trusted writer job"
-        writer = writers[0]
-        if (type(writer.get("id")) is not int or writer["id"] < 1 or writer.get("run_id") != run_id
-                or writer.get("head_sha") != sha or writer.get("status") != "completed"
-                or writer.get("conclusion") != "success"):
-            return {}, "writer job identity or outcome mismatch"
-        log = provider_get(f"{api}/actions/jobs/{writer['id']}/logs", text=True)
-        approved = {d["ref"]: d for d in envelope["destinations"]}
-        receipts = {}
-        group_open = False
-        frame_open = False
-        frame_writes = 0
-        for line in log.splitlines():
-            # Raw job logs may have GitHub's timestamp prefix, never gh's guessed step labels.
-            line = re.sub(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,9})?Z ", "", line)
-            # Provider authentication does not make echoed script text write output.
-            # Conservatively exclude ALL groups, not only a guessed Run title. Nested,
-            # unmatched or interrupted framing is ambiguous and invalidates the log.
-            if line.startswith("##[group]"):
-                if group_open or frame_open:
-                    return {}, "ambiguous log group framing"
-                group_open = True
-                continue
-            if line.startswith("##[endgroup]"):
-                if line != "##[endgroup]" or not group_open:
-                    return {}, "ambiguous log group framing"
-                group_open = False
-                continue
-            if group_open:
-                continue
-            if line.startswith("To "):
-                if frame_open:
-                    return {}, "incomplete successful write output"
-                if line[3:] != envelope["remote_url"]:
-                    return {}, "write remote identity mismatch"
-                frame_open = True
-                frame_writes = 0
-                continue
-            if line == "Done":
-                if not frame_open or not frame_writes:
-                    return {}, "incomplete successful write output"
-                frame_open = False
-                continue
-            fields = line.split("\t")
-            if len(fields) < 2 or fields[0] not in {" ", "+", "*", "-", "!", "="}:
-                if frame_open:
-                    return {}, "incomplete successful write output"
-                continue
-            if len(fields) != 3 or fields[1].count(":") != 1:
-                return {}, "malformed write ref fields"
-            source_ref, ref = fields[1].split(":")
-            if (not source_ref or run(["git", "check-ref-format", "--allow-onelevel", source_ref]).returncode != 0):
-                return {}, "malformed write ref fields"
-            if ref not in approved:
-                return {}, "unapproved destination"
-            match = re.fullmatch(r"([0-9a-f]{40})(\.\.?\.)([0-9a-f]{40})(?: \(forced update\))?",
-                                 fields[2])
-            if not frame_open or fields[0] not in {" ", "+"} or match is None:
-                return {}, "incomplete successful write output"
-            old, separator, new = match.groups()
-            if ref in receipts or old != approved[ref]["old"] or old == new:
-                return {}, "conflicting write endpoints"
-            if ((fields[0] == "+") != (separator == "...")
-                    or (fields[0] == "+" and not approved[ref]["allow_non_fast_forward"])):
-                return {}, "non-fast-forward not approved"
-            if b.get("refs", {}).get(ref) != old or a.get("refs", {}).get(ref) != new:
-                return {}, "snapshot write endpoints mismatch"
-            endpoint = provider_get(f"{api}/git/ref/{quote(ref[5:], safe='/')}")
-            if (endpoint.get("ref") != ref or endpoint.get("object", {}).get("type") != "commit"
-                    or endpoint["object"].get("sha") != new):
-                return {}, "destination endpoint mismatch"
-            receipts[ref] = {"old": old, "new": new, "allow_non_fast_forward": approved[ref]["allow_non_fast_forward"],
-                             "run": run_id, "attempt": attempt, "job": writer["id"]}
-            frame_writes += 1
-        if group_open:
-            return {}, "ambiguous log group framing"
-        if frame_open or not receipts:
-            return {}, "incomplete successful write output"
-        return receipts, ""
-    except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError, AttributeError) as exc:
-        # Never quote provider logs, signed URLs or potentially secret stderr in a report.
-        return {}, f"provider evidence unavailable or malformed ({type(exc).__name__})"
-
-
-def snapshot_time(value: str) -> datetime:
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    if parsed.tzinfo is None:
-        raise ValueError("snapshot/activity time needs a timezone")
-    return parsed.astimezone(timezone.utc)
-
-
-def github_repository(repo: str, remote: str, remote_url: str | None = None) -> tuple[str, str] | None:
-    """Resolve a supported GitHub API identity; never guess for local/unknown URLs.
-    Tag attribution supplies the snapshot URL, while branch activity keeps live resolution."""
-    if remote_url is None:
-        url = run(["git", "-C", repo, "remote", "get-url", remote])
-        if url.returncode:
-            return None
-        remote_url = url.stdout.strip()
-    raw = remote_url
-    if "://" in raw:
-        parsed = urlparse(raw)
-        host, path = parsed.hostname, parsed.path.lstrip("/")
-    else:
-        match = re.fullmatch(r"(?:[^@/:]+@)?([^/:]+):(.+)", raw)
-        if not match:
-            return None
-        host, path = match.groups()
-    if host not in ({"github.com", os.environ.get("GH_HOST", "github.com")} | gh_configured_hosts()):
-        return None
-    path = path.removesuffix(".git")
-    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", path):
-        return None
-    return host, path
-
-
-def release_author(repo: str, remote: str, tag: str, remote_url: str) -> str | None:
-    """Release author in the snapshotted repository, not tag/commit metadata or live remotes."""
-    try:
-        identity = github_repository(repo, remote, remote_url)
-        if identity is None:
-            return None
-        host, path = identity
-        result = run(["gh", "api", "--hostname", host,
-                      f"repos/{path}/releases/tags/{quote(tag, safe='')}"], timeout=60)
-        if result.returncode:
-            return None
-        release = json.loads(result.stdout)
-        if release["tag_name"] != tag:
-            return None
-        actor = release["author"]["login"]
-        return actor if isinstance(actor, str) else None
-    except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError, AttributeError):
-        return None
-
-
-def activity_entries(repo: str, remote: str, ref: str, times: tuple[str, str]) -> list[dict] | None:
-    """GitHub activity-API push records for `ref` inside the snapshot window, oldest first.
-    Push records only, never commit metadata. None when the evidence is missing, unreadable
-    or empty, so callers grant nothing."""
-    try:
-        start, end = map(snapshot_time, times)
-        if start >= end:
-            return None
-        identity = github_repository(repo, remote)
-        if identity is None:
-            return None
-        host, path = identity
-        result = run(["gh", "api", "--hostname", host, "--paginate", "--slurp",
-                      f"repos/{path}/activity?ref={quote(ref, safe='')}&per_page=100"], timeout=120)
-        if result.returncode:
-            return None
-        pages = json.loads(result.stdout)
-        if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
-            return None
-        entries = []
-        for page in pages:
-            for entry in page:
-                timestamp = snapshot_time(entry["timestamp"])
-                if start <= timestamp <= end:
-                    entries.append(entry)
-        if not entries:
-            return None
-        # API is newest first. Preserve chronological order even for equal timestamps.
-        entries.reverse()
-        entries.sort(key=lambda entry: snapshot_time(entry["timestamp"]))
-        return entries
-    except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError, AttributeError):
-        return None
-
-
-def automation_actor(repo: str, remote: str, ref: str, old: str, new: str,
-                     items: list[dict], defaults: list[str | None],
-                     times: tuple[str, str]) -> str | None:
-    """Require a complete chronological chain by one granted actor, never commit metadata.
-    Adjacent records of the same transition at the same instant may have distinct API IDs;
-    collapse only those exact duplicates, not gaps, conflicting actors or later repeats.
-    Unknown or incomplete evidence fails closed.
-    """
-    if (not ref.startswith("refs/heads/") or ref == "refs/heads/main"
-            or None in defaults or ref in defaults):
-        return None
-    candidates = [item["actor"] for item in items if
-                  item.get("ref") == ref or
-                  ("ref_prefix" in item and ref.startswith(item["ref_prefix"]))]
-    if not candidates:
-        return None
-    entries = activity_entries(repo, remote, ref, times)
-    if not entries:
-        return None
-    try:
-        zero = "0" * 40
-        expected = old or zero
-        previous = None
-        for entry in entries:
-            if (entry["ref"] != ref or entry["actor"]["login"] not in candidates
-                    or entry["actor"]["login"] != entries[0]["actor"]["login"]
-                    or entry["activity_type"] not in {"push", "force_push", "branch_creation", "branch_deletion"}
-                    or not re.fullmatch(r"[0-9a-f]{40}", entry["before"])
-                    or not re.fullmatch(r"[0-9a-f]{40}", entry["after"])):
-                return None
-            transition = (entry["ref"], entry["actor"]["login"], entry["activity_type"],
-                          entry["timestamp"], entry["before"], entry["after"])
-            if transition == previous:
-                continue
-            if entry["before"] != expected:
-                return None
-            previous = transition
-            expected = entry["after"]
-        return entries[0]["actor"]["login"] if expected == (new or zero) else None
-    except (KeyError, TypeError, AttributeError):
-        return None
-
-
-BOT_PUSH_TYPES = {"push", "force_push", "pr_merge", "merge_queue_merge"}
-
-
-def bot_pushed_commits(repo: str, remote: str, ref: str, bot_logins: list[str],
-                       times: tuple[str, str]) -> set[str]:
-    """Commits inside a `before..after` range that a declared bot actor itself pushed or merged
-    in the snapshot window, per GitHub's activity API. Commit author/committer metadata is never
-    read: it is forgeable. Missing or incomplete evidence grants nothing."""
-    if not bot_logins:
-        return set()
-    covered: set[str] = set()
-    for entry in activity_entries(repo, remote, ref, times) or []:
-        try:
-            if (entry["ref"] != ref or entry["actor"]["login"] not in bot_logins
-                    or entry["activity_type"] not in BOT_PUSH_TYPES
-                    or not re.fullmatch(r"[0-9a-f]{40}", entry["before"])
-                    or not re.fullmatch(r"[0-9a-f]{40}", entry["after"])
-                    or entry["before"] == ZERO_SHA):
-                continue
-            commits = rev_list(repo, f"{entry['before']}..{entry['after']}")
-        except (KeyError, TypeError):
-            continue
-        if commits:
-            covered.update(commits)
-    return covered
-
-
 PROTO_MARKER = "loop-pi-proto"
-ZERO_SHA = "0" * 40
 
 
 def is_proto2(run_dir: str | None) -> bool:
@@ -1105,8 +551,9 @@ def endpoint_receipts(before_repos: dict, after_repos: dict, push_log: list[dict
     remote URL is byte-identical to that one: no scheme, user, host-case, port or path normalisation,
     so a different SSH user, scheme or `.git` spelling is a different endpoint and fails closed.
     Only absolute URLs qualify (scheme://, scp-like host:path or an absolute local path): the same
-    relative text such as `../up.git` names a different repository in each checkout. Aliases receive only these exact `old..new` ranges: never the canonical's bot actors, backlog
-    rule outcome, ref grants, current SHA or commit authorship."""
+    relative text such as `../up.git` names a different repository in each checkout. Aliases receive
+    only these exact `old..new` ranges: never the canonical's backlog rule outcome, current SHA or
+    commit authorship."""
     keys = {os.path.realpath(key): key for key in set(before_repos) & set(after_repos)}
     receipts: dict[str, list[dict]] = {}
     for entry in push_log:
@@ -1123,10 +570,9 @@ def endpoint_receipts(before_repos: dict, after_repos: dict, push_log: list[dict
 
 
 def default_move_verdict(repo: str, remote: str, ref: str, before_sha: str, after_sha: str,
-                         push_log: list[dict], bot_logins: list[str],
-                         times: tuple[str, str] = ("", ""),
+                         push_log: list[dict],
                          alias_receipts: list[dict] | None = None) -> tuple[bool, list[str]]:
-    """Protocol 2: is every commit in before..after accounted for? Returns (covered, notes).
+    """Is every commit in before..after accounted for? Returns (covered, notes).
 
     Only a journaled successful push counts as a push. A push made by a watcher, subprocess or any
     other path the push log never saw is UNGRANTED here: it is never inferred from Git author or
@@ -1145,7 +591,6 @@ def default_move_verdict(repo: str, remote: str, ref: str, before_sha: str, afte
         if entry["ref"] == ref:
             for sha in rev_list(repo, f"{entry['old']}..{entry['new']}") or []:
                 aliased.setdefault(sha, f"{entry['canonical']} remote '{entry['remote']}'")
-    bot_pushed: set[str] | None = None
     uncovered = []
     via_alias: dict[str, int] = {}
     for sha in commits:
@@ -1154,77 +599,21 @@ def default_move_verdict(repo: str, remote: str, ref: str, before_sha: str, afte
         if sha in aliased:
             via_alias[aliased[sha]] = via_alias.get(aliased[sha], 0) + 1
             continue
-        if bot_pushed is None:
-            bot_pushed = bot_pushed_commits(repo, remote, ref, bot_logins, times)
-        if sha in bot_pushed:
-            continue
-        uncovered.append(f"commit {sha[:12]} is not in a logged push, is not backlog-only and was not pushed "
-                         "or merged by a declared bot actor")
+        uncovered.append(f"commit {sha[:12]} is not in a logged push and is not backlog-only")
     notes = [f"{count} commit(s) covered by endpoint-equivalent root push receipts journaled for {source}"
              for source, count in sorted(via_alias.items())]
     return not uncovered, notes + uncovered
 
 
-def shared_remote_grants(before_repos: dict, after_repos: dict, grants_by_repo: dict) -> dict:
-    """Share only explicit remote-ref authority, identified from both snapshots."""
-    shared = {}
-    for name in sorted(set(before_repos) & set(after_repos)):
-        grants = grants_by_repo.get(name, [])
-        refs = set(grants.get("refs", [])) if isinstance(grants, dict) else set(grants)
-        rewrites = set(grants.get("allow_non_fast_forward", [])) & refs if isinstance(grants, dict) else set()
-        for remote, b in before_repos[name].get("remotes", {}).items():
-            a = after_repos[name].get("remotes", {}).get(remote, {})
-            url = b.get("url")
-            if url and url == a.get("url") and b.get("available") and a.get("available"):
-                authority = shared.setdefault(url, {"refs": set(), "rewrites": set()})
-                authority["refs"].update(refs)
-                authority["rewrites"].update(rewrites)
-    return shared
-
-
-def compare_repo(name: str, before: dict, after: dict, grants: list[str] | dict, report: list[str],
-                 times: tuple[str, str] = ("", ""), shared: dict | None = None,
-                 seen_granted: set | None = None, ops_release: bool = False,
-                 proto: dict | None = None) -> bool:
-    """Returns True if changes are granted or foreign automation. `proto` (protocol 2) is
-    {"push_log": [...]}: default-branch moves are then judged commit by commit."""
-    induced = grants.get("induced_effects") if isinstance(grants, dict) else None
-    induced_writes, induced_reason = induced_receipts(name, induced, before, after, times) if induced else ({}, "")
-    automation = grants.get("automation", []) if isinstance(grants, dict) and not induced else []
-    bot_logins = grants.get("bot_actors", []) if isinstance(grants, dict) and not induced else []
-    if induced:
-        ops_release = False
-    rewrites = set(grants.get("allow_non_fast_forward", [])) if isinstance(grants, dict) else set()
-    grants = grants.get("refs", []) if isinstance(grants, dict) else grants
+def compare_repo(name: str, before: dict, after: dict, report: list[str],
+                 seen_granted: set | None = None, proto: dict | None = None) -> bool:
+    """Returns True if every change is accounted for or foreign. `proto` is
+    {"push_log": [...], "endpoints": {...}}: default-branch moves are then judged commit by commit;
+    without it no remote change is accounted for."""
     all_covered = True
 
     before_remotes = before.get("remotes", {})
     after_remotes = after.get("remotes", {})
-    release_authors: dict[tuple[str, str], str | None] = {}
-
-    def tag_actor(ref: str, change: str, remote: str | None = None) -> str | None:
-        # Release authorship proves creation, not who subsequently rewrote/deleted a tag.
-        if change != "added" or not ref.startswith("refs/tags/"):
-            return None
-        target = ref.removesuffix("^{}")
-        candidates = {item["actor"] for item in automation if item.get("ref") == target or
-                      ("ref_prefix" in item and target.startswith(item["ref_prefix"]))}
-        if not candidates:
-            return None
-        remotes = [remote] if remote is not None else sorted(set(before_remotes) & set(after_remotes))
-        for source in remotes:
-            b, a = before_remotes.get(source, {}), after_remotes.get(source, {})
-            if (not b.get("available") or not a.get("available") or not isinstance(b.get("url"), str)
-                    or not b["url"] or b["url"] != a.get("url")):
-                continue
-            tag = target[len("refs/tags/"):]
-            key = (source, tag)
-            if key not in release_authors:
-                release_authors[key] = release_author(name, source, tag, b["url"])
-            actor = release_authors[key]
-            if actor in candidates:
-                return actor
-        return None
 
     for remote in sorted(set(before_remotes) | set(after_remotes)):
         b = before_remotes.get(remote, {"available": False, "reason": "remote absent before"})
@@ -1238,34 +627,26 @@ def compare_repo(name: str, before: dict, after: dict, grants: list[str] | dict,
             all_covered = False
             continue
         url = b.get("url") if b.get("url") == a.get("url") else None
-        authority = (shared or {}).get(url, {})
-        remote_grants = authority.get("refs", grants)
-        remote_rewrites = authority.get("rewrites", rewrites)
         defaults: set[str] = set()
         verdicts: dict[str, tuple[bool, list[str]]] = {}
         if proto is not None:
             defaults = {t for t in (head_target(b, a), head_target(a, b)) if t}
             if not defaults:
                 defaults = {"refs/heads/main", "refs/heads/master"}
-            for ref in sorted(set(remote_grants) & defaults):
-                print(f"loop-pi-audit: warning: grant for {ref} on {name} ignored; protocol 2 never grants the "
-                      "default branch by ref", file=sys.stderr)
-            remote_grants = set(remote_grants) - defaults
-            remote_rewrites = set(remote_rewrites) - defaults
 
         def default_verdict(ref: str) -> tuple[bool, list[str]]:
             if ref not in verdicts:
                 before_sha, after_sha = b.get("refs", {}).get(ref), a.get("refs", {}).get(ref)
                 if before_sha and after_sha and before_sha != after_sha:
                     # A receipt names a remote, not a transferable URL alias. Missing/changed
-                    # snapshot identity cannot spend it on the new endpoint. Independent backlog
-                    # and bot evidence keeps its existing semantics.
+                    # snapshot identity cannot spend it on the new endpoint. Backlog-only
+                    # evidence is independent of the endpoint.
                     # An endpoint-equivalent alias (byte-identical stable URL) may also spend the
                     # canonical repository's exact root push ranges for this ref, and nothing else.
                     endpoint = stable_endpoint(b, a)
                     verdicts[ref] = default_move_verdict(
                         name, remote, ref, before_sha, after_sha, proto["push_log"] if endpoint else [],
-                        bot_logins, times, proto.get("endpoints", {}).get(endpoint, []) if endpoint else [])
+                        proto.get("endpoints", {}).get(endpoint, []) if endpoint else [])
                 else:
                     verdicts[ref] = (False, [])
             return verdicts[ref]
@@ -1280,32 +661,6 @@ def compare_repo(name: str, before: dict, after: dict, grants: list[str] | dict,
         for change, ref, before_sha, after_sha in changes:
             target = ref
             notes: list[str] = []
-            if induced and (ref in {d["ref"] for d in induced["destinations"]}
-                            or (remote == induced["remote"] and ref.startswith("refs/heads/")
-                                and ref not in {head_target(b, a), head_target(a, b)})):
-                receipt = induced_writes.get(ref) if remote == induced["remote"] else None
-                if receipt and change == "moved":
-                    mark, accepted = moved_ref_mark(name, remote, ref, before_sha, after_sha, True,
-                                                   receipt["allow_non_fast_forward"])
-                    if accepted:
-                        mark = f"GRANTED induced run={receipt['run']} attempt={receipt['attempt']} job={receipt['job']}"
-                    else:
-                        notes.append("induced: ancestry unverified or non-fast-forward not approved")
-                else:
-                    mark, accepted = "UNVERIFIED induced", False
-                    notes.append(f"induced: {induced_reason or 'destination operation not approved'}")
-                all_covered = all_covered and accepted
-                report.append(f"[{name}] remote '{remote}' ref {change}: {ref} "
-                              f"({before_sha[:12] or '-'} -> {after_sha[:12] or '-'}) [{mark}]")
-                report.extend(f"[{name}] remote '{remote}' ref {change}: {ref} note: {note}" for note in notes)
-                continue
-            actor = tag_actor(ref, change, remote) or automation_actor(
-                name, remote, ref, before_sha, after_sha, automation,
-                [head_target(b, a), head_target(a, b)], times)
-            if actor:
-                report.append(f"[{name}] remote '{remote}' ref {change}: {ref} "
-                              f"({before_sha or '-'} -> {after_sha or '-'}) [automation actor={actor}]")
-                continue
             if ref == "HEAD":
                 targets = [head_target(entry, other) for entry, other, sha in
                            ((b, a, before_sha), (a, b, after_sha)) if sha]
@@ -1313,26 +668,21 @@ def compare_repo(name: str, before: dict, after: dict, grants: list[str] | dict,
                     mark = "UNVERIFIED HEAD target"
                     all_covered = False
                 else:
-                    covered = all(default_verdict(t)[0] if (proto is not None and t in defaults) else t in remote_grants
+                    covered = all(proto is not None and t in defaults and default_verdict(t)[0]
                                   for t in targets)
                     mark = "GRANTED derived HEAD" if covered else "UNGRANTED derived HEAD"
                     all_covered = all_covered and covered
-            elif ref.startswith("refs/pull/") and ref not in remote_grants:
+            elif ref.startswith("refs/pull/"):
                 mark = "FOREIGN"
             else:
+                # A peeled tag (refs/tags/<t>^{}) follows its tag.
                 if ref.startswith("refs/tags/") and ref.endswith("^{}"):
                     target = ref[:-3]
-                covered = target in remote_grants
+                covered = False
                 if proto is not None and change == "moved" and ref in defaults:
                     covered, notes = default_verdict(ref)
-                if (not covered and ops_release and change == "added" and ref.startswith("refs/tags/")):
-                    report.append(f"[{name}] remote '{remote}' ref {change}: {ref} "
-                                  f"({before_sha[:12] or '-'} -> {after_sha[:12] or '-'}) [GRANTED ops release]")
-                    continue
                 if change == "moved" and ref == target:
-                    mark, contributes_covered = moved_ref_mark(
-                        name, remote, ref, before_sha, after_sha, covered,
-                        ref.startswith("refs/heads/") and ref in remote_rewrites and ref not in defaults)
+                    mark, contributes_covered = moved_ref_mark(name, remote, ref, before_sha, after_sha, covered)
                     all_covered = all_covered and contributes_covered
                 else:
                     all_covered = all_covered and covered
@@ -1360,19 +710,8 @@ def compare_repo(name: str, before: dict, after: dict, grants: list[str] | dict,
         all_covered = False
     else:
         for change, ref, before_sha, after_sha in diff_ref_map(before_tags.get("tags", {}), after_tags.get("tags", {})):
-            actor = tag_actor(ref, change)
-            if actor:
-                report.append(f"[{name}] tag {change}: {ref} ({before_sha[:12] or '-'} -> {after_sha[:12] or '-'}) "
-                              f"[automation actor={actor}]")
-                continue
-            covered = ref in grants
-            if not covered and ops_release and change == "added":
-                report.append(f"[{name}] tag {change}: {ref} ({before_sha[:12] or '-'} -> {after_sha[:12] or '-'}) "
-                              f"[GRANTED ops release]")
-                continue
-            all_covered = all_covered and covered
-            mark = "GRANTED" if covered else "UNGRANTED"
-            report.append(f"[{name}] tag {change}: {ref} ({before_sha[:12] or '-'} -> {after_sha[:12] or '-'}) [{mark}]")
+            all_covered = False
+            report.append(f"[{name}] tag {change}: {ref} ({before_sha[:12] or '-'} -> {after_sha[:12] or '-'}) [UNGRANTED]")
 
     before_releases = before.get("releases", {})
     after_releases = after.get("releases", {})
@@ -1387,22 +726,11 @@ def compare_repo(name: str, before: dict, after: dict, grants: list[str] | dict,
         before_tags_set = {r["tagName"] for r in before_releases.get("releases", []) if "tagName" in r}
         after_tags_set = {r["tagName"] for r in after_releases.get("releases", []) if "tagName" in r}
         for tag in sorted(after_tags_set - before_tags_set):
-            actor = tag_actor(f"refs/tags/{tag}", "added")
-            if actor:
-                report.append(f"[{name}] release added: {tag} [automation actor={actor}]")
-                continue
-            covered = tag in grants or f"refs/tags/{tag}" in grants
-            if not covered and ops_release:
-                report.append(f"[{name}] release added: {tag} [GRANTED ops release]")
-                continue
-            all_covered = all_covered and covered
-            mark = "GRANTED" if covered else "UNGRANTED"
-            report.append(f"[{name}] release added: {tag} [{mark}]")
+            all_covered = False
+            report.append(f"[{name}] release added: {tag} [UNGRANTED]")
         for tag in sorted(before_tags_set - after_tags_set):
-            covered = tag in grants or f"refs/tags/{tag}" in grants
-            all_covered = all_covered and covered
-            mark = "GRANTED" if covered else "UNGRANTED"
-            report.append(f"[{name}] release removed: {tag} [{mark}]")
+            all_covered = False
+            report.append(f"[{name}] release removed: {tag} [UNGRANTED]")
 
     return all_covered
 
@@ -1416,43 +744,13 @@ def cmd_compare(args: argparse.Namespace) -> int:
     run_dir = getattr(args, "run_dir", None)
     proto_run = (is_proto2(run_dir) or before.get("protocol") == 2 or after.get("protocol") == 2
                  or getattr(args, "push_log", None) is not None)
-    grants_sha256 = getattr(args, "grants_sha256", None)
-    grants_by_repo: dict[str, list[str]] = {}
-    if grants_sha256 is not None and not args.grants:
-        print("loop-pi-audit: invalid grants: --grants-sha256 needs --grants", file=sys.stderr)
-        return 2
-    if args.grants:
-        with open(args.grants, "rb") as fh:
-            raw_grants = fh.read()
-        if grants_sha256 is not None:
-            actual = hashlib.sha256(raw_grants).hexdigest()
-            if actual != grants_sha256.strip().lower():
-                print(f"loop-pi-audit: invalid grants: {args.grants} has sha256 {actual}, which does not match "
-                      f"--grants-sha256 {grants_sha256}", file=sys.stderr)
-                return 2
-        elif proto_run:
-            print(f"loop-pi-audit: warning: grants file {args.grants} is unverified; pass --grants-sha256 with "
-                  "the sha256 the launch froze for it.", file=sys.stderr)
-        grants_by_repo = json.loads(raw_grants.decode("utf-8"))
     proto = None
     if proto_run:
         log_path = getattr(args, "push_log", None) or (os.path.join(run_dir, "push-log.jsonl") if run_dir else None)
         if not log_path or not os.path.isfile(log_path):
-            print(f"loop-pi-audit: warning: no push log at {log_path}; default-branch moves are granted only by "
-                  "backlog-only or declared bot commits.", file=sys.stderr)
+            print(f"loop-pi-audit: warning: no push log at {log_path}; default-branch moves are accounted for "
+                  "only by backlog-only commits.", file=sys.stderr)
         proto = {"push_log": load_push_log(log_path)}
-
-    try:
-        validate_automation(grants_by_repo)
-        validate_induced(grants_by_repo, grants_sha256)
-    except (ValueError, AttributeError, TypeError, OSError, subprocess.TimeoutExpired) as exc:
-        print(f"loop-pi-audit: invalid grants: {exc}", file=sys.stderr)
-        return 2
-    try:
-        ops_release_repos = load_ops_release(getattr(args, "ops", None), getattr(args, "ops_sha256", None))
-    except (OSError, ValueError) as exc:
-        print(f"loop-pi-audit: invalid ops file: {exc}", file=sys.stderr)
-        return 2
 
     before_repos = before.get("repos", {})
     after_repos = after.get("repos", {})
@@ -1460,7 +758,6 @@ def cmd_compare(args: argparse.Namespace) -> int:
     if proto is not None:
         proto["endpoints"] = endpoint_receipts(before_repos, after_repos, proto["push_log"])
 
-    shared = shared_remote_grants(before_repos, after_repos, grants_by_repo)
     seen_granted: set = set()
     report: list[str] = []
     all_ok = True
@@ -1479,9 +776,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
         b = before_repos[name]
         a = after_repos[name]
         pre_len = len(report)
-        covered = compare_repo(name, b, a, grants_by_repo.get(name, []), report,
-                               (before.get("taken_at", ""), after.get("taken_at", "")), shared, seen_granted,
-                               os.path.realpath(name) in ops_release_repos, proto)
+        covered = compare_repo(name, b, a, report, seen_granted, proto)
         if len(report) > pre_len:
             any_change = True
         all_ok = all_ok and covered
@@ -1494,9 +789,9 @@ def cmd_compare(args: argparse.Namespace) -> int:
         print(line)
 
     if not all_ok:
-        print("loop-pi-audit: at least one ungranted remote change was found.", file=sys.stderr)
+        print("loop-pi-audit: at least one remote change is not accounted for.", file=sys.stderr)
         return 1
-    print("loop-pi-audit: every remote change is covered by a grant.")
+    print("loop-pi-audit: every remote change is accounted for.")
     return 0
 
 
@@ -1509,16 +804,12 @@ def main() -> int:
     snap.add_argument("repos", nargs="+", help="Repository paths to snapshot.")
     snap.set_defaults(func=cmd_snapshot)
 
-    comp = sub.add_parser("compare", help="Compare two snapshots and report ungranted changes.")
+    comp = sub.add_parser("compare", help="Compare two snapshots and report changes not accounted for.")
     comp.add_argument("before", help="Path to the before snapshot JSON.")
     comp.add_argument("after", help="Path to the after snapshot JSON.")
-    comp.add_argument("--grants", help="Path to a grants JSON file: {\"<repo>\": [\"refs/heads/main\", ...]}.")
-    comp.add_argument("--ops", help="Path to the loop's frozen ops grant file; a release-kind entry covers added tags and releases in the repo holding it.")
-    comp.add_argument("--ops-sha256", help=OPS_SHA256_HELP)
-    comp.add_argument("--grants-sha256", help=GRANTS_SHA256_HELP)
     comp.add_argument("--push-log", help=PUSH_LOG_HELP)
-    comp.add_argument("--run-dir", help="Run directory; protocol 2 rules apply when it holds loop-pi-proto "
-                                        "(compare never reads $LOOP_PI_RUN_DIR).")
+    comp.add_argument("--run-dir", help="Run directory; default-branch moves are judged against the push log "
+                                        "when it holds loop-pi-proto (compare never reads $LOOP_PI_RUN_DIR).")
     comp.set_defaults(func=cmd_compare)
 
     for name, func, text in (("begin", cmd_begin, "Start a run's before-snapshot with REPO."),
@@ -1534,10 +825,6 @@ def main() -> int:
 
     close = sub.add_parser("closeout", help="Snapshot the run's repos again and compare.")
     close.add_argument("--run-dir", help="Run directory (default: $LOOP_PI_RUN_DIR).")
-    close.add_argument("--grants", help="Path to a grants JSON file, keyed by the repo paths in the run.")
-    close.add_argument("--ops", help="Path to the loop's frozen ops grant file; a release-kind entry covers added tags and releases in the repo holding it.")
-    close.add_argument("--ops-sha256", help=OPS_SHA256_HELP)
-    close.add_argument("--grants-sha256", help=GRANTS_SHA256_HELP)
     close.add_argument("--push-log", help=PUSH_LOG_HELP)
     close.set_defaults(func=cmd_closeout)
 

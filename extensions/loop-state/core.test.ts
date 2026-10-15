@@ -8,16 +8,10 @@ test("parseBrief reads the header line and an optional Deadline line", () => {
   assert.deepEqual(parseBrief("Lane: A · Task: B · Tier: routine"), { lane: "A", task: "B", tier: "routine" });
 });
 
-test("parseBrief preserves an explicit ops Surface without inferring one", () => {
+test("parseBrief preserves an explicit Surface line without inferring one", () => {
   assert.deepEqual(parseBrief("Lane: L1 · Task: T1 · Tier: guarded\nSurface: local-probe"), {
     lane: "L1", task: "T1", tier: "guarded", surface: "local-probe",
   });
-});
-
-test("parseBrief reads an Ops surface line, which takes precedence over Surface", () => {
-  assert.equal(parseBrief("Lane: L1 · Task: T1 · Tier: guarded\nOps surface: deploy:svc")?.surface, "deploy:svc");
-  assert.equal(parseBrief("Lane: L1 · Task: T1 · Tier: guarded\nSurface: other\nOps surface: deploy:svc")?.surface, "deploy:svc");
-  assert.equal(parseBrief("Lane: L1 · Task: T1 · Tier: guarded\nOps surface:")?.surface, undefined);
 });
 
 test("parseBrief takes the bare task id when the header carries its title", () => {
@@ -34,7 +28,7 @@ test("parseBrief rejects anything but the header on the first non-empty line", (
   assert.equal(parseBrief(undefined), null);
 });
 
-test("deriveLogPath (S3) swaps closeout- and .md for state- and .jsonl; a v2 report- name derives nothing", () => {
+test("deriveLogPath (S3) swaps closeout- and .md for state- and .jsonl; a report- name derives nothing", () => {
   assert.equal(deriveLogPath("/r/codex/closeout-camp-loop7.md"), "/r/codex/state-camp-loop7.jsonl");
   assert.equal(deriveLogPath("/r/codex/report-camp-loop7.md"), null);
   assert.equal(deriveLogPath("/r/codex/launch-camp-loop7.md"), null);
@@ -42,7 +36,7 @@ test("deriveLogPath (S3) swaps closeout- and .md for state- and .jsonl; a v2 rep
 });
 
 test("runIdFromText reads the pi-subagents launch text", () => {
-  assert.equal(runIdFromText("Async: lane-worker [a1b2c3d4]\nUse status."), "a1b2c3d4");
+  assert.equal(runIdFromText("Async: worker [a1b2c3d4]\nUse status."), "a1b2c3d4");
   assert.equal(runIdFromText("nothing here"), null);
 });
 
@@ -96,7 +90,7 @@ test("returnEvent uses the block when present and drops fields that do not fit",
   assert.deepEqual(bad, { ev: "return", lane: "L1", run: "r1", status: "failed" });
 });
 
-test("a run that finished without a usable lane-return block is recorded failed, as the dispatcher reads it", () => {
+test("a run that finished without a usable lane-return block is recorded failed", () => {
   assert.deepEqual(returnEvent("L1", "r1", null), { ev: "return", lane: "L1", run: "r1", status: "failed" });
   assert.equal(returnEvent("L1", "r1", { status: "great" }).status, "failed");
 });

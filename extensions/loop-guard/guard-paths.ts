@@ -1,4 +1,4 @@
-// Protocol 2 paths (SEAMS S0, S1, S8): the loop run dir, its `loop-pi-proto` marker, the
+// Run paths (SEAMS "Launch arming", "Run-dir files"): the loop run dir, its `loop-pi-proto` marker, the
 // standing-authority registry, and the write refusals built on them for edit/write tool paths
 // (exact) and bash write targets (best effort, through rules.ts's `protectedPath`).
 //
@@ -11,7 +11,7 @@
 import { existsSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, basename as pathBasename, isAbsolute, join, resolve } from "node:path";
-import { isGrantsPath, isLoopControlPath, rootControlReason } from "./rules.ts";
+import { isLoopControlPath, rootControlReason } from "./rules.ts";
 
 export const RUN_DIR_ENV = "LOOP_PI_RUN_DIR";
 export const PROTO_MARKER = "loop-pi-proto";
@@ -22,7 +22,7 @@ export function runDirFromEnv(): string | undefined {
   return value && isAbsolute(value) ? value : undefined;
 }
 
-/** True when the run dir carries the protocol 2 marker. Checked per call: the marker is written
+/** True when the run dir carries the `loop-pi-proto` marker. Checked per call: the marker is written
  *  when the root arms, after the extensions load. */
 export function protoActive(runDir: string | undefined): boolean {
   return runDir !== undefined && existsSync(join(runDir, PROTO_MARKER));
@@ -117,7 +117,7 @@ export function authorityWriteReason(absolute: string, shown = absolute): string
 
 export type GuardRole = "root" | "lane";
 
-/** The `protectedPath` predicate rules.ts applies to bash write targets under protocol 2: the run
+/** The `protectedPath` predicate rules.ts applies to bash write targets while the marker exists: the run
  *  dir for every role, and the authority registry for lanes. */
 export function bashProtectedPath(role: GuardRole, cwd: string, runDir: string | undefined): (path: string) => string | undefined {
   return (word: string) => {
@@ -130,23 +130,23 @@ export function bashProtectedPath(role: GuardRole, cwd: string, runDir: string |
   };
 }
 
-/** True when an edit/write tool path is a loop control file (`codex/grants-*` too under protocol 2). */
-export function isLoopControlToolPath(raw: unknown, cwd: string, grants = false): boolean {
+/** True when an edit/write tool path is a loop control file, either spelling. */
+export function isLoopControlToolPath(raw: unknown, cwd: string): boolean {
   if (typeof raw !== "string") return false;
   const absolute = toolPath(raw, cwd);
-  return isLoopControlPath(absolute, undefined, { grants }) || isLoopControlPath(realPath(absolute), undefined, { grants });
+  return isLoopControlPath(absolute) || isLoopControlPath(realPath(absolute));
 }
 
-/** True when an edit/write tool path is one of the planner's files the root may not write under
- *  protocol 2 (`codex/ops-*`, `codex/grants-*`, `codex/launch-*`, `codex/goal-*`), either spelling. */
+/** True when an edit/write tool path is one of the planner's files the root may not write while
+ *  the marker exists (`codex/charter-*`, `codex/launch-*`), either spelling. */
 export function isRootControlToolPath(raw: string, cwd: string): boolean {
   const absolute = toolPath(raw, cwd);
   return isLoopControlPath(absolute, undefined, { root: true }) || isLoopControlPath(realPath(absolute), undefined, { root: true });
 }
 
-/** Protocol 2 refusal for an edit/write tool path: the run dir and the authority registry for
- *  root and lanes, `codex/grants-*` for lanes, and the planner's files (`codex/ops|grants|launch|goal-*`)
- *  for the root. Call only while the marker exists. */
+/** Marker-gated refusal for an edit/write tool path: the run dir and the authority registry for
+ *  root and lanes, and the planner's files (`codex/charter-*`, `codex/launch-*`) for the root.
+ *  Call only while the marker exists. */
 export function toolWriteRefusal(raw: unknown, cwd: string, role: GuardRole, runDir: string | undefined): string | undefined {
   if (typeof raw !== "string") return undefined;
   const absolute = toolPath(raw, cwd);
@@ -156,9 +156,6 @@ export function toolWriteRefusal(raw: unknown, cwd: string, role: GuardRole, run
   }
   const authority = authorityWriteReason(absolute, raw);
   if (authority) return authority;
-  if (role === "lane" && (isGrantsPath(absolute) || isGrantsPath(realPath(absolute)))) {
-    return `loop-guard: lanes may not write '${raw}': codex/grants-* belongs to the root.`;
-  }
   if (role === "root" && isRootControlToolPath(raw, cwd)) return rootControlReason(raw);
   return undefined;
 }

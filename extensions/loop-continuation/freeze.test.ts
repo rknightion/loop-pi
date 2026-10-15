@@ -12,18 +12,16 @@ import { cleanupFixtures, fakePi, loopFixture } from "./test-fixture.ts";
 after(cleanupAll);
 after(cleanupFixtures);
 
-test("query-launch answers the closeout path as reportPath with ops always null; a resumed session restores it", async () => {
+test("query-launch answers the closeout path as reportPath; a resumed session restores it", async () => {
   const f = loopFixture();
   const pi = await fakePi({ agentDir: f.agentDir, cwd: f.repo, runDir: f.runDir });
   try {
     assert.equal(pi.query().reportPath, null);
-    assert.equal(pi.query().ops, null);
     await pi.input(f.launch);
     const answer = pi.query();
-    assert.deepEqual({ reportPath: answer.reportPath, opsPath: answer.opsPath, ops: answer.ops }, { reportPath: f.report, opsPath: null, ops: null });
+    assert.equal(answer.reportPath, f.report);
     const stored = pi.entries.at(-1)!;
     assert.equal(stored.customType, "loop-continuation-state");
-    assert.equal("ops" in stored.data, false, "v3 persists no ops grants");
     assert.equal(stored.data.launch.mode, "v3");
     assert.equal(stored.data.launch.charter, undefined, "the charter is frozen in rootContext, not LaunchInfo");
     assert.equal(stored.data.rootContext.goalPath, f.charter);

@@ -26,7 +26,7 @@ export default function (pi: ExtensionAPI) {
         }
       });
       pi.events.emit("subagents:rpc:v1:request", {
-        version: 1, requestId, method: "spawn", params: { agent: "lane-worker", task: "Exercise timing stream", async: true },
+        version: 1, requestId, method: "spawn", params: { agent: "worker", task: "Exercise timing stream", async: true },
       });
     });
     return { action: "handled" as const };

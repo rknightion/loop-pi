@@ -241,9 +241,7 @@ class InstalledLoopSmoke(unittest.TestCase):
             finally:
                 code = rpc.close()
             self.assertEqual(code, 0, 'step 7 launcher exits cleanly')
-            grants = tmp / 'grants.json'
-            grants.write_text(json.dumps({str(repo): ['refs/heads/main']}))
-            output = run(str(bins / 'loop-pi-audit'), 'closeout', '--run-dir', str(run_dir), '--grants', str(grants))
+            output = run(str(bins / 'loop-pi-audit'), 'closeout', '--run-dir', str(run_dir))
             before = json.loads(runs[0].read_text())['repos'][str(repo)]['remotes']['origin']['refs']
             after = json.loads((run_dir / 'audit-after.json').read_text())['repos'][str(repo)]['remotes']['origin']['refs']
             changes = [ref for ref in set(before) | set(after) if before.get(ref) != after.get(ref)]

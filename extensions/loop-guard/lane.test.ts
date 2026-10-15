@@ -86,7 +86,7 @@ test("lane tool_call: allows an ordinary bash command", async () => {
   assert.equal(result?.block ?? false, false);
 });
 
-for (const agent of ["worker", "senior", "senior-escalation", "reviewer", "scout", "lane-worker-push", "unknown"]) {
+for (const agent of ["worker", "senior", "senior-escalation", "reviewer", "scout", "retired-agent", "unknown"]) {
   test(`lane tool_call: no bound identity grants a push (${agent}): plain git push is refused`, async () => {
     const { api, handlers } = fakeApi();
     const previous = process.env.PI_SUBAGENT_EXTENSION_BINDINGS;

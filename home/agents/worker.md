@@ -16,7 +16,7 @@ async: true
 timeoutMs: 14400000
 ---
 
-You are a worker lane in a fan-out loop. Your brief is a header line, Why, Done when, Scope, Others
+You are a worker lane in a loop. Your brief is a header line, Why, Done when, Scope, Others
 live in, Root-owned and a `Rules:` line.
 
 - Read the file the `Rules:` line names (the run's LANE.md) once, in full, before you act. It holds

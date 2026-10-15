@@ -1,6 +1,5 @@
-// The closeout audit loop-continuation runs itself at `/loop-closeout` (protocol marker present):
-//   loop-pi-audit closeout --run-dir <run dir> [--grants <frozen copy> --grants-sha256 <held digest>]
-//     --push-log <run dir>/push-log.jsonl
+// The closeout audit loop-continuation runs itself at `/loop-closeout` (run marker present):
+//   loop-pi-audit closeout --run-dir <run dir> --push-log <run dir>/push-log.jsonl
 // The result goes to the root as a `loop-closeout-audit` message. A non-zero exit is never clean.
 
 import { execFile } from "node:child_process";
@@ -12,11 +11,8 @@ export const CLOSEOUT_MESSAGE_TYPE = "loop-closeout-audit";
 export const CLOSEOUT_TIMEOUT_MS = 15 * 60_000;
 const OUTPUT_TAIL_BYTES = 8_192;
 
-export function closeoutArgs(runDir: string, grants: { path: string | null; sha256: string | null }): string[] {
-  const args = ["closeout", "--run-dir", runDir];
-  if (grants.path && grants.sha256) args.push("--grants", grants.path, "--grants-sha256", grants.sha256);
-  args.push("--push-log", join(runDir, "push-log.jsonl"));
-  return args;
+export function closeoutArgs(runDir: string): string[] {
+  return ["closeout", "--run-dir", runDir, "--push-log", join(runDir, "push-log.jsonl")];
 }
 
 function executable(path: string): boolean {

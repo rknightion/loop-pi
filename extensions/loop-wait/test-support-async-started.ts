@@ -8,7 +8,7 @@ export default function (pi: ExtensionAPI): void {
   pi.on("session_start", (_event, ctx) => {
     const sessionId = ctx.sessionManager.getSessionFile() ?? ctx.sessionManager.getSessionId();
     setTimeout(() => {
-      const base = { sessionId, agent: "lane-worker", task: "[redacted]", mode: "single" };
+      const base = { sessionId, agent: "worker", task: "[redacted]", mode: "single" };
       pi.events.emit("subagent:async-started", { ...base, id: "run-a", deadlineAt: Date.now() + 250 });
       pi.events.emit("subagent:async-started", { ...base, id: "run-b", deadlineAt: Date.now() + 500 });
       pi.events.emit("subagent:async-complete", { runId: "run-a", triggerTurn: false, results: [] });

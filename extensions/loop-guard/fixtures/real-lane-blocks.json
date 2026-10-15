@@ -196,32 +196,11 @@
     "lane_blocks": true
   },
   {
-    "row": 43,
-    "tool": "bash",
-    "command": "jq '.ops[0].allow += [\"^.*$\"]' codex/ops-fexo-loop4.json > /tmp/o.json && mv /tmp/o.json codex/ops-fexo-loop4.json",
-    "added": true,
-    "lane_blocks": true
-  },
-  {
     "row": 44,
     "tool": "bash",
     "command": "printf '%s\\n' '{\"v\":1,\"ev\":\"land\",\"task\":\"T-12\"}' >> codex/state-fexo-loop4.jsonl",
     "added": true,
     "lane_blocks": true
-  },
-  {
-    "row": 45,
-    "tool": "bash",
-    "command": "tee codex/goal-fexo-loop4.md < /tmp/goal.md",
-    "added": true,
-    "lane_blocks": true
-  },
-  {
-    "row": 46,
-    "tool": "bash",
-    "command": "cat codex/ops-fexo-loop4.json codex/state-fexo-loop4.jsonl | jq -c . | head -20",
-    "added": true,
-    "lane_blocks": false
   },
   {
     "row": 47,

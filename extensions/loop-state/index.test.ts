@@ -74,7 +74,7 @@ function harness(opts: { reportPath?: string | null; cwd: string; sessionId?: st
   };
   if (opts.reportPath !== null) {
     api.events.on("loop-continuation:query-launch", (d) =>
-      (d as { reply: (r: unknown) => void }).reply({ reportPath: opts.reportPath, opsPath: null, ops: null }),
+      (d as { reply: (r: unknown) => void }).reply({ reportPath: opts.reportPath }),
     );
   }
   (loopState as any)(api, opts.schedule);
@@ -128,18 +128,18 @@ test("dispatch then return are appended with by=ext, base from git and the lane-
   const r = makeRepo();
   const h = harness({ reportPath: r.report, cwd: r.repo });
   h.start();
-  assert.equal(h.call("tc1", { agent: "lane-worker", task: BRIEF }), undefined);
-  h.emit("subagent:async-started", { id: "run1", sessionId: SESS, agent: "lane-worker", deadlineAt: Date.UTC(2026, 9, 3, 11, 30, 0) });
-  h.result("tc1", "Async: lane-worker [run1]\nrunning", { mode: "single", runId: "run1" });
+  assert.equal(h.call("tc1", { agent: "worker", task: BRIEF }), undefined);
+  h.emit("subagent:async-started", { id: "run1", sessionId: SESS, agent: "worker", deadlineAt: Date.UTC(2026, 9, 3, 11, 30, 0) });
+  h.result("tc1", "Async: worker [run1]\nrunning", { mode: "single", runId: "run1" });
   h.emit("subagent:async-complete", {
     runId: "run1", sessionId: SESS, toolCallId: "tc1", success: true,
-    results: [{ agent: "lane-worker", status: "completed", summary: LANE_RETURN("complete") }],
+    results: [{ agent: "worker", status: "completed", summary: LANE_RETURN("complete") }],
   });
   const log = await until(() => events(r.log).length >= 2 && events(r.log));
   assert.equal(log[0].ev, "dispatch");
   assert.deepEqual(
     { by: log[0].by, lane: log[0].lane, task: log[0].task, agent: log[0].agent, run: log[0].run, base: log[0].base, deadline: log[0].deadline },
-    { by: "ext", lane: "L1", task: "T1", agent: "lane-worker", run: "run1", base: r.head, deadline: "2026-10-03T11:30:00Z" },
+    { by: "ext", lane: "L1", task: "T1", agent: "worker", run: "run1", base: r.head, deadline: "2026-10-03T11:30:00Z" },
   );
   assert.equal(log[1].ev, "return");
   assert.deepEqual(
@@ -151,17 +151,16 @@ test("dispatch then return are appended with by=ext, base from git and the lane-
   assert.deepEqual(h.notes, []);
 });
 
-test("native review dispatch records explicit constituents, admitted tiers and ops-bound surface", async () => {
+test("native review dispatch records explicit constituents, admitted tiers and the brief's surface", async () => {
   const r = makeRepo();
   for (const [task, tier] of [["T1", "routine"], ["T2", "guarded"]]) {
-    execFileSync(BIN, ["append", r.log, "admit", `task=${task}`, "source=envelope", "owned=src/x.ts", "accept=ok", `tier=${tier}`]);
+    execFileSync(BIN, ["append", r.log, "admit", `task=${task}`, "source=first-wave", "owned=src/x.ts", "accept=ok", `tier=${tier}`]);
   }
   const h = harness({ reportPath: r.report, cwd: r.repo });
   h.start();
   h.call("review", { agent: "reviewer", task: "Lane: R1 · Task: T1,T2 · Tier: routine\nObjective: review", });
   h.result("review", "", { runId: "review-run" });
-  h.call("security", { agent: "reviewer", task: "Lane: R2 · Task: batch · Tier: guarded\nTasks: T1, missing\nSurface: brief-probe",
-    extensionBindings: { "loop-pi.guard/1": { agent: "reviewer", surface: "bound-probe" } } });
+  h.call("security", { agent: "reviewer", task: "Lane: R2 · Task: batch · Tier: guarded\nTasks: T1, missing\nSurface: brief-probe" });
   h.result("security", "", { runId: "security-run" });
   await h.shutdown();
   const dispatches = events(r.log).filter((row) => row.ev === "dispatch");
@@ -172,27 +171,12 @@ test("native review dispatch records explicit constituents, admitted tiers and o
   assert.equal(dispatches[1].kind, "review");
   assert.deepEqual(dispatches[1].tasks, ["T1", "missing"]);
   assert.equal(dispatches[1].tier, undefined, "missing constituent evidence is not guessed from the brief");
-  assert.equal(dispatches[1].surface, "bound-probe");
+  assert.equal(dispatches[1].surface, "brief-probe");
   const audit = JSON.parse(execFileSync(BIN, ["digest", r.log, "--json"], { encoding: "utf8" }));
   assert.equal(audit.by_tier.guarded.reviews, 1);
   assert.equal(audit.by_tier.unknown.reviews, 1);
   assert.deepEqual(audit.audit_lanes[0].tasks, ["T1", "T2"]);
   assert.equal(execFileSync(BIN, ["check", r.log]).length, 0);
-  assert.deepEqual(h.notes, []);
-});
-
-test("a dispatch's guard-bound surface is read from pi-subagents 0.77.0 `options` too", async () => {
-  const r = makeRepo();
-  execFileSync(BIN, ["append", r.log, "admit", "task=T1", "source=envelope", "owned=src/x.ts", "accept=ok", "tier=guarded"]);
-  const h = harness({ reportPath: r.report, cwd: r.repo });
-  h.start();
-  h.call("security", { agent: "reviewer", task: "Lane: R2 · Task: T1 · Tier: guarded\nSurface: brief-probe",
-    options: { extensionBindings: { "loop-pi.guard/1": { agent: "reviewer", surface: "bound-probe" } } } });
-  h.result("security", "", { runId: "security-run" });
-  await h.shutdown();
-  const dispatches = events(r.log).filter((row) => row.ev === "dispatch");
-  assert.equal(dispatches.length, 1);
-  assert.equal(dispatches[0].surface, "bound-probe", "the bound surface wins wherever the call carries it");
   assert.deepEqual(h.notes, []);
 });
 
@@ -208,7 +192,7 @@ test("a refused resume falls back once and duplicate completions are ignored", a
     assert.equal(request.params.id, "run1");
     h.emit(`subagents:rpc:v1:reply:${request.requestId}`, { version: 1, requestId: request.requestId, success: false, error: { message: "persisted session unavailable" } });
   });
-  h.call("tc1", { agent: "lane-worker", task: BRIEF });
+  h.call("tc1", { agent: "worker", task: BRIEF });
   h.result("tc1", "", { runId: "run1" });
   const completion = { runId: "run1", sessionId: SESS, success: true, results: [{ summary: "missing" }] };
   h.emit("subagent:async-complete", completion);
@@ -234,7 +218,7 @@ test("a failed original run stays failed after recovering a valid block", async 
     // Completion can even arrive before the queued RPC caller has correlated its reply.
     h.emit("subagent:async-complete", { runId: "revived", sessionId: SESS, success: true, results: [{ summary: `Output saved to: ${request.params.output}`, savedOutputPath: request.params.output }] });
   });
-  h.call("tc1", { agent: "lane-worker", task: BRIEF });
+  h.call("tc1", { agent: "worker", task: BRIEF });
   h.result("tc1", "", { runId: "run1" });
   h.emit("subagent:async-complete", { runId: "run1", sessionId: SESS, success: false, results: [{ summary: "missing" }] });
   await until(() => events(r.log).length === 4);
@@ -261,7 +245,7 @@ test("a terminal revived run with lost completion falls back from package lifecy
     const request = raw as any;
     h.emit(`subagents:rpc:v1:reply:${request.requestId}`, { version: 1, requestId: request.requestId, success: true, data: { details: { runId: "lost", asyncDir } } });
   });
-  h.call("tc1", { agent: "lane-worker", task: BRIEF });
+  h.call("tc1", { agent: "worker", task: BRIEF });
   h.result("tc1", "", { runId: "run1" });
   h.emit("subagent:async-complete", { runId: "run1", sessionId: SESS, results: [{ summary: "missing" }] });
   await until(() => jobs.length === 1);
@@ -287,7 +271,7 @@ test(`restart preserves ${lifecycle} recovery and accepts later completion exact
     if (lifecycle === "running") writeFileSync(join(asyncDir, "status.json"), JSON.stringify({ runId: "lost", sessionId: SESS, state: "running" }));
     h.emit(`subagents:rpc:v1:reply:${request.requestId}`, { version: 1, requestId: request.requestId, success: true, data: { details: { runId: "lost", asyncDir } } });
   });
-  h.call("tc1", { agent: "lane-worker", task: BRIEF });
+  h.call("tc1", { agent: "worker", task: BRIEF });
   h.result("tc1", "", { runId: "run1" });
   h.emit("subagent:async-complete", { runId: "run1", sessionId: SESS, results: [{ summary: "missing" }] });
   await until(() => attempts === 1);
@@ -327,7 +311,7 @@ test("restart reconciles a terminal failed child once without another resume", a
     runId: "run1", phase: "pending", revived: "lost", asyncDir, sessionId: SESS,
     data: { results: [{ summary: "missing" }] }, log: r.log, info: { lane: "L1" }
   } }];
-  execFileSync(BIN, ["append", r.log, "dispatch", "lane=L1", "task=T1", "agent=lane-worker", "run=run1", "base=b"]);
+  execFileSync(BIN, ["append", r.log, "dispatch", "lane=L1", "task=T1", "agent=worker", "run=run1", "base=b"]);
   const jobs: (() => void)[] = [];
   const h = harness({ reportPath: r.report, cwd: r.repo, entries, schedule: job => { jobs.push(job); return { unref() {} } as any; } });
   let attempts = 0;
@@ -356,7 +340,7 @@ test("15 unknown lifecycle checks warn but preserve pending ownership and later 
     const request = raw as any;
     h.emit(`subagents:rpc:v1:reply:${request.requestId}`, { version: 1, requestId: request.requestId, success: true, data: { details: { runId: "lost", asyncDir: join(r.repo, "absent") } } });
   });
-  h.call("tc1", { agent: "lane-worker", task: BRIEF });
+  h.call("tc1", { agent: "worker", task: BRIEF });
   h.result("tc1", "", { runId: "run1" });
   h.emit("subagent:async-complete", { runId: "run1", sessionId: SESS, results: [{ summary: "missing" }] });
   for (let i = 0; i < 15; i++) {
@@ -382,7 +366,7 @@ test("without a run dir the repair is refused, never launched with the lane's ow
   h.start();
   let attempts = 0;
   h.on("subagents:rpc:v1:request", () => { attempts++; });
-  h.call("tc1", { agent: "lane-worker", task: BRIEF });
+  h.call("tc1", { agent: "worker", task: BRIEF });
   h.result("tc1", "", { runId: "run1" });
   h.emit("subagent:async-complete", { runId: "run1", sessionId: SESS, success: true, results: [{ summary: "missing" }] });
   await until(() => events(r.log).length === 2);
@@ -408,7 +392,7 @@ test(`a bound repair is not admitted from ${artifact === "symlink" ? "a linked f
     h.emit("subagent:async-complete", { runId: "revived", sessionId: SESS, success: true,
       results: [{ summary: `${LANE_RETURN("complete")}\nOutput saved to: ${foreign}`, savedOutputPath: artifact === "symlink" ? request.params.output : foreign }] });
   });
-  h.call("tc1", { agent: "lane-worker", task: BRIEF });
+  h.call("tc1", { agent: "worker", task: BRIEF });
   h.result("tc1", "", { runId: "run1" });
   h.emit("subagent:async-complete", { runId: "run1", sessionId: SESS, success: true, results: [{ summary: "missing" }] });
   await until(() => events(r.log).length === 4);
@@ -421,8 +405,8 @@ test("the run id is read from the launch text when details carry none, and Deadl
   const r = makeRepo();
   const h = harness({ reportPath: r.report, cwd: r.repo });
   h.start();
-  h.call("tc1", { agent: "lane-worker", task: BRIEF });
-  h.result("tc1", "Async: lane-worker [abc123]");
+  h.call("tc1", { agent: "worker", task: BRIEF });
+  h.result("tc1", "Async: worker [abc123]");
   const log = await until(() => events(r.log).length >= 1 && events(r.log));
   assert.equal(log[0].run, "abc123");
   assert.equal(log[0].deadline, "2026-10-03T12:00:00Z");
@@ -432,12 +416,12 @@ test("a completion that beats its launch result is flushed after the dispatch", 
   const r = makeRepo();
   const h = harness({ reportPath: r.report, cwd: r.repo });
   h.start();
-  h.call("tc1", { agent: "lane-worker", task: BRIEF });
+  h.call("tc1", { agent: "worker", task: BRIEF });
   h.emit("subagent:async-complete", {
     runId: "run1", sessionId: SESS,
     results: [{ status: "failed", summary: "crashed, no block" }],
   });
-  h.result("tc1", "Async: lane-worker [run1]", { runId: "run1" });
+  h.result("tc1", "Async: worker [run1]", { runId: "run1" });
   const log = await until(() => events(r.log).length >= 2 && events(r.log));
   assert.deepEqual(log.map((e) => e.ev), ["dispatch", "return"]);
   assert.equal(log[1].status, "failed");
@@ -447,8 +431,8 @@ test("a run pi-subagents calls completed but that returned no lane-return block 
   const r = makeRepo();
   const h = harness({ reportPath: r.report, cwd: r.repo });
   h.start();
-  h.call("tc1", { agent: "lane-worker", task: BRIEF });
-  h.result("tc1", "Async: lane-worker [run1]", { runId: "run1" });
+  h.call("tc1", { agent: "worker", task: BRIEF });
+  h.result("tc1", "Async: worker [run1]", { runId: "run1" });
   h.emit("subagent:async-complete", { runId: "run1", sessionId: SESS, success: true, results: [{ status: "completed", summary: "All done, trust me." }] });
   const log = await until(() => events(r.log).length >= 2 && events(r.log));
   assert.equal(log[1].ev, "return");
@@ -459,8 +443,8 @@ test("a run that failed or timed out is recorded failed whatever its lane-return
   const r = makeRepo();
   const h = harness({ reportPath: r.report, cwd: r.repo });
   h.start();
-  h.call("tc1", { agent: "lane-worker", task: BRIEF });
-  h.result("tc1", "Async: lane-worker [run1]", { runId: "run1" });
+  h.call("tc1", { agent: "worker", task: BRIEF });
+  h.result("tc1", "Async: worker [run1]", { runId: "run1" });
   const block = LANE_RETURN("complete").replace('"sha":null,"landed":false', '"sha":"abc1234","landed":true');
   h.emit("subagent:async-complete", { runId: "run1", sessionId: SESS, success: false, results: [{ success: false, timedOut: true, output: block }] });
   const log = await until(() => events(r.log).length >= 2 && events(r.log));
@@ -476,8 +460,8 @@ test("invalid lane-return fields are dropped and the rest recorded", async () =>
   const r = makeRepo();
   const h = harness({ reportPath: r.report, cwd: r.repo });
   h.start();
-  h.call("tc1", { agent: "lane-worker", task: BRIEF });
-  h.result("tc1", "Async: lane-worker [run1]", { runId: "run1" });
+  h.call("tc1", { agent: "worker", task: BRIEF });
+  h.result("tc1", "Async: worker [run1]", { runId: "run1" });
   h.emit("subagent:async-complete", {
     runId: "run1", sessionId: SESS,
     results: [{ status: "completed", summary: '```lane-return\n{"v":2,"status":"blocked","landed":"maybe","questions":["q"]}\n```' }],
@@ -494,7 +478,7 @@ test("a brief without the header, another session's run, and an unknown launch w
   h.start();
   h.call("tc1", { agent: "mapper", task: "Objective: look around" });
   h.result("tc1", "Async: mapper [run9]", { runId: "run9" });
-  h.call("tc2", { agent: "lane-worker", task: BRIEF });
+  h.call("tc2", { agent: "worker", task: BRIEF });
   h.emit("subagent:async-complete", { runId: "run2", sessionId: "/homes/sessions/other.jsonl", results: [{ status: "completed", summary: "x" }] });
   h.emit("subagent:async-complete", { runId: "run9", sessionId: SESS, results: [{ status: "completed", summary: "x" }] });
   await new Promise((r2) => setTimeout(r2, 500));
@@ -505,8 +489,8 @@ test("without a launch (query-launch unanswered) nothing is written and nothing 
   const r = makeRepo();
   const h = harness({ reportPath: null, cwd: r.repo });
   h.start();
-  h.call("tc1", { agent: "lane-worker", task: BRIEF });
-  h.result("tc1", "Async: lane-worker [run1]", { runId: "run1" });
+  h.call("tc1", { agent: "worker", task: BRIEF });
+  h.result("tc1", "Async: worker [run1]", { runId: "run1" });
   await new Promise((r2) => setTimeout(r2, 500));
   assert.deepEqual(events(r.log), []);
   assert.deepEqual(h.notes, []);
@@ -518,8 +502,8 @@ test("a failing append warns and leaves the tool call untouched", async () => {
   // An unwritable log directory makes the CLI fail.
   writeFileSync(join(r.repo, "no-such-dir"), "a file where a directory should be");
   h.start();
-  assert.equal(h.call("tc1", { agent: "lane-worker", task: BRIEF }), undefined);
-  h.result("tc1", "Async: lane-worker [run1]", { runId: "run1" });
+  assert.equal(h.call("tc1", { agent: "worker", task: BRIEF }), undefined);
+  h.result("tc1", "Async: worker [run1]", { runId: "run1" });
   const note = await until(() => h.notes[0]);
   assert.equal(note.type, "warning");
   assert.match(note.message, /dispatch for run run1 not recorded/);
@@ -527,8 +511,8 @@ test("a failing append warns and leaves the tool call untouched", async () => {
 
 test("session_compact injects the digest as a custom message without triggering a turn", async () => {
   const r = makeRepo();
-  execFileSync(BIN, ["append", r.log, "open", "goal_sha256=" + "a".repeat(64), "tier=routine", "root=llm", "root_model=m", 'envelope=["T1"]']);
-  execFileSync(BIN, ["append", r.log, "admit", "task=T1", "source=envelope", "owned=x", "accept=ok"]);
+  execFileSync(BIN, ["append", r.log, "open", "charter_sha256=" + "a".repeat(64), "root=llm", "root_model=m", 'first_wave=["T1"]']);
+  execFileSync(BIN, ["append", r.log, "admit", "task=T1", "source=first-wave", "owned=x", "accept=ok"]);
   const h = harness({ reportPath: r.report, cwd: r.repo });
   h.start();
   const first = await until(() => h.sent[0]);
@@ -556,16 +540,16 @@ test("a dispatch skipped for want of a launch leaves no started deadline behind"
   const r = makeRepo();
   let reportPath: string | null = null;
   const h = harness({ reportPath: null, cwd: r.repo });
-  h.on("loop-continuation:query-launch", (d) => (d as { reply: (x: unknown) => void }).reply({ reportPath, opsPath: null, ops: null }));
+  h.on("loop-continuation:query-launch", (d) => (d as { reply: (x: unknown) => void }).reply({ reportPath }));
   h.start();
-  h.call("tc1", { agent: "lane-worker", task: BRIEF });
+  h.call("tc1", { agent: "worker", task: BRIEF });
   h.emit("subagent:async-started", { id: "run1", sessionId: SESS, deadlineAt: Date.UTC(2026, 9, 3, 11, 30, 0) });
-  h.result("tc1", "Async: lane-worker [run1]", { runId: "run1" });
+  h.result("tc1", "Async: worker [run1]", { runId: "run1" });
   await new Promise((r2) => setTimeout(r2, 300));
   assert.deepEqual(events(r.log), []);
   reportPath = r.report;
-  h.call("tc2", { agent: "lane-worker", task: BRIEF });
-  h.result("tc2", "Async: lane-worker [run1]", { runId: "run1" });
+  h.call("tc2", { agent: "worker", task: BRIEF });
+  h.result("tc2", "Async: worker [run1]", { runId: "run1" });
   const log = await until(() => events(r.log).length >= 1 && events(r.log));
   assert.equal(log[0].deadline, "2026-10-03T12:00:00Z", "the brief's Deadline, not the skipped attempt's");
 });
@@ -576,16 +560,16 @@ test("a dispatch whose append fails leaves no started deadline or pending comple
   const h = harness({ reportPath: join(blocker, "codex", "closeout-x-loop1.md"), cwd: r.repo });
   writeFileSync(blocker, "a file where a directory should be");
   h.start();
-  h.call("tc1", { agent: "lane-worker", task: BRIEF });
+  h.call("tc1", { agent: "worker", task: BRIEF });
   h.emit("subagent:async-started", { id: "run1", sessionId: SESS, deadlineAt: Date.UTC(2026, 9, 3, 11, 30, 0) });
   h.emit("subagent:async-complete", { runId: "run1", sessionId: SESS, results: [{ status: "failed", summary: "early" }] });
-  h.result("tc1", "Async: lane-worker [run1]", { runId: "run1" });
+  h.result("tc1", "Async: worker [run1]", { runId: "run1" });
   await until(() => h.notes.find((n) => /dispatch for run run1 not recorded/.test(n.message)));
   rmSync(blocker);
   mkdirSync(join(blocker, "codex"), { recursive: true });
   const log = join(blocker, "codex", "state-x-loop1.jsonl");
-  h.call("tc2", { agent: "lane-worker", task: BRIEF });
-  h.result("tc2", "Async: lane-worker [run1]", { runId: "run1" });
+  h.call("tc2", { agent: "worker", task: BRIEF });
+  h.result("tc2", "Async: worker [run1]", { runId: "run1" });
   const written = await until(() => events(log).length >= 1 && events(log));
   await new Promise((r2) => setTimeout(r2, 500));
   assert.deepEqual(events(log).map((e) => e.ev), ["dispatch"], "the failed attempt's completion is not flushed");
@@ -594,7 +578,7 @@ test("a dispatch whose append fails leaves no started deadline or pending comple
 
 test("ordinary resume after root restart correlates an early completion and replays neither lifecycle event", async () => {
   const r = makeRepo();
-  execFileSync(BIN, ["append", r.log, "dispatch", "lane=L1", "task=T1", "agent=lane-worker", "run=original", "base=b", "tier=guarded", "surface=probe"]);
+  execFileSync(BIN, ["append", r.log, "dispatch", "lane=L1", "task=T1", "agent=worker", "run=original", "base=b", "tier=guarded", "surface=probe"]);
   execFileSync(BIN, ["append", r.log, "return", "lane=L1", "run=original", "status=complete"]);
   const h = harness({ reportPath: r.report, cwd: r.repo });
   h.start();
@@ -619,7 +603,7 @@ test("ordinary resume after root restart correlates an early completion and repl
 
 test("a resume by async dir, top-level or in pi-subagents 0.77.0 `options`, records the original identity", async () => {
   const r = makeRepo();
-  execFileSync(BIN, ["append", r.log, "dispatch", "lane=L1", "task=T1", "agent=lane-worker", "run=original", "base=b", "tier=guarded"]);
+  execFileSync(BIN, ["append", r.log, "dispatch", "lane=L1", "task=T1", "agent=worker", "run=original", "base=b", "tier=guarded"]);
   execFileSync(BIN, ["append", r.log, "return", "lane=L1", "run=original", "status=partial"]);
   const h = harness({ reportPath: r.report, cwd: r.repo });
   h.start();
@@ -632,37 +616,35 @@ test("a resume by async dir, top-level or in pi-subagents 0.77.0 `options`, reco
   assert.deepEqual(dispatches.map((row) => [row.run, row.lane, row.task]), [["original", "L1", "T1"], ["second", "L1", "T1"], ["third", "L1", "T1"]]);
 });
 
-test("an ops resume with a replacement brief keeps its Ops surface, and a missing one is warned, not refused", async () => {
+test("a resume with a replacement brief keeps its Surface line, and a missing one is recorded without one", async () => {
   const r = makeRepo();
-  execFileSync(BIN, ["append", r.log, "dispatch", "lane=M1", "task=T1", "agent=ops", "run=first", "base=b", "tier=guarded", "surface=deploy:svc"]);
+  execFileSync(BIN, ["append", r.log, "dispatch", "lane=M1", "task=T1", "agent=senior", "run=first", "base=b", "tier=guarded", "surface=deploy:svc"]);
   execFileSync(BIN, ["append", r.log, "return", "lane=M1", "run=first", "status=partial"]);
   const h = harness({ reportPath: r.report, cwd: r.repo });
   h.start();
-  h.call("again", { action: "resume", id: "first", message: "Lane: M1 · Task: T1 · Tier: guarded\nOps surface: deploy:svc\nObjective: retry" });
+  h.call("again", { action: "resume", id: "first", message: "Lane: M1 · Task: T1 · Tier: guarded\nSurface: deploy:svc\nObjective: retry" });
   h.result("again", "", { runId: "second" });
   h.call("bare", { action: "resume", id: "first", message: "Lane: M1 · Task: T1 · Tier: guarded\nObjective: retry once more" });
   h.result("bare", "", { runId: "third" });
   await h.shutdown();
   const dispatches = events(r.log).filter((row) => row.ev === "dispatch");
   assert.deepEqual(dispatches.map((row) => [row.run, row.agent, row.surface]), [
-    ["first", "ops", "deploy:svc"], ["second", "ops", "deploy:svc"], ["third", "ops", undefined],
+    ["first", "senior", "deploy:svc"], ["second", "senior", "deploy:svc"], ["third", "senior", undefined],
   ]);
-  const notes = h.notes.map((note) => note.message).filter((message) => /has no surface/.test(message));
-  assert.equal(notes.length, 1, JSON.stringify(h.notes));
-  assert.match(notes[0], /dispatch third \(ops\) has no surface/);
+  assert.deepEqual(h.notes.filter((note) => /has no surface/.test(note.message)), [], "a missing surface is telemetry, never a warning");
 });
 
 test("a recorded dispatch is never duplicated by a later result for the same run id", async () => {
   const r = makeRepo();
   const h = harness({ reportPath: r.report, cwd: r.repo });
   h.start();
-  h.call("tc1", { agent: "lane-worker", task: BRIEF });
+  h.call("tc1", { agent: "worker", task: BRIEF });
   h.emit("subagent:async-started", { id: "run1", sessionId: SESS, deadlineAt: Date.UTC(2026, 9, 3, 11, 30, 0) });
-  h.result("tc1", "Async: lane-worker [run1]", { runId: "run1" });
+  h.result("tc1", "Async: worker [run1]", { runId: "run1" });
   const first = await until(() => events(r.log).length >= 1 && events(r.log));
   assert.equal(first[0].deadline, "2026-10-03T11:30:00Z");
-  h.call("tc2", { agent: "lane-worker", task: BRIEF });
-  h.result("tc2", "Async: lane-worker [run1]", { runId: "run1" });
+  h.call("tc2", { agent: "worker", task: BRIEF });
+  h.result("tc2", "Async: worker [run1]", { runId: "run1" });
   await h.shutdown();
   assert.equal(events(r.log).length, 1, "one dispatch per native identity");
 });

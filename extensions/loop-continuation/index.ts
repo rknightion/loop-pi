@@ -3,8 +3,8 @@
 // contract (pi.events channels, custom-entry names, incident path, sync trigger).
 //
 // It also arms the root (in the `input` hook, the only one that can refuse before a model turn):
-// arm-time checks against the charter (arm.ts), the protocol marker `$LOOP_PI_RUN_DIR/loop-pi-proto`,
-// the audit grants and standing freeze, and the `open` event the root no longer writes. It writes the harness facts the root cannot forge
+// arm-time checks against the charter (arm.ts), the run marker `$LOOP_PI_RUN_DIR/loop-pi-proto`,
+// the standing freeze, and the `open` event the root never writes. It writes the harness facts the root cannot forge
 // (harness-facts.ts), the root context-overflow incident with `loopPi.onIncident`, and at
 // `/loop-closeout` runs the closeout audit itself (closeout-audit.ts).
 
@@ -38,7 +38,6 @@ import {
   runConcurrency,
   snapshotProtocolRetained,
 } from "./arm.ts";
-import { AUDIT_GRANTS_REJECTED_CLASS, freezeAuditGrants } from "./audit-grants.ts";
 import { appendFact, isQuotaError } from "./harness-facts.ts";
 import { auditBinary, CLOSEOUT_MESSAGE_TYPE, closeoutArgs, closeoutMessage, runCloseoutAudit } from "./closeout-audit.ts";
 import { finalMarker, reportCounts, resolveReportPath, waitingDeadline } from "./report-status.ts";
@@ -185,7 +184,7 @@ export default function (pi: ExtensionAPI) {
 
   function recordIncident(cwd: string, cls?: string, extra?: Record<string, unknown>) {
     try {
-      const subdir = cls === AUDIT_GRANTS_REJECTED_CLASS || cls === STANDING_REJECTED_CLASS ? "ops" : undefined;
+      const subdir = cls === STANDING_REJECTED_CLASS ? "standing" : undefined;
       writeIncident(getAgentDir(), sessionId, cwd, cls, extra, subdir);
     } catch {
       // Resolving the home must not trap the session either.
@@ -215,18 +214,15 @@ export default function (pi: ExtensionAPI) {
     if (agentDir && file) runOnIncident(agentDir, file);
   }
 
-  /** Arm success: audit grants and standing freeze, then `open` when the log has none. */
+  /** Arm success: standing freeze, then `open` when the log has none. */
   async function arm(parsed: ParsedLaunch, check: { runDir: string; charterText: string; charterSha256: string; log: string }, ctx: ExtensionContext) {
-    const { hasOpsLine: _ops, auditLine, standingLine, charter, ...launch } = parsed;
-    const audit = freezeAuditGrants(auditLine, check.runDir);
+    const { standingLine, charter, ...launch } = parsed;
     const standing = freezeStanding(standingLine, check.runDir);
     state = {
       armed: true,
       launch,
       nudgeCount: 0,
       chainIncidentWritten: false,
-      auditGrantsPath: audit.path,
-      auditGrantsSha256: audit.sha256,
       standingPath: standing.path,
       standingSha256: standing.sha256,
       concurrency: runConcurrency(check.charterText),
@@ -234,13 +230,9 @@ export default function (pi: ExtensionAPI) {
         goalPath: charter, goalSha256: check.charterSha256, goalText: check.charterText,
         cwd: ctx.cwd, runDir: check.runDir, sessionId: ctx.sessionManager.getSessionId(),
         sessionFile: ctx.sessionManager.getSessionFile() ?? null,
-        opsSha256: null,
       },
     };
     persist();
-    if (audit.rejected !== null) {
-      recordIncident(ctx.cwd, AUDIT_GRANTS_REJECTED_CLASS, { reason: audit.rejected, audit_grants_path: audit.sourcePath });
-    }
     if (standing.rejected !== null) {
       recordIncident(ctx.cwd, STANDING_REJECTED_CLASS, { reason: standing.rejected, standing_path: standing.sourcePath });
     }
@@ -411,7 +403,7 @@ export default function (pi: ExtensionAPI) {
     if (!dir || closeoutRunning) return;
     closeoutRunning = true;
     try {
-      const args = closeoutArgs(dir, { path: state.auditGrantsPath ?? null, sha256: state.auditGrantsSha256 ?? null });
+      const args = closeoutArgs(dir);
       const bin = auditBinary(getAgentDir());
       const result = await runCloseoutAudit(bin, args, launchCwd ?? process.cwd());
       await Promise.allSettled(pending);
@@ -431,18 +423,13 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  // Answers other extensions: the launch's closeout path (key `reportPath`, S1), its frozen audit grants and
-  // standing, and the charter's `lanes:` cap. `opsPath`/`ops` stay in the reply for older readers and are
-  // always null: v3 has no ops lane. A reply with nulls means no launch has been recognised.
+  // Answers other extensions: the launch's closeout path (key `reportPath`, S1), its frozen standing
+  // and the charter's `lanes:` cap. A reply with nulls means no launch has been recognised.
   pi.events.on("loop-continuation:query-launch", (data) => {
     const req = data as {
       cwd?: string;
       reply: (r: {
         reportPath: string | null;
-        opsPath: string | null;
-        ops: unknown;
-        auditGrantsPath: string | null;
-        auditGrantsSha256: string | null;
         standingPath: string | null;
         standingSha256: string | null;
         concurrency?: number;
@@ -453,13 +440,9 @@ export default function (pi: ExtensionAPI) {
     req.reply({
       reportPath,
       ...(state.armed && state.rootContext ? { rootContext: { ...state.rootContext } } : {}),
-      opsPath: null,
-      ops: null,
-      auditGrantsPath: state.auditGrantsPath ?? null,
-      auditGrantsSha256: state.auditGrantsSha256 ?? null,
       standingPath: state.standingPath ?? null,
       standingSha256: state.standingSha256 ?? null,
-      // Additive and optional: absent without a launch, or when the goal has no valid concurrency.
+      // Additive and optional: absent without a launch, or when the charter has no valid concurrency.
       ...(state.armed && typeof state.concurrency === "number" && state.concurrency >= 1 ? { concurrency: state.concurrency } : {}),
     });
   });

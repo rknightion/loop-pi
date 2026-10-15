@@ -8,7 +8,6 @@ import { cleanupAll, freshDir, PI_SUBAGENTS_PACKAGE_DIR, ROOT_EXTENSION, startPi
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ENTRY = join(HERE, "index.ts");
 const PROVIDER = join(HERE, "test-support", "provider.ts");
-const DISPATCHER = join(HERE, "..", "dispatcher", "index.ts");
 after(cleanupAll);
 
 function setup(script: object) {
@@ -88,8 +87,9 @@ test("empty stream has null first token and absent/invalid metadata is not inven
   assert.deepEqual(f.message?.loopPiTiming, { firstTokenAt: null, attempts: null, processingMs: null, headers: {} });
 });
 
-for (const host of [ROOT_EXTENSION, DISPATCHER]) {
-  test(`required timing extension reaches a real child from ${host === ROOT_EXTENSION ? "root" : "dispatcher"}`, async (t) => {
+{
+  const host = ROOT_EXTENSION;
+  test("required timing extension reaches a real child from root", async (t) => {
     // Keep native lightweight attestation enabled: the scripted final text must satisfy it.
     const report = {
       criteriaSatisfied: [{ id: "criterion-1", status: "satisfied", evidence: "Returned the scripted timing stream and its residual limitations." }],
@@ -103,11 +103,11 @@ for (const host of [ROOT_EXTENSION, DISPATCHER]) {
       secondDelta: `second\n\`\`\`acceptance-report\n${JSON.stringify(report)}\n\`\`\``,
     });
     mkdirSync(join(f.home, "agents"));
-    writeFileSync(join(f.home, "agents", "lane-worker.md"), [
-      "---", "name: lane-worker", "description: Timing stream fixture", "extensions: []",
+    writeFileSync(join(f.home, "agents", "worker.md"), [
+      "---", "name: worker", "description: Timing stream fixture", "extensions: []",
       `subagentOnlyExtensions: ${PROVIDER}`, "tools: read", "model: timing-fixture/fixture", "---", "Exercise timing.",
     ].join("\n"));
-    // Drive the same public RPC spawn bus as dispatcher. No parent model call, no direct timing
+    // Drive the public RPC spawn bus. No parent model call, no direct timing
     // flag in the child; only the host's required-child registration can install the emitter.
     const probe = join(HERE, "test-support", "spawn.ts");
     const spawnResult = join(f.home, "spawn.json");
@@ -164,12 +164,12 @@ for (const host of [ROOT_EXTENSION, DISPATCHER]) {
       const historyBeforeClose = readFileSync(historyPath, "utf8");
       const history = historyBeforeClose.split("\n").filter(Boolean).map((line) => JSON.parse(line));
       assert.equal(history.length, 1);
-      assert.equal(history[0].agent, "lane-worker");
+      assert.equal(history[0].agent, "worker");
       assert.equal(history[0].outcome, "completed");
       assert.equal(history[0].status, "ok");
       await session.close();
       assert.equal(readFileSync(historyPath, "utf8"), historyBeforeClose, "parent teardown must not introduce a late child history write");
-      t.diagnostic(JSON.stringify({ host: host === ROOT_EXTENSION ? "root" : "dispatcher", runId,
+      t.diagnostic(JSON.stringify({ host: "root", runId,
         runnerProcessInstanceId: runner.processInstanceId, exitCode: runner.exitCode, signal: runner.signal,
         closeObservedAt: runner.closeObservedAt, state: completed.status.state, acceptance: acceptance.status,
         historyRows: history.length, historyOutcome: history[0].outcome, noLateHistoryWrite: true }));

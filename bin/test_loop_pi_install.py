@@ -183,15 +183,15 @@ m.render_policy(prefix, "the loop-pi home templates")
             install()
             shipped = {path.name: path.read_bytes() for path in (home / "agents").glob("*.md")}
             self.assertEqual(set(shipped), {f"{name}.md" for name in m.AGENT_SET})
-            # Two retired v2 agents (one was managed by the old receipt) and one unrelated file.
-            (home / "agents/lane-worker.md").write_text("v2 lane worker\n")
-            (home / "agents/lane-worker-push.md").write_text("v2 push twin\n")
+            # Two retired agents (one was managed by the old receipt) and one unrelated file.
+            (home / "agents/retired-one.md").write_text("retired one\n")
+            (home / "agents/retired-two.md").write_text("retired two\n")
             (home / "agents/notes.txt").write_text("not an agent\n")
             stale = install("--check", expected=1).stdout
-            self.assertIn(f"STALE: {home / 'agents/lane-worker.md'}", stale)
-            self.assertIn(f"STALE: {home / 'agents/lane-worker-push.md'}", stale)
+            self.assertIn(f"STALE: {home / 'agents/retired-one.md'}", stale)
+            self.assertIn(f"STALE: {home / 'agents/retired-two.md'}", stale)
             self.assertNotIn("notes.txt", stale)
-            self.assertTrue((home / "agents/lane-worker.md").exists(), "--check writes nothing")
+            self.assertTrue((home / "agents/retired-one.md").exists(), "--check writes nothing")
             output = install().stdout
             self.assertIn("retired", output)
             self.assertEqual({path.name for path in (home / "agents").glob("*.md")}, set(shipped))
@@ -200,8 +200,8 @@ m.render_policy(prefix, "the loop-pi home templates")
                 self.assertEqual((home / "agents" / name).read_bytes(), data)
             backups = sorted((home / "backups").glob("agents-*"))
             self.assertEqual(len(backups), 1, backups)
-            self.assertEqual((backups[0] / "lane-worker.md").read_text(), "v2 lane worker\n")
-            self.assertEqual((backups[0] / "lane-worker-push.md").read_text(), "v2 push twin\n")
+            self.assertEqual((backups[0] / "retired-one.md").read_text(), "retired one\n")
+            self.assertEqual((backups[0] / "retired-two.md").read_text(), "retired two\n")
             install("--check")
             # Nothing retired, no new backup; a later retirement gets its own backup directory.
             install()
@@ -212,6 +212,48 @@ m.render_policy(prefix, "the loop-pi home templates")
             self.assertEqual(len(backups), 2, backups)
             self.assertEqual(sum((b / "old-reviewer.md").is_file() for b in backups), 1)
             self.assertEqual((root / "sentinel").read_text(), "untouched")
+
+    def test_install_backs_up_retired_dispatcher_launchers_and_check_reports_them(self):
+        import sys
+        with tempfile.TemporaryDirectory(prefix="loop-pi-retire-launcher-") as temporary:
+            root = Path(temporary).resolve()
+            env = {key: os.environ[key] for key in ("PATH", "TMPDIR") if key in os.environ}
+            env.update(HOME=str(root), GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+            built = subprocess.run([sys.executable, "-c", self.PREBUILD, str(HERE / "loop-pi-install")],
+                                   env=env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(built.returncode, 0, built.stderr)
+            home, bins = root / "pi", root / "bin"
+            args = [sys.executable, str(HERE / "loop-pi-install"), "--candidate-source", "--scratch-root", str(root),
+                    "--home", str(home), "--data", str(root / "data"), "--bin", str(bins), "--launcher", "loop-pi-test"]
+            def install(*extra, expected=0):
+                result = subprocess.run([*args, *extra], env=env, text=True, capture_output=True, timeout=30)
+                self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+                return result
+            install()
+            self.assertEqual(sorted(p.name for p in bins.iterdir() if p.name.startswith("loop-pi-dispatch")), [],
+                             "the installer no longer writes a dispatcher launcher")
+            old = "#!/bin/sh\nexec node pi.js -p --no-tools --provider loop-dispatch --model idle \"$@\"\n"
+            (bins / "loop-pi-dispatch").write_text(old)
+            (bins / "loop-pi-dispatch-fast").write_text(old)
+            (bins / "loop-pi-test-dispatch").write_text(old)
+            (bins / "loop-pi-dispatch-notes").write_text("someone else's script\n")
+            stale = install("--check", expected=1).stdout
+            for name in ("loop-pi-dispatch", "loop-pi-dispatch-fast", "loop-pi-test-dispatch"):
+                self.assertIn(f"STALE: {bins / name} is a retired dispatcher launcher", stale)
+            self.assertNotIn("loop-pi-dispatch-notes", stale)
+            self.assertTrue((bins / "loop-pi-dispatch").exists(), "--check writes nothing")
+            output = install().stdout
+            self.assertIn("retired", output)
+            left = sorted(p.name for p in bins.iterdir() if "dispatch" in p.name)
+            self.assertEqual(left, ["loop-pi-dispatch-notes"], "an unrelated file is never moved")
+            backups = sorted((home / "backups").glob("launchers-*"))
+            self.assertEqual(len(backups), 1, backups)
+            self.assertEqual(sorted(p.name for p in backups[0].iterdir()),
+                             ["loop-pi-dispatch", "loop-pi-dispatch-fast", "loop-pi-test-dispatch"])
+            self.assertEqual((backups[0] / "loop-pi-dispatch").read_text(), old)
+            install("--check")
+            install()
+            self.assertEqual(len(sorted((home / "backups").glob("launchers-*"))), 1, "nothing to retire, no new backup")
 
     def test_external_managed_agents_are_never_retired(self):
         prefix = fake_prefix(self.tmp)
@@ -899,10 +941,10 @@ class InstallerTests(unittest.TestCase):
     def test_lane_worktrees_is_a_root_extension_and_its_absence_is_reported_not_fatal(self):
         entry = "lane-worktrees/index.ts"
         self.assertIn(entry, m.ROOT_EXTENSIONS)
-        self.assertNotIn(entry, m.LANE_EXTENSIONS + m.DISPATCH_EXTENSIONS)
+        self.assertNotIn(entry, m.LANE_EXTENSIONS)
         prefix = fake_prefix(self.tmp)
         self.assertIn(entry, m.missing_extensions(prefix))
-        for rel in m.ROOT_EXTENSIONS + m.LANE_EXTENSIONS + m.DISPATCH_EXTENSIONS:
+        for rel in m.ROOT_EXTENSIONS + m.LANE_EXTENSIONS:
             stub = prefix / "extensions" / rel
             stub.parent.mkdir(parents=True, exist_ok=True)
             stub.write_text("export default () => {};\n")
@@ -930,20 +972,15 @@ class InstallerTests(unittest.TestCase):
                                {"label": "x", "missing_extensions": []}, "loop-pi", "loop-pi-install")
         self.assertIn(f"--extension '{prefix}/extensions/{entry}'", text)
 
-    def test_loop_status_is_root_only_so_lanes_and_the_dispatcher_set_no_status(self):
+    def test_loop_status_is_root_only_so_lanes_set_no_status(self):
         entry = "loop-status/index.ts"
         self.assertIn(entry, m.ROOT_EXTENSIONS)
         self.assertNotIn(entry, m.LANE_EXTENSIONS)
-        self.assertNotIn(entry, m.DISPATCH_EXTENSIONS)
         prefix = fake_prefix(self.tmp)
         self.assertEqual(m.missing_extensions(prefix).count(entry), 1)
         manifest = {"label": "x", "missing_extensions": []}
         root = m.launcher_text(prefix, self.tmp / "h", "/usr/bin/node", manifest, "loop-pi", "loop-pi-install")
-        dispatcher = m.dispatch_launcher_text(prefix, self.tmp / "h", "/usr/bin/node", manifest, "loop-pi-dispatch",
-                                              "loop-pi-install")
-        flag = f"--extension '{prefix}/extensions/{entry}'"
-        self.assertIn(flag, root)
-        self.assertNotIn(flag, dispatcher)
+        self.assertIn(f"--extension '{prefix}/extensions/{entry}'", root)
         rels = {rel for rel, _ in m.source_files()}
         self.assertIn(f"extensions/{entry}", rels)
         self.assertFalse(any(rel.startswith("extensions/loop-status/") and "test" in rel.rsplit("/", 1)[1] for rel in rels))

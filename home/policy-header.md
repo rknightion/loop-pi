@@ -1,6 +1,6 @@
 # loop-pi home
 
-This is `{{HOME}}`, a dedicated pi home used only for fan-out loop roots and their children. It is
+This is `{{HOME}}`, a dedicated pi home used only for loop roots and their children. It is
 not a Claude or Codex home: there is no hook runner, no MCP, no code-mode exec cell and no
 `wait_agent`. The loop protocol's pi harness file governs loop mechanics; where these instructions
 mention Codex- or Claude-only tools, use the pi equivalent.

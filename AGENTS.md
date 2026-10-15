@@ -1,6 +1,6 @@
 # loop-pi
 
-pi extensions, home template and installer for long-running fan-out loops. `README.md` describes
+pi extensions, home template and installer for long-running loops. `README.md` describes
 the pieces; `extensions/SEAMS.md` is the contract between the extensions. Change a seam there
 first, then in every extension it touches.
 

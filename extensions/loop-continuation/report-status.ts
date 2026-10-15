@@ -1,6 +1,5 @@
-// Ported from the fan-out session helper (fanout_session.py) of the author's agent-workflows plugin
-// (report_status/report_counts/final_marker). Frozen v3 seam S2: when a closeout counts. The
-// function and field names keep their v2 "report" spelling; the path is the launch's closeout.
+// When a closeout counts (frozen v3 seam S2). The function and field names keep the "report"
+// spelling of the persisted launch state; the path is the launch's closeout.
 
 import { existsSync, lstatSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";

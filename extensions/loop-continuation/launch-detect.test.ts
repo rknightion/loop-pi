@@ -119,7 +119,7 @@ describe("parseLaunch: multiplicity and dedup", () => {
     const absReport = "/repo/codex/closeout-2026-09-25-loop5.md";
     const text =
       `You are the root. Write your report to:\n\n  ${absReport}\n\n` +
-      "Then run:\n\n  wave-notify codex/closeout-2026-09-25-loop5.md\n";
+      "Then run:\n\n  cat codex/closeout-2026-09-25-loop5.md\n";
     const result = parseLaunch(text, repo, AFTER);
     assert.ok(result);
     assert.equal(result!.report, absReport);
@@ -141,15 +141,15 @@ describe("parseLaunch: multiplicity and dedup", () => {
   });
 });
 
-describe("parseLaunch: v3 closeout name shape", () => {
+describe("parseLaunch: closeout name shape", () => {
   const repo = "/repo";
 
-  test("a wave-shaped name is never a launch (no legacy fallback in loop-pi)", () => {
-    const text = "You are the root. Write codex/closeout-2026-09-25-wave5.md now.";
+  test("a closeout name without the -loopN suffix is never a launch", () => {
+    const text = "You are the root. Write codex/closeout-2026-09-25-run5.md now.";
     assert.equal(parseLaunch(text, repo, AFTER), null);
   });
 
-  test("a v2 report token is never a launch", () => {
+  test("a report- token is never a launch: only closeout- names arm", () => {
     for (const text of [
       "You are the root. Write codex/report-2026-09-25-loop5.md as the terminal action.",
       "You are the root. Write /repo/codex/report-2026-09-25-loop5.md as the terminal action.",
@@ -165,7 +165,6 @@ describe("parseLaunch: v3 closeout name shape", () => {
     assert.equal(result.launchSha256, createHash("sha256").update(text).digest("hex"));
     assert.equal(result.budget, 5400);
     assert.equal(result.charter, "/repo/codex/charter-2026-09-25-loop5.md");
-    assert.equal(result.hasOpsLine, false);
     const sibling = parseLaunch("You are the root. Write codex/closeout-2026-09-25-loop5.md now.", repo, AFTER)!;
     assert.equal(sibling.charter, "/repo/codex/charter-2026-09-25-loop5.md", "no named charter: the closeout's sibling");
     assert.equal(sibling.budget, null);

@@ -15,9 +15,6 @@ const sha256 = (bytes: string | Buffer) => createHash("sha256").update(bytes).di
 
 export interface RootLaunchContext {
   rootContext?: FrozenRootContext;
-  opsPath?: string | null;
-  auditGrantsPath?: string | null;
-  auditGrantsSha256?: string | null;
   standingPath?: string | null;
   standingSha256?: string | null;
 }
@@ -42,31 +39,29 @@ function ledgerBytes(log: string): Buffer {
 
 export function stateSummary(ctx: ExtensionContext, launch: RootLaunchContext, log: string, digest: string): { summary: string; logSha256: string } {
   const frozen = launch.rootContext;
-  if (!frozen) throw new Error("session has no arm-time frozen Goal/root snapshot; no moving-file fallback");
+  if (!frozen) throw new Error("session has no arm-time frozen charter/root snapshot; no moving-file fallback");
   if (frozen.sessionId !== ctx.sessionManager.getSessionId() || frozen.sessionFile !== (ctx.sessionManager.getSessionFile() ?? null) ||
       frozen.cwd !== ctx.cwd || frozen.runDir !== process.env.LOOP_PI_RUN_DIR) throw new Error("frozen root/session/run identity does not match");
-  if (sha256(frozen.goalText) !== frozen.goalSha256) throw new Error("frozen Goal hash does not match");
+  if (sha256(frozen.goalText) !== frozen.goalSha256) throw new Error("frozen charter hash does not match");
   const bytes = ledgerBytes(log);
   const rows = bytes.toString("utf8").split("\n").filter(Boolean).map(line => JSON.parse(line));
   const open = rows.find(row => row.ev === "open");
-  if (open?.goal_sha256 !== frozen.goalSha256) throw new Error("state open does not match frozen Goal");
+  if (open?.charter_sha256 !== frozen.goalSha256) throw new Error("state open does not match frozen charter");
   // Count unique actual implementation run IDs, not briefs, notifications or repaired blocks.
-  // These counts are a projection, never authority to reset/raise the Goal's attempt budgets.
+  // These counts are a projection, never authority to reset/raise the charter's attempt budgets.
   const runs = new Map<string, any>();
   for (const row of rows) if (row.ev === "dispatch") runs.set(row.run, row);
   const counts: Record<string, number> = {};
   for (const row of runs.values()) {
-    if (row.recovery_of || ["review", "gate", "triage"].includes(row.kind) ||
+    if (row.recovery_of || row.kind === "review" ||
         ["reviewer", "scout"].includes(row.agent)) continue;
     for (const task of new Set<string>(row.tasks ?? row.task.split(","))) counts[task] = (counts[task] ?? 0) + 1;
   }
   const identity = {
     sessionId: frozen.sessionId, sessionFile: frozen.sessionFile, cwd: frozen.cwd,
-    runDir: frozen.runDir, goalPath: frozen.goalPath, goalSha256: frozen.goalSha256,
+    runDir: frozen.runDir, charterPath: frozen.goalPath, charterSha256: frozen.goalSha256,
     stateLog: log, stateLogSha256: sha256(bytes),
     authority: {
-      opsPath: launch.opsPath ?? null, opsSha256: frozen.opsSha256,
-      auditGrantsPath: launch.auditGrantsPath ?? null, auditGrantsSha256: launch.auditGrantsSha256 ?? null,
       standingPath: launch.standingPath ?? null, standingSha256: launch.standingSha256 ?? null,
     },
     implementation_dispatches: counts,
@@ -74,7 +69,7 @@ export function stateSummary(ctx: ExtensionContext, launch: RootLaunchContext, l
     // Free-text returns/judgements are not conversation recovery; the hashed ledger retains them.
     state_projection: rows.filter(row => !["heartbeat", "watch", "judgement"].includes(row.ev)).map(row =>
       Object.fromEntries(["seq", "ev", "by", "task", "tasks", "lane", "run", "agent", "kind", "tier", "recovery_of",
-        "status", "needs", "until", "accepted", "sha", "landed", "mode", "scope", "exit"].filter(key => key in row).map(key => [key, row[key]]))),
+        "status", "needs", "until", "accepted", "sha", "landed", "mode", "exit"].filter(key => key in row).map(key => [key, row[key]]))),
   };
   const summary = [
     "Same root, same session. Recover from the frozen charter and append-only state, not prior conversation.",

@@ -2,7 +2,7 @@
   "name": "loop-pi",
   "version": "0.0.0",
   "private": true,
-  "description": "Pinned pi runtime, pi-subagents and loop-pi extensions for OpenAI-model fan-out loops.",
+  "description": "Pinned pi runtime, pi-subagents and loop-pi extensions for OpenAI-model loops.",
   "type": "module",
   "engines": {
     "node": ">=22.19.0"
