@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { after, test } from "node:test";
 import { cleanupAll, FAUX_EXTENSION, ROOT_EXTENSION, startPiRpc, writeFauxScript } from "../loop-wait/test-helpers.ts";
-import { cleanupFixtures, loopFixture } from "./test-fixture.ts";
+import { cleanupFixtures, closeoutBody, loopFixture } from "./test-fixture.ts";
 
 after(cleanupAll);
 after(cleanupFixtures);
@@ -18,7 +18,7 @@ for (const stop of ["paused", "report", "aborted", "paused-queued"] as const) {
   test(`an armed park clock is cancelled by an intervening ${stop} stop`, { timeout: 25_000 }, async () => {
     const f = loopFixture();
     const park = `at=$(python3 -c 'from datetime import datetime,timezone,timedelta; print((datetime.now(timezone.utc)+timedelta(seconds=5)).isoformat(timespec="milliseconds").replace("+00:00", "Z"))'); "${f.agentDir}/bin/loop-state" append "${f.log}" park task=T-1 needs=evidence-later reason=clock-gated until="$at"; printf 'PARK_RECORDED'`;
-    const report = ["# Loop: x loop3 · Goal: " + "a".repeat(64), "## Outcome", "## Evidence", "## Pending", "## Questions", "## Stalls and deaths", "## Tokens and wakeups"].join("\n");
+    const report = closeoutBody();
     const stopRule = stop === "report"
       ? { match: "STOP_NOW", once: true, toolCalls: [{ name: "bash", args: { command: `printf '%s' '${report}' > '${f.report}'; printf 'REPORT_WRITTEN'`, timeout: 5 } }] }
       : stop === "aborted"

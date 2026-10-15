@@ -1,13 +1,16 @@
-// Arm-time checks and the `open` event (frozen seams S3 and S4). Before a launch arms a root:
+// Arm-time checks and the `open` event. Before a launch arms a root:
 //   1. LOOP_PI_RUN_DIR is set and exists;
-//   2. the cwd's git toplevel is the goal's repository (the parent of the goal's codex/);
-//   3. the goal's `## Run` `host:` (optional) names this machine;
-//   4. the goal file exists, and an `open` already in the state log carries its sha256;
-//   5. the launch's `Ops grants:`, `Audit grants:` and `Standing:` lines name the files and digests
-//      the goal's `## Authority` `ops:`, `audit grants:` and `standing:` lines name (`none` or no
-//      line: the launch has none).
+//   2. the cwd's git toplevel is the charter's repository (the parent of the charter's codex/);
+//   3. the charter's optional `host:` key names this machine;
+//   4. the charter exists, and an `open` already in the state log carries its sha256;
+//   5. the launch carries no `Ops grants:` line (v3 has no ops lane), and its `Audit grants:` and
+//      `Standing:` lines name the files and digests the charter's `audit grants:` and `standing:`
+//      keys name (`none` or no key: the launch has none).
 // A failure refuses the arm; on success the caller appends `open` (by ext) when the log has none,
-// from the goal's `## Run` and its envelope table's task cells.
+// from the charter's header keys and its `## First wave` task cells. The root never writes it.
+//
+// The charter (charter.md template) keeps its keys in the block between its `# Charter:` title and
+// its first `## ` heading, one `key: value` per line.
 //
 // Pure apart from the injectable `ArmEnv`, so the checks are testable without a machine.
 
@@ -16,6 +19,7 @@ import { execFile, execFileSync } from "node:child_process";
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { hostname } from "node:os";
 import { join, normalize } from "node:path";
+import { deriveLogPath } from "../loop-state/core.ts";
 
 export const PROTO_FILE = "loop-pi-proto";
 export const PROTO_VERSION = "2";
@@ -94,38 +98,35 @@ export function codexRepo(absPath: string): string | null {
   return null;
 }
 
-/** `key: value` lines of one `## <name>` section, keys lower-cased; the first of a key wins. */
-export function sectionKeys(goal: string, name: string): Record<string, string> {
+/** The charter's header keys: `key: value` lines (unindented, no bullet) before its first `## `
+ *  heading, keys lower-cased; the first of a key wins. Indented continuation lines (the
+ *  `authority:` list) are not keys. */
+export function charterKeys(charter: string): Record<string, string> {
   const out: Record<string, string> = {};
-  let inside = false;
-  for (const line of goal.split(/\r?\n/)) {
-    if (/^##\s/.test(line) && !line.startsWith("###")) {
-      inside = line.replace(/^##\s+/, "").trim().toLowerCase() === name.toLowerCase();
-      continue;
-    }
-    if (!inside) continue;
-    const m = /^\s*(?:[-*]\s+)?([A-Za-z][A-Za-z0-9 _-]*?)\s*:\s*(.*?)\s*$/.exec(line);
+  for (const line of charter.split(/\r?\n/)) {
+    if (/^##\s/.test(line)) break;
+    const m = /^([A-Za-z][A-Za-z0-9 _-]*?)\s*:\s*(.*?)\s*$/.exec(line);
     if (m && !(m[1].toLowerCase() in out)) out[m[1].toLowerCase()] = m[2].replace(/^`(.*)`$/, "$1").trim();
   }
   return out;
 }
 
-/** The goal's `## Run` `concurrency:` as a positive integer, or null when absent or not exactly one. */
-export function runConcurrency(goal: string): number | null {
-  const raw = sectionKeys(goal, "Run").concurrency;
+/** The charter's `lanes:` cap as a positive integer, or null when absent or not exactly one. */
+export function runConcurrency(charter: string): number | null {
+  const raw = charterKeys(charter).lanes;
   if (raw === undefined || !/^\d+$/.test(raw)) return null;
   const n = Number(raw);
   return Number.isSafeInteger(n) && n >= 1 ? n : null;
 }
 
-/** The task ids in the `## Envelope` table's task cells, in order (`<id>` or `<id> (<title>)`). */
-export function envelopeTaskIds(goal: string): string[] {
+/** The task ids in the `## First wave` table's task cells, in order (`<id>` or `<id> (<title>)`). */
+export function firstWaveTaskIds(charter: string): string[] {
   const ids: string[] = [];
   let inside = false;
   let header = false;
-  for (const line of goal.split(/\r?\n/)) {
+  for (const line of charter.split(/\r?\n/)) {
     if (/^##\s/.test(line) && !line.startsWith("###")) {
-      inside = line.replace(/^##\s+/, "").trim().toLowerCase() === "envelope";
+      inside = line.replace(/^##\s+/, "").trim().toLowerCase() === "first wave";
       header = false;
       continue;
     }
@@ -135,16 +136,15 @@ export function envelopeTaskIds(goal: string): string[] {
       header = true; // the header row
       continue;
     }
-    if (/^:?-{3,}:?$/.test(first) || first === "") continue;
+    if (/^:?-{3,}:?$/.test(first) || first === "" || first.startsWith("<")) continue;
     ids.push(/^(\S+)/.exec(first)![1]);
   }
   return ids;
 }
 
-/** `report-<name>.md` -> `state-<name>.jsonl` beside it. */
-export function stateLogFor(report: string): string {
-  const slash = report.lastIndexOf("/");
-  return report.slice(0, slash + 1) + report.slice(slash + 1).replace(/^report-/, "state-").replace(/\.md$/, ".jsonl");
+/** S3: `closeout-<name>.md` -> `state-<name>.jsonl` beside it (null for any other name). */
+export function stateLogFor(closeout: string): string | null {
+  return deriveLogPath(closeout);
 }
 
 /** The first `open` event in a state log, or null when there is none (or no log). */
@@ -169,12 +169,12 @@ export function existingOpen(log: string): Record<string, unknown> | null {
 }
 
 export type ArmCheck =
-  | { ok: true; runDir: string; goal: string; goalText: string; goalSha256: string; log: string }
+  | { ok: true; runDir: string; charter: string; charterText: string; charterSha256: string; log: string }
   | { ok: false; reason: string };
 
-/** S3 checks for a launch naming `report` and `goal` (both absolute). */
+/** Arm checks for a launch naming `report` (the closeout) and `charter` (both absolute). */
 export function checkArm(
-  launch: { report: string; goal: string; opsLine?: GrantLine; auditLine?: GrantLine; standingLine?: GrantLine },
+  launch: { report: string; charter: string; hasOpsLine?: boolean; auditLine?: GrantLine; standingLine?: GrantLine },
   env: ArmEnv,
 ): ArmCheck {
   const refuse = (reason: string): ArmCheck => ({ ok: false, reason });
@@ -188,11 +188,11 @@ export function checkArm(
   }
   if (!isDir) return refuse(`LOOP_PI_RUN_DIR ${runDir} does not exist`);
 
-  if (!launch.goal.startsWith("/")) return refuse(`the goal path ${launch.goal} is not absolute`);
-  const goalRepo = codexRepo(launch.goal);
-  if (!goalRepo) return refuse(`the goal ${launch.goal} is not inside a codex/ directory`);
+  if (!launch.charter.startsWith("/")) return refuse(`the charter path ${launch.charter} is not absolute`);
+  const charterRepo = codexRepo(launch.charter);
+  if (!charterRepo) return refuse(`the charter ${launch.charter} is not inside a codex/ directory`);
   const top = env.gitToplevel(env.cwd);
-  if (!top) return refuse(`the cwd ${env.cwd} is not inside a git repository; the goal's repository is ${goalRepo}`);
+  if (!top) return refuse(`the cwd ${env.cwd} is not inside a git repository; the charter's repository is ${charterRepo}`);
   const same = (a: string, b: string) => {
     try {
       return env.realpath(a) === env.realpath(b);
@@ -200,94 +200,102 @@ export function checkArm(
       return a === b;
     }
   };
-  if (!same(top, goalRepo)) return refuse(`the cwd's repository ${top} is not the goal's repository ${goalRepo}`);
+  if (!same(top, charterRepo)) return refuse(`the cwd's repository ${top} is not the charter's repository ${charterRepo}`);
 
   let bytes: Buffer;
   try {
-    bytes = env.readFile(launch.goal);
+    bytes = env.readFile(launch.charter);
   } catch {
-    return refuse(`the goal file ${launch.goal} cannot be read`);
+    return refuse(`the charter file ${launch.charter} cannot be read`);
   }
-  const goalText = bytes.toString("utf8");
-  const host = sectionKeys(goalText, "Run").host;
+  const charterText = bytes.toString("utf8");
+  const host = charterKeys(charterText).host;
   if (host) {
     const names = env.hostNames();
     if (!names.includes(host.toLowerCase())) {
-      return refuse(`the goal runs on host ${host}; this machine is ${names.join(" / ") || "unknown"}`);
+      return refuse(`the charter runs on host ${host}; this machine is ${names.join(" / ") || "unknown"}`);
     }
   }
-  const grants = grantLinesMismatch(goalText, goalRepo, {
-    opsLine: launch.opsLine ?? { kind: "none" },
+  if (launch.hasOpsLine) return refuse("the launch carries an Ops grants line; v3 has no ops lane, so a loop launch carries none");
+  const grants = grantLinesMismatch(charterText, charterRepo, {
     auditLine: launch.auditLine ?? { kind: "none" },
     standingLine: launch.standingLine ?? { kind: "none" },
   });
   if (grants) return refuse(grants);
-  const goalSha256 = createHash("sha256").update(bytes).digest("hex");
+  const charterSha256 = createHash("sha256").update(bytes).digest("hex");
   const log = stateLogFor(launch.report);
+  if (!log) return refuse(`the closeout ${launch.report} is not a codex/closeout-<name>.md path`);
   const open = existingOpen(log);
-  if (open && open.goal_sha256 !== goalSha256) {
-    return refuse(`the goal changed since the loop opened: ${log} has goal_sha256 ${String(open.goal_sha256)}, the file is ${goalSha256}`);
+  if (open && open.goal_sha256 !== charterSha256) {
+    return refuse(`the charter changed since the loop opened: ${log} has goal_sha256 ${String(open.goal_sha256)}, the file is ${charterSha256}`);
   }
-  return { ok: true, runDir, goal: launch.goal, goalText, goalSha256, log };
+  return { ok: true, runDir, charter: launch.charter, charterText, charterSha256, log };
 }
 
-/** The `open` event for a goal, or the reason it cannot be built. */
-export function openEvent(goalText: string, goalSha256: string): { event: Record<string, unknown> } | { error: string } {
-  const run = sectionKeys(goalText, "Run");
-  const tier = run.tier;
-  if (tier !== "routine" && tier !== "guarded") return { error: `## Run tier is '${tier ?? ""}', not routine or guarded` };
-  const rootModel = run["root-model"];
-  if (!rootModel) return { error: "## Run has no root-model" };
-  return { event: { ev: "open", goal_sha256: goalSha256, tier, root: "llm", root_model: rootModel, envelope: envelopeTaskIds(goalText) } };
+/** The tier the `open` event records. The v3 charter sets no run tier (tiers are per task), so the
+ *  open carries `routine` unless the charter states `tier: guarded`. Telemetry only, never a gate. */
+function openTier(keys: Record<string, string>): "routine" | "guarded" {
+  return keys.tier === "guarded" ? "guarded" : "routine";
 }
 
-/** What a launch says about one grants file: its `<label>:` line(s), as `parseOpsLine` / `parseAuditLine` /
+/**
+ * The `open` event continuation appends at arm when the log has none (the root never writes it).
+ * The loop-state schema keeps its v2 field names: `goal_sha256` holds the charter's sha256, which
+ * the closeout header also carries, and `envelope` the charter's first-wave task ids. `root_model`
+ * is the charter's `root:` value, or `unknown` when the charter has none.
+ */
+export function openEvent(charterText: string, charterSha256: string): Record<string, unknown> {
+  const keys = charterKeys(charterText);
+  return {
+    ev: "open", goal_sha256: charterSha256, tier: openTier(keys), root: "llm",
+    root_model: keys.root || "unknown", envelope: firstWaveTaskIds(charterText),
+  };
+}
+
+/** What a launch says about one grants file: its `<label>:` line(s), as `parseAuditLine` /
  *  `parseStandingLine` read them. */
 export type GrantLine = { kind: "none" } | { kind: "line"; path: string; sha256: string } | { kind: "invalid"; reason: string };
 
-const GOAL_GRANT_RE = /^`?(\S+?)`?\s+sha256=([0-9a-fA-F]{64})\s*$/;
+const CHARTER_GRANT_RE = /^`?(\S+?)`?\s+sha256=([0-9a-fA-F]{64})\s*$/;
 
 /**
- * The launch's grants lines must be the goal's `## Authority` `ops:`, `audit grants:` and `standing:`
- * lines: the same file (a relative goal path resolves against the goal's repository) and the same sha256. A goal
- * line `none`, or no goal line at all, means the launch carries no such line. Returns why they differ,
- * or null. The file itself is read and checked later, by the freeze.
+ * The launch's `Audit grants:` and `Standing:` lines must be the charter's `audit grants:` and
+ * `standing:` keys: the same file (a relative charter path resolves against the charter's
+ * repository) and the same sha256. A charter key `none`, or no key at all, means the launch carries
+ * no such line. Returns why they differ, or null. The file itself is read and checked later, by the
+ * freeze.
  */
 export function grantLinesMismatch(
-  goalText: string,
-  goalRepo: string,
-  launch: { opsLine: GrantLine; auditLine: GrantLine; standingLine?: GrantLine },
+  charterText: string,
+  charterRepo: string,
+  launch: { auditLine: GrantLine; standingLine?: GrantLine },
 ): string | null {
-  const authority = sectionKeys(goalText, "Authority");
+  const keys = charterKeys(charterText);
   const check = (key: string, label: string, line: GrantLine): string | null => {
-    const raw = authority[key];
-    const goalValue = raw === undefined ? null : raw.trim();
-    const goalNone = goalValue === null || /^`?none\b/i.test(goalValue);
-    if (goalNone) {
+    const raw = keys[key];
+    const value = raw === undefined ? null : raw.trim();
+    const none = value === null || /^`?none\b/i.test(value);
+    if (none) {
       if (line.kind === "none") return null;
-      return `the launch carries ${/^[AEIOU]/.test(label) ? "an" : "a"} ${label} line but the goal's ## Authority ${key} is ${goalValue === null ? "absent" : "none"}`;
+      return `the launch carries ${/^[AEIOU]/.test(label) ? "an" : "a"} ${label} line but the charter's ${key} is ${value === null ? "absent" : "none"}`;
     }
-    const m = GOAL_GRANT_RE.exec(goalValue);
-    if (!m) return `the goal's ## Authority ${key} line is neither none nor <path> sha256=<64 hex>`;
-    const goalPath = normalize(m[1].startsWith("/") ? m[1] : join(goalRepo, m[1]));
-    const goalSha = m[2].toLowerCase();
-    if (line.kind === "none") return `the goal's ## Authority ${key} names ${goalPath} but the launch has no ${label} line`;
-    if (line.kind === "invalid") return `the launch's ${label} line is malformed (${line.reason}); the goal names ${goalPath}`;
-    if (normalize(line.path) !== goalPath) return `the launch's ${label} file ${line.path} is not the goal's ${key} file ${goalPath}`;
-    if (line.sha256 !== goalSha) return `the launch's ${label} sha256 ${line.sha256} is not the goal's ${key} sha256 ${goalSha}`;
+    const m = CHARTER_GRANT_RE.exec(value);
+    if (!m) return `the charter's ${key} key is neither none nor <path> sha256=<64 hex>`;
+    const path = normalize(m[1].startsWith("/") ? m[1] : join(charterRepo, m[1]));
+    const sha = m[2].toLowerCase();
+    if (line.kind === "none") return `the charter's ${key} names ${path} but the launch has no ${label} line`;
+    if (line.kind === "invalid") return `the launch's ${label} line is malformed (${line.reason}); the charter names ${path}`;
+    if (normalize(line.path) !== path) return `the launch's ${label} file ${line.path} is not the charter's ${key} file ${path}`;
+    if (line.sha256 !== sha) return `the launch's ${label} sha256 ${line.sha256} is not the charter's ${key} sha256 ${sha}`;
     return null;
   };
-  return (
-    check("ops", "Ops grants", launch.opsLine) ??
-    check("audit grants", "Audit grants", launch.auditLine) ??
-    check("standing", "Standing", launch.standingLine ?? { kind: "none" })
-  );
+  return check("audit grants", "Audit grants", launch.auditLine) ?? check("standing", "Standing", launch.standingLine ?? { kind: "none" });
 }
 
-/** A first input that names a goal file but did not arm. */
-export function namesGoalPath(text: string): boolean {
-  return /(?:^|[\s`'"(])(?:\S*\/)?codex\/goal-[^\s`'")]*\.md/.test(text);
+/** A first input that names a charter file but did not arm. */
+export function namesCharterPath(text: string): boolean {
+  return /(?:^|[\s`'"(])(?:\S*\/)?codex\/charter-[^\s`'")]*\.md/.test(text);
 }
 
 export const NOT_ARMED_WARNING =
-  "This did not arm a loop root: paste the launch file path (codex/launch-...) to relaunch with its grants.";
+  "This did not arm a loop root: paste the launch file path (codex/launch-...) to relaunch it.";

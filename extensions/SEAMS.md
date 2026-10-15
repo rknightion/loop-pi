@@ -64,30 +64,16 @@ public statement of those contracts.
   in the loop-pi home, not the target repository.
 - Non-TTY stdin: pi in `--mode json`/`--print` waits on stdin. Tests close it (`stdio: ["ignore", ...]`
   or `</dev/null`). RPC mode keeps stdin open by design.
-- **Push grant (async single-agent launches):** the root guard overwrites the entire
-  `extensionBindings` tool input with `{"loop-pi.guard/1":{"agent":<selected agent>}}` after
-  validating the launch, and removes any copy inside `options`. pi-subagents 0.77.0 delivers it in `PI_SUBAGENT_EXTENSION_BINDINGS`
-  to the detached child. For directly bound detached children, only `lane-worker-push`,
-  `lane-worker-low-push`, `lane-worker-retry-push`, `complex-worker-push`, `super-worker-push`
-  and `megasuper-worker-push` may make plain `git push`;
-  a missing, malformed or unknown identity
-  denies pushes. The lane guard applies this to `bash` and `watch_process`, including the
-  existing parser's wrappers, aliases and fallback scan. Force pushes remain blocked for all.
-  The real-CLI faux-provider test proves denial, a push to a disposable local bare remote,
-  and replacement of model-supplied bindings. This remains an honest-mistake fence, not an
-  OS security boundary. **Unwrapped foreground nested children inherit the detached parent's push
-  grant, even when the nested agent is not one of the push agents.** pi-subagents
-  0.77.0 creates foreground children in the parent's process and does not apply per-child
-  `processEnv` there; the lane extension therefore reads the parent's binding. Denying
-  that inheritance requires a supported per-session identity transport, not parsing prompt
-  text or mutating shared process environment. A child without a binding denies pushes,
-  but a foreground child of a granted parent is not such a child. Lane `subagent` calls
-  that supply any `extensionBindings`, at the top level or inside `options`, are refused before launch; this prevents explicit
-  binding forgery, not foreground inheritance. Briefs must not treat the guard as enforcing
-  a separate no-push right on a granted lane's foreground descendants.
-  Installed homes adopt it only after a lock bump.
-- **Non-push launcher (pi-subagents 0.77.0):** all shipped non-push agents except `ops` and
-  `ops-probe` name `launcher: nopush`. The user subagent config maps `runnerLaunchers.nopush`
+- **Push authority:** lanes never push. The lane guard refuses `git push` for every lane agent
+  through `bash` and `watch_process`, including the parser's wrappers, aliases and fallback scan;
+  only the root's own `bash` pushes. Force pushes remain blocked for all. The root guard still
+  overwrites the entire `extensionBindings` tool input with
+  `{"loop-pi.guard/1":{"agent":<selected agent>,"runDir"?:<run dir>}}` after validating the launch
+  and removes any copy inside `options`; the binding carries identity and run dir only and grants
+  nothing. Lane `subagent` calls that supply any `extensionBindings` are refused before launch. This
+  is an honest-mistake fence, not an OS security boundary. Installed homes adopt it only after a
+  lock bump.
+- **Non-push launcher (pi-subagents 0.77.0):** every shipped agent names `launcher: nopush`. The user subagent config maps `runnerLaunchers.nopush`
   to `<agentDir>/bin/loop-pi-nopush`, managed by the installer. The wrapper sets Git environment
   `pushInsteadOf` rewrites for HTTPS, HTTP, SSH, `git@` and `git://` to an unknown helper scheme,
   disables terminal credential prompts, then execs the background runner's argv. Fetch and local
@@ -115,15 +101,12 @@ ancestors are checked against that canonical boundary before accepting missing d
 This is a static-topology mistake fence, not protection against adversarial same-account races
 or an OS sandbox. Ordinary installations without the paired flags keep their existing behavior.
 
-## Complex lane nesting
+## Senior nesting
 
-`complex-worker` and `complex-worker-push` set `maxSubagentDepth: 2`, matching the home's
-existing global maximum of 2. pi-subagents 0.77.0 counts the root at depth 0, its lane at
-1 and that lane's child at 2; it intersects the parent's maximum with the selected agent's
-maximum. A lane maximum of 1 therefore prevents any child launch from that lane. The complex
-pair's metadata preserves the already-approved depth-2 delegation shape, not a higher global
-cap or new delegation authority. Both retain their existing `allowedAgents`, tools and models;
-delegation still requires an explicit brief grant and the existing seven-slot reserve.
+`senior` sets `maxSubagentDepth: 2` and `allowedAgents: scout, worker, reviewer`, matching the home's
+global maximum of 2; no other agent has the `subagent` tool. pi-subagents 0.77.0 counts the root at
+depth 0, its lane at 1 and that lane's child at 2, and intersects the parent's maximum with the
+selected agent's maximum. A senior delegates only when its brief grants a count.
 
 ## Role by entry point
 
@@ -360,7 +343,9 @@ correlation stays null when the pinned HTTP-error path exposes no response-heade
 unique client request id remains available separately. Recovery metadata and stop notices never
 retain error bodies or credentials; the existing native compaction diagnostic is unchanged.
 Stop messages name the reason and ask the operator to inspect saved work
-before resuming; one non-triggering `loop-recovery-required` notice surfaces the stop.
+before resuming; one non-triggering `loop-recovery-required` notice surfaces the stop. On an armed
+root the stop is not the end: loop-continuation classifies it and resumes it after a backoff, or
+records an owner-actionable stop (see "Automatic root recovery"). Lanes are never auto-resumed.
 
 For the pinned pi Responses runtime, a failed assistant response exits the agent loop before
 local tool execution. Native retry omits only that failed attempt from model projection; earlier
@@ -413,6 +398,48 @@ The pi 1.1.0 retry API accepts text only: allowlisted server failures are normal
 standard `server error` wording at message_end; denied failures use a nonretryable explanation.
 This is an adapter to pi's classifier, not a new retry loop. Header ids describe provider
 invocations, not hidden SDK retries; use provider maxRetries zero for attempt-level proof.
+
+## Automatic root recovery
+
+loop-continuation (root only) resumes an armed root that stops on a failed model request, so an
+owner's "continue" is no longer needed. Everything above (pi's native retry, the request ceiling,
+the retry recovery episode) runs first and is unchanged; this acts only once that machinery has
+left the root idle.
+
+- Trigger: at `agent_settled`, while armed and the closeout does not count, the session branch's
+  last assistant message is classified (`root-recovery.ts` `classifyRootStop`). An abort is the
+  harness's only when this run saw `loop-recovery:request-timeout` or `loop-recovery:abort`;
+  otherwise it is the operator's and is never resumed (any pending resume is cancelled).
+- Classification, owner-actionable rows first (the detail names only the retry-recovery reason,
+  the allowlisted upstream code and the status, never an error body):
+
+  | Evidence on the failed message | Decision |
+  |---|---|
+  | `stop`/`toolUse`/`length`, or no assistant message | none |
+  | aborted without a harness marker, or reason `operator-cancelled` | none |
+  | reason `upstream-auth-refusal`; code `invalid_api_key`/`authentication_error`/`permission_denied`/`insufficient_permissions`; type `authentication_error`/`permission_error`; status 401/403; unmanaged text naming 401/403, unauthorized, forbidden, authentication | stop: `authentication` |
+  | reason `upstream-policy-refusal`; a policy code (`cyber_policy`, `content_policy_violation`, `content_filter`, `policy_violation`, `safety_violation`); type `policy_error`; unmanaged text naming a policy or a refusal | stop: `policy` |
+  | code `insufficient_quota`; unmanaged text naming quota, usage limit, billing, budget or balance | stop: `quota` |
+  | code `context_length_exceeded`; pi's context-overflow pattern; a summary-route reason (`summary-*`, `two-call-summary-not-authorized`, `opaque-summary-*`) | stop: `context-length` |
+  | reason `unobservable-provider-retries` | stop: `configuration` |
+  | `loop-recovery:request-timeout` this run (limit `inactivity` or unknown), or reason `safe-local-timeout`/`timeout-not-replayable` | resume: `stalled-request` |
+  | the same with limit `absolute`, or the request ceiling's empty output-budget error | resume: `request-ceiling` |
+  | any other error or harness abort (server errors, `stream_incomplete`, rate limits, `attempt-limit`, `episode-expired`, `ceiling-limit`, `protected-request`, `non-retryable-upstream`, unclassified) | resume: `provider-error` |
+
+- Resume: after `min(baseDelayMs * 2^(n-1), maxDelayMs)` for the n-th resume since the root last
+  completed a `stop` or `toolUse` message (`loopPi.rootRecovery: {enabled, baseDelayMs,
+  maxDelayMs}`, defaults true, 60000, 900000), with no attempt limit while armed. A run that
+  starts before the timer fires holds it, keeping its due time; that run's settle re-arms it.
+  At expiry the root must still be armed, idle, without a counted closeout and still stopped on a
+  failed message, else nothing is sent. Then loop-continuation appends a `judgement`
+  `loop-pi auto-resume <n>: <cause> (<detail>) after <s> backoff` to the state log (by `ext`),
+  emits `loop-recovery:resume`, and sends one `loop-root-recovery` custom message with
+  `triggerTurn: true`. Wakes held while the episode was halted are already in the transcript.
+- Stop: one `loop-root-recovery-stopped` root incident (`incidents/root/`, `loopPi.onIncident`), one
+  `judgement` `loop-pi recovery stopped: <cause> (<detail>); the root waits for its owner`, and a
+  visible error notice, once per failed message. The owner's own input cancels a pending resume.
+- Healthy progress (`stop`/`toolUse`) resets the backoff to the base. Session start and shutdown
+  drop a pending resume.
 
 ## Retry backoff
 
@@ -479,13 +506,22 @@ before any `await`. A missing reply means the provider extension is not loaded; 
   - loop-wait root arms a timer exactly as `wake_at` would.
 - `loop-wait:query-watchers` `{ reply(ws: { id: string; label: string; pid: number; phase: string }[]) }`
 - `loop-continuation:query-launch` `{ cwd?: string; reply(r: { reportPath: string; opsPath: string | null; ops: object | null } | null) }`
-  - loop-continuation answers from its frozen launch state. `ops` is the parsed ops file read and
-    hash-checked once at launch detection; a missing, mismatched or invalid file gives `ops: null`
-    and an `incidents/ops/` record. Later edits to the file are ignored.
-  - The reply may also carry `concurrency: number`, the goal's `## Run` `concurrency:` value: a bare
+  - loop-continuation answers from its frozen launch state. `reportPath` is the launch's closeout
+    path (`codex/closeout-<name>-loop<N>.md`, v3 seam S1; the key keeps its v2 name). The state log
+    is derived from it (S3): `closeout-` becomes `state-` and `.md` becomes `.jsonl`
+    (`loop-state/core.ts` `deriveLogPath`, the one implementation; any other name derives none).
+  - `opsPath` and `ops` are always null: v3 has no ops lane, and a launch carrying an `Ops grants:`
+    line is refused at arm. They stay in the reply so older readers see "no grants".
+  - The reply may also carry `concurrency: number`, the charter's `lanes:` value: a bare
     positive integer (digits only), frozen at arm and restored with the continuation state on a
     resumed session. The key is absent, not null, when no launch is armed or the value is missing or
     malformed. Consumers treat it as optional.
+- `loop-recovery:request-timeout` `{ limitType: "inactivity" | "absolute" }`: the request ceiling,
+  synchronously before its `ctx.abort()`. `limitType` is additive; older readers ignore it.
+- `loop-recovery:resume` `{}`: loop-continuation, synchronously before it sends an automatic root
+  resume (see "Automatic root recovery"). The retry recovery controller resets an idle episode
+  exactly as an owner's idle input would. Nothing else emits it: wakes, notices and ceiling
+  follow-ups never reset the outage budget.
 - `loop-guard` needs "is any async subagent run active" for its root rule. It owns detecting that
   (pi-subagents public API if one exists, else tracking `subagent` results and `subagent-notify`
   messages). No other extension provides it.
@@ -496,13 +532,17 @@ before any `await`. A missing reply means the provider extension is not loaded; 
   `wake_at`, `wake_cancel` (root only).
 - Custom message types (these start root turns, parsed by `parse_pi.py`): `loop-watch` (watcher
   exit or deadline), `loop-wake` (timer fired), `loop-continuation` (nudge), `loop-request-incident`
-  (request ceiling follow-up; also starts lane turns). Persisted state uses
+  (request ceiling follow-up; also starts lane turns), `loop-root-recovery` (automatic root resume;
+  details `{attempt, cause, detail, delayMs}`). Persisted state uses
   `pi.appendEntry` with `customType` `loop-wait-state` and `loop-continuation-state`.
 - loop-wait run dir: `<agentDir>/loop-wait/<sessionId>/`, receipts at
   `<run-dir>/receipts/<watch-id>.json` with fields (`phase`, `observations`,
   `last_observed_at`, `deadline`, `result`, `pid`, `command`, `interval_s`), written atomically
   (write temp + rename). Watcher output at `<run-dir>/logs/<watch-id>.log`.
-- Continuation incident files: `<agentDir>/incidents/<sessionId>-<UTC timestamp>.json`.
+- Continuation incident files: `<agentDir>/incidents/<sessionId>-<UTC timestamp>.json`. A root
+  recovery stop: `<agentDir>/incidents/root/<sessionId>-<UTC>-recovery-stopped.json`
+  `{v: 1, session, class: loop-root-recovery-stopped, at, home, cwd, cause, detail}`, then
+  `loopPi.onIncident`.
 - Request incident files: `<agentDir>/incidents/request/<sessionId>-<UTC timestamp>-<kind>-<attempt>[-exhausted].json`,
   `{v: 1, session, class, at, home, cwd, model, elapsed_ms, wall_clock_ms, attempt}` with class
   `loop-request-wall-clock-ceiling` or `loop-request-empty-length-stop`, plus `-exhausted` when the
@@ -525,18 +565,16 @@ before any `await`. A missing reply means the provider extension is not loaded; 
   loop-continuation in lanes: the root's ticker uploads their transcripts. pi homes are Mac-only; without lockf,
   uploads are not serialised across processes.
   Ignore failures. The installer lays the script out only when an overlay provides it.
-- The agent set (the only names the root may spawn): `mapper`, `mapper-deep`, `gate-runner`,
-  `lane-worker`, `lane-worker-push`, `lane-worker-low`, `lane-worker-low-push`, `lane-worker-retry`,
-  `lane-worker-retry-push`, `complex-worker`, `complex-worker-push`, `super-worker`,
-  `super-worker-push`, `megasuper-worker`, `megasuper-worker-push`, `reviewer`, `reviewer-high`,
-  `security-reviewer`, `rescue-astra-medium`, `rescue-astra`, `ops`, `ops-probe`, `triager`.
-- Escalation tiers: SUPER = {`super-worker`, `super-worker-push`} (gpt-6-astra, `thinking: high`);
-  MEGASUPER = {`megasuper-worker`, `megasuper-worker-push`, `agent-workflows:megasuper-worker`}
-  (gpt-6-astra, `thinking: xhigh`). Both copy the `complex-worker` bodies.
+- The agent set (the only names the root may spawn): `worker`, `senior`, `senior-escalation`,
+  `reviewer`, `scout`. The installer moves any other agent file in an installed home to
+  `<home>/backups/agents-<UTC>/`.
 - Every agent file sets `inheritGlobalContext: false`; the installer appends the home's
   `lane-policy.md` after a `<!-- lane-policy -->` marker instead. An overlay may replace
-  `lane-policy.md`, so the return contract is not in it: every agent but `triager` carries the
-  `lane-return` v2 block in its own body, and `triager` its `triage` block.
+  `lane-policy.md`, so the return contract is not in it: every agent carries the
+  `lane-return` v3 block in its own body.
+- `loop-state` (`core.ts` `parseLaneReturn`) accepts a `lane-return` block with `"v": 3` (lane.md),
+  `"v": 2`, or no `v`; the `return` event takes the fields it knows (`status`, `base`, `check`,
+  `exit`, `coderabbit`, `questions`, ...) and drops the rest (`patch`, `patch_sha256`, `tail`).
 - A return with no usable `lane-return` block is ultimately `failed`. Model-root `loop-state`
   first attempts exactly one package-owned resume asking for the block, correlating the revived
   run to the original lane and run; a refused resume or another missing block falls back to failed
@@ -571,7 +609,7 @@ before any `await`. A missing reply means the provider extension is not loaded; 
   The dispatcher retains immediate failed behavior. `loop-state` folds a `gate-runner` dispatch into
   a live lane only, never a task.
 - Root extensions also include `loop-state/index.ts`: it appends `dispatch` and `return` to
-  `codex/state-<stem>-loop<N>.jsonl` (sibling of the report) through `<agentDir>/bin/loop-state`
+  `codex/state-<stem>-loop<N>.jsonl` (sibling of the closeout, S3) through `<agentDir>/bin/loop-state`
   for `subagent` calls whose brief starts `Lane: <id> · Task: <id> [(<title>)] · Tier: ...`, and injects the
   recovery digest (`loop-state-digest`, no turn) after compaction and at session start.
   Admit metadata may include resolved `tier` (`routine` or `guarded`) and `surfaces` (explicit
@@ -590,8 +628,16 @@ before any `await`. A missing reply means the provider extension is not loaded; 
 - Lane timers: loop-wait root arms a timer on `subagent:async-started` for this session (brief
   `Deadline:`, else `deadlineAt`, else `timeoutMs`) and cancels it on `subagent:async-complete` by
   run id.
-- Close-out: at settle, loop-continuation reads `loop-state digest --json`; with no live lanes, no
-  admissible task and nothing else armed it nudges `close-out` instead of releasing a WAITING.
+- Idle nudge: at settle, loop-continuation reads `loop-state digest --json` for `live_lanes` only (v3
+  roots write no `admit` events, so `admissible` is never read and need not be present). With no live
+  lane in the log, no async subagent run this process saw start and not complete, no active
+  time-gated evidence park, no `loop-wait` watcher and no timer but its own WAITING auto-arm, a
+  WAITING or unmarked stop gets one `idle` nudge (`details.reason: "idle"`) telling the root to
+  dispatch ready work from the board or close out per the contract, instead of a release. An
+  unreadable digest or a missing loop-wait reply is unknown, never idle: the WAITING release and
+  `unmarked` nudge apply as before. The idle nudge counts toward `MAX_NUDGES` (3); the stop after
+  the third is released with one `loop-continuation-chain-exhausted` incident, as before. A counted
+  closeout or `PAUSED:` releases. The nudge text never leads with an owner control phrase.
   WAITING and PAUSED lines are matched after stripping leading `[\s*_`>-]` and trailing
   `[\s.!*_`)]` decoration.
 - Ops lanes: the root binds `{"loop-pi.guard/1":{"agent":"ops","surface":"<id>","entry":{...}}}`
@@ -644,21 +690,31 @@ by an older build keeps its old behaviour after an install. Arm-time refusals ca
 (arming writes the marker). The threat model is a mistaken root or lane, not an adversarial one: edit and write
 paths are exact, bash write detection is best-effort.
 
-- **Arming** happens in the `input` hook: "You are the root" plus one report path, or a bare
-  `launch-*` path. It refuses (returns `handled`, no model turn) with no run dir, a cwd whose git
-  toplevel is not the goal's repository, a goal `## Run` `host:` other than this machine, a
-  missing goal, or a launch `Ops grants:` / `Audit grants:` / `Standing:` line whose path or sha256
-  differs from the goal's `## Authority` `ops:` / `audit grants:` / `standing:` line (a goal `none`
-  or no line means the launch carries none; a relative goal path resolves against the goal's
-  repository; more than one launch line or a malformed one is a mismatch); incident
+- **Arming** happens in the `input` hook: "You are the root" plus exactly one closeout path
+  `codex/closeout-<name>-loop<N>.md` (v3 seam S1; a v2 `report-*` token never arms), or a bare
+  `launch-*` path whose contents match. The charter is the one `codex/charter-*-loop<N>.md` the
+  launch names, else the closeout's sibling (`closeout-` replaced by `charter-`). Its keys are the
+  `key: value` lines between its `# Charter:` title and its first `## ` heading. Arming refuses
+  (returns `handled`, no model turn) with no run dir, a cwd whose git toplevel is not the charter's
+  repository, an optional charter `host:` other than this machine, a missing charter, any launch
+  `Ops grants:` line (v3 has no ops lane), an `open` already in the state log whose `goal_sha256`
+  is not the charter's sha256, or a launch `Audit grants:` / `Standing:` line whose path or sha256
+  differs from the charter's `audit grants:` / `standing:` key (`none` or no key means the launch
+  carries none; a relative charter path resolves against the charter's repository; more than one
+  launch line or a malformed one is a mismatch); incident
   `incidents/root/<sid>-<UTC>-arm-refused.json`. A first input naming a
-  `codex/goal-*.md` path that does not arm gets a visible relaunch warning. On success it writes the
-  marker, freezes `Ops grants:` and the optional `Audit grants: <abs> sha256=<hex>` (copy at
+  `codex/charter-*.md` path that does not arm gets a visible relaunch warning. On success it writes the
+  marker, freezes the optional `Audit grants: <abs> sha256=<hex>` (copy at
   `<run dir>/audit-grants.json`; a bad hash gives none and an `incidents/ops/` record of class
   `loop-audit-grants-rejected`), freezes the optional `Standing: <abs> sha256=<hex>` (the
   standing-authority registry entry; copy at `<run dir>/standing.md`; a missing file or bad hash
   gives none and an `incidents/ops/` record of class `loop-standing-rejected`, and the arm still
-  succeeds), and appends `open` `--by ext` when the log has none.
+  succeeds), and appends `open` `--by ext` when the log has none; the root never writes it. The
+  open keeps the loop-state schema's v2 field names: `goal_sha256` is the charter's sha256 (the
+  closeout header's `Charter:` value), `envelope` the charter's `## First wave` task ids, `root`
+  `llm`, `root_model` the charter's `root:` value (`unknown` when absent) and `tier` `routine`
+  (the charter has no run tier; `tier: guarded` in the charter header gives `guarded`). Telemetry
+  only, never a gate.
   `loop-continuation:query-launch` adds optional `auditGrantsPath`, `auditGrantsSha256`,
   `standingPath` (the frozen copy) and `standingSha256`.
 - **Run-dir files** (root and lanes may not write them, except inside `worktrees/l<32 hex>/`):
@@ -928,8 +984,9 @@ The protocol event table is owned by the protocol source. No authority fences, b
 
 ## State-aware root context budget
 
-The model root's continuation state freezes the accepted Goal text, its SHA-256 and source path,
-root cwd and run directory at arm. `loop-continuation:query-launch` exposes this optional
+The model root's continuation state freezes the accepted charter text, its SHA-256 and source path
+(under the `rootContext` field names `goalText`, `goalSha256`, `goalPath`; `opsSha256` is always
+null), root cwd and run directory at arm. `loop-continuation:query-launch` exposes this optional
 `rootContext` snapshot; old sessions without it do not acquire it by reading a moving Goal.
 The native system prompt remains Pi-owned. No authority is inferred from a model summary.
 
@@ -998,7 +1055,7 @@ set with `ctx.ui.setStatus`; it sets no widget and clears the key at `session_sh
   `watchers ?`), the latest `loop-continuation-state` entry's `nudgeCount` against `MAX_NUDGES`, this
   session's live async runs (`subagent:async-started` / `subagent:async-complete`, counted the way
   loop-continuation counts them), and the newest `heartbeat` row in the tail of the loop-state log
-  beside the launch report. The report path, and `concurrency` for the slot cap, come from
+  beside the launch closeout. The closeout path (`reportPath`), and `concurrency` for the slot cap, come from
   `loop-continuation:query-launch` once per launch.
 - There is no timer. The line is rebuilt, coalesced to one microtask, on `subagent:async-started`,
   `subagent:async-complete`, `session_start`, `agent_start`, `agent_settled` and

@@ -34,10 +34,11 @@ test("parseBrief rejects anything but the header on the first non-empty line", (
   assert.equal(parseBrief(undefined), null);
 });
 
-test("deriveLogPath swaps report- and .md for state- and .jsonl", () => {
-  assert.equal(deriveLogPath("/r/codex/report-camp-loop7.md"), "/r/codex/state-camp-loop7.jsonl");
+test("deriveLogPath (S3) swaps closeout- and .md for state- and .jsonl; a v2 report- name derives nothing", () => {
+  assert.equal(deriveLogPath("/r/codex/closeout-camp-loop7.md"), "/r/codex/state-camp-loop7.jsonl");
+  assert.equal(deriveLogPath("/r/codex/report-camp-loop7.md"), null);
   assert.equal(deriveLogPath("/r/codex/launch-camp-loop7.md"), null);
-  assert.equal(deriveLogPath("/r/report-x.md.bak"), null);
+  assert.equal(deriveLogPath("/r/closeout-x.md.bak"), null);
 });
 
 test("runIdFromText reads the pi-subagents launch text", () => {
@@ -60,6 +61,17 @@ test("parseLaneReturn takes the last valid v2 or legacy block", () => {
   assert.equal(parseLaneReturn('```lane-return\n{"v":1,"status":"failed"}\n```'), null);
   assert.equal(parseLaneReturn("```lane-return\n{broken\n```"), null);
   assert.equal(parseLaneReturn("no block"), null);
+});
+
+test("parseLaneReturn takes a v3 block (lane.md), so a v3 lane's return is not recorded as failed", () => {
+  const block = {
+    v: 3, lane: "L1", task: "T-1", status: "complete", base: "a".repeat(40), worktree: "/w", patch: "/p/candidate.patch",
+    patch_sha256: "b".repeat(64), check: "just check", exit: 0, tail: "ok", coderabbit: { ran: true, major: 0, unreviewed: 0 }, questions: [],
+  };
+  const parsed = parseLaneReturn("```lane-return\n" + JSON.stringify(block) + "\n```\nprose");
+  assert.equal(parsed?.status, "complete");
+  const ev = returnEvent("L1", "run-1", parsed);
+  assert.deepEqual({ status: ev.status, exit: ev.exit, base: ev.base, check: ev.check }, { status: "complete", exit: 0, base: "a".repeat(40), check: "just check" });
 });
 
 test("returnEvent uses the block when present and drops fields that do not fit", () => {

@@ -167,13 +167,13 @@ test("root tool_call: edit to a CLI-owned backlog path is blocked via the hook s
   assert.equal(result?.block, true);
 });
 
-test("root tool_call: subagent launch outside C3 is blocked", async () => {
+test("root tool_call: subagent launch outside the roster is blocked", async () => {
   const { api, handlers } = fakeApi();
   rootExtension(api as any);
   const handler = toolCallHandler(handlers);
   const { ctx } = fakeCtx(agentDir);
   const result = await handler(
-    { type: "tool_call", toolCallId: "1", toolName: "subagent", input: { agent: "scout", task: "recon" } },
+    { type: "tool_call", toolCallId: "1", toolName: "subagent", input: { agent: "mapper", task: "recon" } },
     ctx,
   );
   assert.equal(result?.block, true);
@@ -185,7 +185,7 @@ test("root tool_call: subagent launch in C3 is allowed", async () => {
   const handler = toolCallHandler(handlers);
   const { ctx } = fakeCtx(agentDir);
   const result = await handler(
-    { type: "tool_call", toolCallId: "1", toolName: "subagent", input: { agent: "mapper", task: "recon" } },
+    { type: "tool_call", toolCallId: "1", toolName: "subagent", input: { agent: "scout", task: "recon" } },
     ctx,
   );
   assert.equal(result?.block ?? false, false);
@@ -208,7 +208,7 @@ test("root tool_call: watch_process blocked while an async subagent run is activ
   const { ctx } = fakeCtx(agentDir);
 
   // Simulate a qualifying async subagent launch starting execution.
-  toolExecStart({ type: "tool_execution_start", toolCallId: "1", toolName: "subagent", args: { agent: "mapper", task: "x" } }, ctx);
+  toolExecStart({ type: "tool_execution_start", toolCallId: "1", toolName: "subagent", args: { agent: "scout", task: "x" } }, ctx);
 
   const result = await handler({ type: "tool_call", toolCallId: "2", toolName: "watch_process", input: { command: "ls" } }, ctx);
   assert.equal(result?.block, true);
@@ -226,7 +226,7 @@ test("root tool_call: watch_process allowed again once its run's async-complete 
   const { ctx } = fakeCtx(agentDir);
   const watch = () => handler({ type: "tool_call", toolCallId: "w", toolName: "watch_process", input: { command: "ls" } }, ctx);
 
-  toolExecStart({ type: "tool_execution_start", toolCallId: "1", toolName: "subagent", args: { agent: "mapper", task: "x" } }, ctx);
+  toolExecStart({ type: "tool_execution_start", toolCallId: "1", toolName: "subagent", args: { agent: "scout", task: "x" } }, ctx);
   toolExecEnd({ type: "tool_execution_end", toolCallId: "1", toolName: "subagent", result: { details: { asyncId: "run-1" } }, isError: false }, ctx);
   assert.equal((await watch())?.block, true, "the started run is still active");
 
@@ -245,7 +245,7 @@ test("root tool_call: a completion that arrives before its launch's tool executi
   const handler = toolCallHandler(fake.handlers);
   const { ctx } = fakeCtx(agentDir);
 
-  toolExecStart({ type: "tool_execution_start", toolCallId: "1", toolName: "subagent", args: { agent: "mapper", task: "x" } }, ctx);
+  toolExecStart({ type: "tool_execution_start", toolCallId: "1", toolName: "subagent", args: { agent: "scout", task: "x" } }, ctx);
   fake.emit("subagent:async-complete", { runId: "run-1" });
   toolExecEnd({ type: "tool_execution_end", toolCallId: "1", toolName: "subagent", result: { details: { asyncId: "run-1" } }, isError: false }, ctx);
 
@@ -263,7 +263,7 @@ test("root tool_call: an async launch that ends in error no longer counts as an 
   const handler = toolCallHandler(handlers);
   const { ctx } = fakeCtx(agentDir);
 
-  toolExecStart({ type: "tool_execution_start", toolCallId: "1", toolName: "subagent", args: { agent: "mapper", task: "x" } }, ctx);
+  toolExecStart({ type: "tool_execution_start", toolCallId: "1", toolName: "subagent", args: { agent: "scout", task: "x" } }, ctx);
   toolExecEnd({ type: "tool_execution_end", toolCallId: "1", toolName: "subagent", result: {}, isError: true }, ctx);
   // A repeated end for the same call must not release anything a second time.
   toolExecEnd({ type: "tool_execution_end", toolCallId: "1", toolName: "subagent", result: {}, isError: true }, ctx);
@@ -282,7 +282,7 @@ test("root tool_call: only a tracked failed launch releases the count, never an 
   const { ctx } = fakeCtx(agentDir);
 
   // Launch A succeeds and is still running (its completion has not arrived).
-  toolExecStart({ type: "tool_execution_start", toolCallId: "a", toolName: "subagent", args: { agent: "mapper", task: "x" } }, ctx);
+  toolExecStart({ type: "tool_execution_start", toolCallId: "a", toolName: "subagent", args: { agent: "scout", task: "x" } }, ctx);
   toolExecEnd({ type: "tool_execution_end", toolCallId: "a", toolName: "subagent", result: {}, isError: false }, ctx);
   // Failures of calls that were never counted: another tool, and an unknown subagent call id.
   toolExecEnd({ type: "tool_execution_end", toolCallId: "b", toolName: "bash", result: {}, isError: true }, ctx);
@@ -371,7 +371,7 @@ test("a registerRequiredChildExtensions failure fails closed: every subsequent s
   // blocked with a clear reason, because children can no longer be trusted to
   // load loop-guard-lane.
   const result = await handler(
-    { type: "tool_call", toolCallId: "1", toolName: "subagent", input: { agent: "mapper", task: "recon" } },
+    { type: "tool_call", toolCallId: "1", toolName: "subagent", input: { agent: "scout", task: "recon" } },
     ctx,
   );
   assert.equal(result?.block, true);
@@ -409,7 +409,7 @@ test("root: a subagent call naming a model outside the gpt-6 family is blocked",
   const handler = toolCallHandler(handlers);
   const { ctx } = fakeCtx(agentDir);
   const result = await handler(
-    { type: "tool_call", toolCallId: "1", toolName: "subagent", input: { agent: "mapper", task: "x", model: "openai/gpt-5.6-luna" } },
+    { type: "tool_call", toolCallId: "1", toolName: "subagent", input: { agent: "scout", task: "x", model: "openai/gpt-5.6-luna" } },
     ctx,
   );
   assert.equal(result?.block, true);
@@ -472,80 +472,24 @@ function opsRoot(ops?: unknown) {
   return { launch, started, completed, end, ctx };
 }
 
-test("root ops: a frozen surface is bound with agent, surface and the full entry", async (t) => {
-  const previousRunDir = process.env.LOOP_PI_RUN_DIR;
-  t.after(() => {
-    if (previousRunDir === undefined) delete process.env.LOOP_PI_RUN_DIR;
-    else process.env.LOOP_PI_RUN_DIR = previousRunDir;
-  });
-  // This fixture exercises the binding without a loop run dir, regardless of its caller.
-  delete process.env.LOOP_PI_RUN_DIR;
-  const { launch } = opsRoot(OPS_FILE);
-  const input: Record<string, unknown> = {
-    agent: "ops",
-    task: OPS_BRIEF,
-    extensionBindings: { "loop-pi.guard/1": { agent: "ops", surface: "deploy:svc-worker", entry: { ...OPS_ENTRY, allow: ["^.*$"] } } },
-  };
-  const result = await launch("1", input);
-  assert.equal(result?.block ?? false, false, result?.reason);
-  assert.deepEqual(input.extensionBindings, { "loop-pi.guard/1": { agent: "ops", surface: "deploy:svc-worker", entry: OPS_ENTRY } });
-});
-
-test("root ops: refused when no ops are frozen (null) or nothing answers query-launch", async () => {
-  for (const root of [opsRoot(null), opsRoot()]) {
-    const result = await root.launch("1", { agent: "ops", task: OPS_BRIEF });
-    assert.equal(result?.block, true);
-    assert.match(result?.reason ?? "", /no ops grants are frozen/);
+test("root ops: the ops agents are outside the v3 roster, so a frozen ops surface can no longer be launched", async () => {
+  // The ops machinery stays in the guard but is inert: no agent file binds an ops surface.
+  for (const agent of ["ops", "ops-probe"]) {
+    for (const root of [opsRoot(OPS_FILE), opsRoot(null), opsRoot()]) {
+      const result = await root.launch("1", { agent, task: OPS_BRIEF });
+      assert.equal(result?.block, true, agent);
+      assert.match(result?.reason ?? "", /outside the agent set/, agent);
+    }
   }
-});
-
-test("root ops: a surface not in the frozen ops is refused", async () => {
-  const { launch } = opsRoot(OPS_FILE);
-  const result = await launch("1", { agent: "ops", task: OPS_BRIEF.replace("deploy:svc-worker", "deploy:other") });
-  assert.equal(result?.block, true);
-  assert.match(result?.reason ?? "", /not in the frozen ops/);
 });
 
 test("root ops: an Ops surface line on any other agent is refused", async () => {
   const { launch } = opsRoot(OPS_FILE);
-  const input: Record<string, unknown> = { agent: "lane-worker-push", task: OPS_BRIEF };
+  const input: Record<string, unknown> = { agent: "worker", task: OPS_BRIEF };
   const result = await launch("1", input);
   assert.equal(result?.block, true);
   assert.match(result?.reason ?? "", /only valid in a brief for agent `ops`/);
   assert.equal(input.extensionBindings, undefined);
-});
-
-test("root ops: one active run per surface, released by its async-complete", async () => {
-  const { launch, started, completed } = opsRoot(OPS_FILE);
-  assert.equal((await launch("1", { agent: "ops", task: OPS_BRIEF }))?.block ?? false, false);
-  // Still between tool_call and the tool result.
-  const racing = await launch("2", { agent: "ops", task: OPS_BRIEF });
-  assert.equal(racing?.block, true);
-  assert.match(racing?.reason ?? "", /already active/);
-  started("1", "run-a");
-  assert.equal((await launch("3", { agent: "ops", task: OPS_BRIEF }))?.block, true, "the run is still active");
-  completed("run-other");
-  assert.equal((await launch("4", { agent: "ops", task: OPS_BRIEF }))?.block, true, "another run's completion releases nothing");
-  completed("run-a");
-  assert.equal((await launch("5", { agent: "ops", task: OPS_BRIEF }))?.block ?? false, false);
-});
-
-test("root ops: the run id is read from the started text when details lack it", async () => {
-  const { launch, end, completed, ctx } = opsRoot(OPS_FILE);
-  await launch("1", { agent: "ops", task: OPS_BRIEF });
-  end({ type: "tool_execution_end", toolCallId: "1", toolName: "subagent", isError: false, result: { content: [{ type: "text", text: "Async: ops [run-b]\nmore" }], details: {} } }, ctx);
-  assert.equal((await launch("2", { agent: "ops", task: OPS_BRIEF }))?.block, true);
-  completed("run-b");
-  assert.equal((await launch("3", { agent: "ops", task: OPS_BRIEF }))?.block ?? false, false);
-});
-
-test("root ops: a launch that ends in error releases its surface; one with no run id never does", async () => {
-  const { launch, end, ctx } = opsRoot(OPS_FILE);
-  await launch("1", { agent: "ops", task: OPS_BRIEF });
-  end({ type: "tool_execution_end", toolCallId: "1", toolName: "subagent", isError: true, result: { content: [], details: {} } }, ctx);
-  assert.equal((await launch("2", { agent: "ops", task: OPS_BRIEF }))?.block ?? false, false);
-  end({ type: "tool_execution_end", toolCallId: "2", toolName: "subagent", isError: false, result: { content: [], details: {} } }, ctx);
-  assert.equal((await launch("3", { agent: "ops", task: OPS_BRIEF }))?.block, true);
 });
 
 test("root ops: a model-supplied binding is replaced on a single launch and dropped on any other shape", async (t) => {
@@ -558,16 +502,16 @@ test("root ops: a model-supplied binding is replaced on a single launch and drop
   delete process.env.LOOP_PI_RUN_DIR;
   const { launch } = opsRoot(OPS_FILE);
   const forged = { "loop-pi.guard/1": { agent: "ops", surface: "deploy:svc-worker", entry: OPS_ENTRY } };
-  const single: Record<string, unknown> = { agent: "lane-worker", task: "x", extensionBindings: forged };
+  const single: Record<string, unknown> = { agent: "worker", task: "x", extensionBindings: forged };
   assert.equal((await launch("1", single))?.block ?? false, false);
-  assert.deepEqual(single.extensionBindings, { "loop-pi.guard/1": { agent: "lane-worker" } });
+  assert.deepEqual(single.extensionBindings, { "loop-pi.guard/1": { agent: "worker" } });
   const management: Record<string, unknown> = { action: "status", id: "run-a", extensionBindings: forged };
   assert.equal((await launch("2", management))?.block ?? false, false);
   assert.equal(management.extensionBindings, undefined);
   // pi-subagents 0.77.0 also takes extensionBindings inside `options`: strip it there on both shapes.
-  const optSingle: Record<string, unknown> = { agent: "lane-worker", task: "x", options: { extensionBindings: forged } };
+  const optSingle: Record<string, unknown> = { agent: "worker", task: "x", options: { extensionBindings: forged } };
   assert.equal((await launch("3", optSingle))?.block ?? false, false);
-  assert.deepEqual(optSingle.extensionBindings, { "loop-pi.guard/1": { agent: "lane-worker" } });
+  assert.deepEqual(optSingle.extensionBindings, { "loop-pi.guard/1": { agent: "worker" } });
   assert.equal((optSingle.options as Record<string, unknown>).extensionBindings, undefined);
   const optManagement: Record<string, unknown> = { action: "status", id: "run-a", options: { extensionBindings: forged } };
   assert.equal((await launch("4", optManagement))?.block ?? false, false);

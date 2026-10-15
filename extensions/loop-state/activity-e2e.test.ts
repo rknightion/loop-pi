@@ -22,7 +22,7 @@ function scaffold() {
   mkdirSync(join(agentDir, "bin"));
   symlinkSync(BIN, join(agentDir, "bin", "loop-state"));
   writeFileSync(stub, `export default function(pi) {
-    pi.events.on("loop-continuation:query-launch", d => d.reply({reportPath: ${JSON.stringify(join(dir, "report-proof.md"))}}));
+    pi.events.on("loop-continuation:query-launch", d => d.reply({reportPath: ${JSON.stringify(join(dir, "closeout-proof.md"))}}));
   }`);
   const sessionArgs = ["--session-dir", store, "--session-id", "activity-proof"];
   return { dir, agentDir, log, stub, sessionArgs };

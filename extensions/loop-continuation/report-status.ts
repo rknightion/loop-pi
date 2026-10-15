@@ -1,20 +1,13 @@
 // Ported from the fan-out session helper (fanout_session.py) of the author's agent-workflows plugin
-// (report_status/report_counts/final_marker), v2/strict mode only. See launch-detect.ts for why
-// loop-continuation drops the legacy branch.
+// (report_status/report_counts/final_marker). Frozen v3 seam S2: when a closeout counts. The
+// function and field names keep their v2 "report" spelling; the path is the launch's closeout.
 
 import { existsSync, lstatSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import type { LaunchInfo } from "./launch-detect.ts";
 
-const HEADER_RE = /^# Loop: \S+ loop(\d+) · Goal: [0-9a-f]{64}$/;
-const REQUIRED_SECTIONS = [
-  "## Outcome",
-  "## Evidence",
-  "## Pending",
-  "## Questions",
-  "## Stalls and deaths",
-  "## Tokens and wakeups",
-];
+const HEADER_RE = /^# Closeout: \S+ loop(\d+) · Charter: [0-9a-f]{64}$/;
+const REQUIRED_SECTIONS = ["## Landed", "## Parked", "## For ratification", "## Notes"];
 
 const LEADING_DECORATION_RE = /^[\s*_`>-]+/;
 const TRAILING_DECORATION_RE = /[\s.!*_`)]+$/;
@@ -46,7 +39,7 @@ function expandHome(p: string): string {
 
 /**
  * An absolute snapshot is used as is. A still-relative one walks up from `cwd` to the first
- * directory where the report exists or that holds `.git`, matching fanout_session's fallback for
+ * directory where the closeout exists or that holds `.git`, matching fanout_session's fallback for
  * a launch recognised with no cwd at all.
  */
 export function resolveReportPath(report: string, cwd: string | null): string {
@@ -73,7 +66,7 @@ export interface ReportStatus {
   whyNot: string | null;
 }
 
-/** Section 3: does the snapshotted report count right now? */
+/** S2: does the snapshotted closeout count right now? */
 export function reportStatus(launch: LaunchInfo | null, cwd: string | null): ReportStatus {
   if (!launch || !launch.report) return { counts: false, whyNot: "is not known" };
   const path = resolveReportPath(launch.report, cwd);
@@ -108,7 +101,7 @@ export function reportStatus(launch: LaunchInfo | null, cwd: string | null): Rep
   if (!header) {
     return {
       counts: false,
-      whyNot: "has no valid header on line 1 (`# Loop: <repo> loop<N> · Goal: <64-hex sha256>`)",
+      whyNot: "has no valid header on line 1 (`# Closeout: <repo> loop<N> · Charter: <64-hex sha256>`)",
     };
   }
   if (launch.loop !== null && parseInt(header[1], 10) !== launch.loop) {

@@ -1,8 +1,8 @@
 // loop-state (root only). Records `dispatch` and `return` events for each lane the root launches
 // into the loop's state log, and re-injects the log's digest after compaction and at session start.
 //
-// The log path comes from the `loop-continuation:query-launch` event (its report path with
-// `report-` replaced by `state-` and `.md` by `.jsonl`). Every append goes through the
+// The log path comes from the `loop-continuation:query-launch` event (S3: its closeout path, sent
+// as `reportPath`, with `closeout-` replaced by `state-` and `.md` by `.jsonl`). Every append goes through the
 // `loop-state` CLI, so validation, seq and locking stay in one place. A failure here warns and
 // never blocks a tool call.
 //
@@ -284,7 +284,7 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
           version: 1, requestId, method: "resume",
           params: {
             id: runId, output: binding.output, outputMode: "file-only",
-            message: `Return only the missing fenced lane-return v2 JSON block for lane ${lane}, using the original brief and the work already performed. Do not repeat work, gate, review, commit or push. Do not write or modify the original report or any other file: reply with the block only, and the runtime saves that reply to a separate repair file. Preserve the original lane identity and report the original outcome honestly.`,
+            message: `Return only the missing fenced lane-return JSON block for lane ${lane}, using the original brief and the work already performed. Do not repeat work, gate, review, commit or push. Do not write or modify the original report or any other file: reply with the block only, and the runtime saves that reply to a separate repair file. Preserve the original lane identity and report the original outcome honestly.`,
           },
         });
       } catch (error) {
@@ -415,7 +415,7 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
       };
       if (recoveryOf) event.recovery_of = recoveryOf;
       if (brief.surface) event.surface = brief.surface;
-      const review = ["reviewer", "reviewer-high", "security-reviewer"].includes(brief.agent);
+      const review = brief.agent === "reviewer";
       const tasks = brief.tasks ?? [...new Set(brief.task.split(","))];
       event.tasks = tasks;
       if (review) {

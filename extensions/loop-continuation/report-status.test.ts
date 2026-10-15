@@ -1,6 +1,6 @@
-// Ported subset of the report-counts and PAUSED/WAITING marker rules from
-// the agent-workflows plugin's fanout_session.py
-// (report_status/report_counts/final_marker), v2/strict mode only.
+// Ported subset of the closeout-counts and PAUSED/WAITING marker rules from
+// the agent-workflows plugin's fanout_session.py (report_status/report_counts/final_marker),
+// for the v3 closeout (frozen seam S2).
 
 import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
@@ -10,15 +10,15 @@ import { join } from "node:path";
 import { reportCounts, reportStatus, finalMarker, waitingDeadline } from "./report-status.ts";
 import type { LaunchInfo } from "./launch-detect.ts";
 
-const GOAL_SHA = "a".repeat(64);
+const CHARTER_SHA = "a".repeat(64);
 const VALID_REPORT = [
-  `# Loop: repo loop3 · Goal: ${GOAL_SHA}`,
-  "## Outcome",
-  "## Evidence",
-  "## Pending",
-  "## Questions",
-  "## Stalls and deaths",
-  "## Tokens and wakeups",
+  `# Closeout: repo loop3 · Charter: ${CHARTER_SHA}`,
+  "",
+  "## Landed",
+  "- T-1 (first task), abc123",
+  "## Parked",
+  "## For ratification",
+  "## Notes",
 ].join("\n");
 
 describe("reportStatus", () => {
@@ -27,12 +27,12 @@ describe("reportStatus", () => {
   let launch: LaunchInfo;
   beforeEach(() => {
     tmp = mkdtempSync(join(tmpdir(), "loop-continuation-report-"));
-    reportPath = join(tmp, "report.md");
+    reportPath = join(tmp, "closeout-x-loop3.md");
     launch = { report: reportPath, loop: 3, launchTs: "2026-09-25T00:00:00Z" };
   });
   afterEach(() => rmSync(tmp, { recursive: true, force: true }));
 
-  test("a well-formed report written after launch counts", () => {
+  test("a well-formed closeout written after launch counts", () => {
     writeFileSync(reportPath, VALID_REPORT);
     const { counts, whyNot } = reportStatus(launch, tmp);
     assert.equal(counts, true);
@@ -62,7 +62,7 @@ describe("reportStatus", () => {
   });
 
   test("a missing header does not count", () => {
-    writeFileSync(reportPath, "not a header\n## Outcome\n## Evidence\n## Pending\n## Questions\n## Stalls and deaths\n## Tokens and wakeups");
+    writeFileSync(reportPath, "not a header\n## Landed\n## Parked\n## For ratification\n## Notes");
     const { counts, whyNot } = reportStatus(launch, tmp);
     assert.equal(counts, false);
     assert.match(whyNot!, /no valid header/);
@@ -76,12 +76,27 @@ describe("reportStatus", () => {
     assert.match(whyNot!, /names loop 9, not loop 3/);
   });
 
-  test("a report missing a required section does not count", () => {
-    const missing = VALID_REPORT.split("\n").filter((l) => l !== "## Pending").join("\n");
-    writeFileSync(reportPath, missing);
+  test("a closeout missing a required section does not count", () => {
+    for (const section of ["## Landed", "## Parked", "## For ratification", "## Notes"]) {
+      const missing = VALID_REPORT.split("\n").filter((l) => l !== section).join("\n");
+      writeFileSync(reportPath, missing);
+      const { counts, whyNot } = reportStatus(launch, tmp);
+      assert.equal(counts, false, section);
+      assert.equal(whyNot, `is missing sections: ${section}`);
+    }
+  });
+
+  test("a v2 report header and sections do not count as a closeout", () => {
+    writeFileSync(reportPath, [`# Loop: repo loop3 · Goal: ${CHARTER_SHA}`, "## Outcome", "## Evidence", "## Pending", "## Questions",
+      "## Stalls and deaths", "## Tokens and wakeups"].join("\n"));
     const { counts, whyNot } = reportStatus(launch, tmp);
     assert.equal(counts, false);
-    assert.match(whyNot!, /missing sections: ## Pending/);
+    assert.match(whyNot!, /# Closeout: <repo> loop<N> · Charter:/);
+  });
+
+  test("a heading with trailing text is not the section heading", () => {
+    writeFileSync(reportPath, VALID_REPORT.replace("## Notes", "## Notes and more"));
+    assert.equal(reportStatus(launch, tmp).whyNot, "is missing sections: ## Notes");
   });
 
   test("reportCounts is the boolean projection of reportStatus", () => {

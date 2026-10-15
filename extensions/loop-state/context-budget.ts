@@ -57,7 +57,7 @@ export function stateSummary(ctx: ExtensionContext, launch: RootLaunchContext, l
   const counts: Record<string, number> = {};
   for (const row of runs.values()) {
     if (row.recovery_of || ["review", "gate", "triage"].includes(row.kind) ||
-        ["gate-runner", "triager", "reviewer", "reviewer-high", "security-reviewer"].includes(row.agent)) continue;
+        ["reviewer", "scout"].includes(row.agent)) continue;
     for (const task of new Set<string>(row.tasks ?? row.task.split(","))) counts[task] = (counts[task] ?? 0) + 1;
   }
   const identity = {
@@ -77,11 +77,11 @@ export function stateSummary(ctx: ExtensionContext, launch: RootLaunchContext, l
         "status", "needs", "until", "accepted", "sha", "landed", "mode", "scope", "exit"].filter(key => key in row).map(key => [key, row[key]]))),
   };
   const summary = [
-    "Same root, same session. Recover from the frozen Goal and append-only state, not prior conversation.",
+    "Same root, same session. Recover from the frozen charter and append-only state, not prior conversation.",
     "Compaction grants no authority, resets no consumed attempts and sponsors no child or root restart.",
-    "Dispatch counts below are recorded runs only; the frozen Goal retains prior lineage, ceilings and remaining allowance.",
+    "Dispatch counts below are recorded runs only; the frozen charter retains prior lineage, ceilings and remaining allowance.",
     "## Frozen root/run identity and authority references", JSON.stringify(identity),
-    "## Frozen Goal", frozen.goalText,
+    "## Frozen charter", frozen.goalText,
     "## State digest", digest,
   ].join("\n");
   if (Buffer.byteLength(summary, "utf8") > ROOT_SUMMARY_MAX_BYTES) throw new Error("state recovery summary exceeds 32768 bytes; no lossy cut");

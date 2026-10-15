@@ -2,8 +2,8 @@
 
 This is `{{HOME}}`, a dedicated pi home used only for fan-out loop roots and their children. It is
 not a Claude or Codex home: there is no hook runner, no MCP, no code-mode exec cell and no
-`wait_agent`. The fan-out protocol's Appendix C (pi profile) governs loop mechanics; where these
-instructions mention Codex- or Claude-only tools, use the pi equivalent.
+`wait_agent`. The loop protocol's pi harness file governs loop mechanics; where these instructions
+mention Codex- or Claude-only tools, use the pi equivalent.
 
 - Long waits: lanes use `watch_process`; the root uses `watch_start` and `wake_at` and ends its turn
   with `WAITING: <what> until <deadline>`. Never background a process with `&`, `nohup`, `disown`
@@ -11,7 +11,9 @@ instructions mention Codex- or Claude-only tools, use the pi equivalent.
 - Models: only the model family this home's settings allow (`loopPi.modelFamily`, by default the
   gpt-6 family: `gpt-6.1-sol`, `gpt-6-luna`, `gpt-6-astra`). Never pass a `model` override to
   `subagent`.
-- Delegation and push rights are fixed per agent file. Spawn only the agents this home defines.
+- Delegation rights are fixed per agent file: `senior` is the only agent that spawns children
+  (`scout`, `worker`, `reviewer`). No lane pushes; only the root runs `git push`. Spawn only the
+  agents this home defines.
 - Dispatch: launch each lane as its own async `subagent` call with `{agent, task}`. That is the
   operator-authorised protocol here. Never launch a workflow (the `workflow` field, or the older
   `workflowScript` / `workflowScriptPath`); pi-subagents' "exactly one top-level workflow call" guidance does not apply in this home.

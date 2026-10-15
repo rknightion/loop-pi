@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { AUTO_ARM_REASON, evaluateSettle, INITIAL_STATE, MAX_NUDGES, type ContinuationState } from "./state.ts";
 import type { LaunchInfo } from "./launch-detect.ts";
 
-const LAUNCH: LaunchInfo = { report: "codex/report-x-loop1.md", loop: 1, launchTs: "2026-09-25T00:00:00Z" };
+const LAUNCH: LaunchInfo = { report: "codex/closeout-x-loop1.md", loop: 1, launchTs: "2026-09-25T00:00:00Z" };
 
 function armedState(overrides: Partial<ContinuationState> = {}): ContinuationState {
   return { armed: true, launch: LAUNCH, nudgeCount: 0, chainIncidentWritten: false, ...overrides };
@@ -314,9 +314,10 @@ describe("evaluateSettle: nudge and strike cap", () => {
   });
 });
 
-describe("evaluateSettle: close-out", () => {
+describe("evaluateSettle: idle (no live lane, nothing armed)", () => {
   const FUTURE = "2099-01-01T00:00:00Z";
-  const drained = { live_lanes: 0, admissible: [] as string[] };
+  // v3 roots write no admit events: the digest is read for live lanes only.
+  const drained = { live_lanes: 0 };
   const base = {
     outcome: "completed" as const,
     pushDetected: false,
@@ -324,7 +325,7 @@ describe("evaluateSettle: close-out", () => {
     now: "2026-10-01T00:00:00Z",
   };
 
-  test("a drained digest with nothing armed turns a WAITING release into a close-out nudge", () => {
+  test("no live lane with nothing armed turns a WAITING release into an idle nudge", () => {
     let armed = 0;
     const decision = evaluateSettle({
       ...base,
@@ -339,12 +340,12 @@ describe("evaluateSettle: close-out", () => {
       closeOut: { digest: drained, queryWatchers: () => [] },
     });
     assert.equal(decision.action, "nudge");
-    assert.equal((decision as { reason: string }).reason, "close-out");
+    assert.equal((decision as { reason: string }).reason, "idle");
     assert.equal((decision as { newState: ContinuationState }).newState.nudgeCount, 1);
-    assert.equal(armed, 0, "nothing is auto-armed for a WAITING that is being closed out");
+    assert.equal(armed, 0, "nothing is auto-armed for a WAITING on nothing");
   });
 
-  test("a drained digest turns a plain stop into a close-out nudge instead of an unmarked one", () => {
+  test("no live lane turns a plain stop into an idle nudge instead of an unmarked one", () => {
     const decision = evaluateSettle({
       ...base,
       state: armedState(),
@@ -354,10 +355,10 @@ describe("evaluateSettle: close-out", () => {
       armTimer: noArm,
       closeOut: { digest: drained, queryWatchers: () => [] },
     });
-    assert.equal((decision as { reason: string }).reason, "close-out");
+    assert.equal((decision as { reason: string }).reason, "idle");
   });
 
-  test("the continuation's own auto-arm does not block the close-out", () => {
+  test("the continuation's own auto-arm does not block the idle nudge", () => {
     const decision = evaluateSettle({
       ...base,
       state: armedState(),
@@ -367,10 +368,10 @@ describe("evaluateSettle: close-out", () => {
       armTimer: noArm,
       closeOut: { digest: drained, queryWatchers: () => [] },
     });
-    assert.equal((decision as { reason: string }).reason, "close-out");
+    assert.equal((decision as { reason: string }).reason, "idle");
   });
 
-  test("a timer the root armed blocks the close-out and the WAITING releases as before", () => {
+  test("a timer the root armed blocks the idle nudge and the WAITING releases as before", () => {
     const decision = evaluateSettle({
       ...base,
       state: armedState(),
@@ -383,7 +384,7 @@ describe("evaluateSettle: close-out", () => {
     assert.equal(decision.action, "release");
   });
 
-  test("an active watcher blocks the close-out", () => {
+  test("an active watcher blocks the idle nudge", () => {
     const decision = evaluateSettle({
       ...base,
       state: armedState(),
@@ -396,11 +397,8 @@ describe("evaluateSettle: close-out", () => {
     assert.equal(decision.action, "release");
   });
 
-  test("a live lane or an admissible task blocks the close-out", () => {
-    for (const digest of [
-      { live_lanes: 1, admissible: [] as string[] },
-      { live_lanes: 0, admissible: ["T-1"] },
-    ]) {
+  test("a live lane in the state log or in this process blocks the idle nudge", () => {
+    for (const [digest, liveRuns] of [[{ live_lanes: 1 }, 0], [{ live_lanes: 0 }, 1]] as const) {
       const decision = evaluateSettle({
         ...base,
         state: armedState(),
@@ -408,10 +406,23 @@ describe("evaluateSettle: close-out", () => {
         waitingDeadline: null,
         queryTimers: () => [],
         armTimer: noArm,
-        closeOut: { digest, queryWatchers: () => [] },
+        closeOut: { digest, queryWatchers: () => [], liveRuns },
       });
-      assert.equal((decision as { reason: string }).reason, "unmarked");
+      assert.equal((decision as { reason: string }).reason, "unmarked", JSON.stringify({ digest, liveRuns }));
     }
+  });
+
+  test("admissible tasks in a digest no longer hold off the idle nudge (v3 roots write no admit)", () => {
+    const decision = evaluateSettle({
+      ...base,
+      state: armedState(),
+      marker: null,
+      waitingDeadline: null,
+      queryTimers: () => [],
+      armTimer: noArm,
+      closeOut: { digest: { live_lanes: 0, admissible: ["T-1"] } as never, queryWatchers: () => [], liveRuns: 0 },
+    });
+    assert.equal((decision as { reason: string }).reason, "idle");
   });
 
   test("no digest (missing binary or log) keeps today's behaviour", () => {
@@ -440,7 +451,7 @@ describe("evaluateSettle: close-out", () => {
     assert.equal((decision as { reason: string }).reason, "unmarked");
   });
 
-  test("a PAUSED stop and a counted report still release without a close-out nudge", () => {
+  test("a PAUSED stop and a counted closeout still release without an idle nudge", () => {
     const closeOut = { digest: drained, queryWatchers: () => [] };
     const paused = evaluateSettle({
       ...base, state: armedState(), marker: "paused", waitingDeadline: null, queryTimers: () => [], armTimer: noArm, closeOut,
@@ -452,7 +463,7 @@ describe("evaluateSettle: close-out", () => {
     assert.equal(counted.action, "release");
   });
 
-  test("the strike cap still bounds close-out nudges", () => {
+  test("the strike cap still bounds idle nudges", () => {
     const decision = evaluateSettle({
       ...base,
       state: armedState({ nudgeCount: MAX_NUDGES }),
@@ -465,7 +476,7 @@ describe("evaluateSettle: close-out", () => {
     assert.equal(decision.action, "release-exhausted");
   });
 
-  test("a stale WAITING is closed out too when the digest is drained", () => {
+  test("a stale WAITING with no live lane gets the idle nudge too", () => {
     const decision = evaluateSettle({
       ...base,
       state: armedState(),
@@ -475,6 +486,6 @@ describe("evaluateSettle: close-out", () => {
       armTimer: noArm,
       closeOut: { digest: drained, queryWatchers: () => [] },
     });
-    assert.equal((decision as { reason: string }).reason, "close-out");
+    assert.equal((decision as { reason: string }).reason, "idle");
   });
 });

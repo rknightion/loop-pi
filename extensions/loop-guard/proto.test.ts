@@ -119,7 +119,7 @@ test("proto: files inside a lane worktree under the run dir (S9) stay writable f
   const r = root();
   const rootWrite = await r.call("write", { path: inWorktree, content: "x" });
   assert.equal(blocked(rootWrite), false, rootWrite?.reason);
-  const call = lane({ "loop-pi.guard/1": { agent: "lane-worker", runDir } });
+  const call = lane({ "loop-pi.guard/1": { agent: "worker", runDir } });
   assert.equal(blocked(await call("write", { path: inWorktree, content: "x" })), false);
   assert.equal(blocked(await call("bash", { command: `echo x > ${inWorktree}` })), false);
   // A link inside a worktree that points at a harness file is still the harness file.
@@ -268,16 +268,16 @@ test("legacy root: repeated status calls keep today's verdict", async () => {
 
 test("root binds the run dir into a lane's identity when LOOP_PI_RUN_DIR is set", async () => {
   const r = root();
-  const input: Record<string, unknown> = { agent: "lane-worker-push", task: "Lane: L1 · Task: T-1 · Tier: routine" };
+  const input: Record<string, unknown> = { agent: "worker", task: "Lane: L1 · Task: T-1 · Tier: routine" };
   assert.equal(blocked(await r.call("subagent", input)), false);
-  assert.deepEqual(input.extensionBindings, { "loop-pi.guard/1": { agent: "lane-worker-push", runDir } });
+  assert.deepEqual(input.extensionBindings, { "loop-pi.guard/1": { agent: "worker", runDir } });
 });
 
 // --- lanes -------------------------------------------------------------------------------------
 
 test("proto lane (run dir from the binding): run dir, authority and codex/grants-* writes are refused", async () => {
   delete process.env.LOOP_PI_RUN_DIR;
-  const call = lane({ "loop-pi.guard/1": { agent: "lane-worker", runDir } });
+  const call = lane({ "loop-pi.guard/1": { agent: "worker", runDir } });
   for (const [tool, path, reason] of [
     ["write", join(runDir, "push-log.jsonl"), /run dir/],
     ["edit", join(runDir, "returns", "x.md"), /run dir/],
@@ -300,15 +300,15 @@ test("proto lane (run dir from the binding): run dir, authority and codex/grants
 });
 
 test("proto lane (run dir from the environment): the same refusals apply without a binding run dir", async () => {
-  const call = lane({ "loop-pi.guard/1": { agent: "lane-worker" } });
+  const call = lane({ "loop-pi.guard/1": { agent: "worker" } });
   assert.equal(blocked(await call("write", { path: join(runDir, "push-log.jsonl"), content: "x" })), true);
   assert.equal(blocked(await call("write", { path: "codex/grants-2026-10-04-loop3.json", content: "x" })), true);
 });
 
 test("legacy lane (no marker, or no run dir anywhere): the same writes keep today's verdict", async () => {
   for (const [env, binding] of [
-    [legacyRunDir, { "loop-pi.guard/1": { agent: "lane-worker" } }],
-    [undefined, { "loop-pi.guard/1": { agent: "lane-worker" } }],
+    [legacyRunDir, { "loop-pi.guard/1": { agent: "worker" } }],
+    [undefined, { "loop-pi.guard/1": { agent: "worker" } }],
     [undefined, undefined],
   ] as [string | undefined, unknown][]) {
     if (env === undefined) delete process.env.LOOP_PI_RUN_DIR;

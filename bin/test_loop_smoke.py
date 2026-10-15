@@ -126,26 +126,25 @@ class InstalledLoopSmoke(unittest.TestCase):
             script = tmp / 'script.json'
             def tool(name, **args):
                 return {'name': name, 'args': args}
-            report = 'codex/report-smoke-loop1.md'
-            # loop-continuation arms only a launch whose goal is in this repository (S3).
+            report = 'codex/closeout-smoke-loop1.md'
+            # loop-continuation arms only a launch whose charter is in this repository (v3 S1).
             (repo / 'codex').mkdir(exist_ok=True)
-            (repo / 'codex/goal-smoke-loop1.md').write_text(
-                '# Goal: smoke loop1\n## Run\ntier: routine\nroot: llm - smoke\nroot-model: openai/gpt-6.1-sol\n'
-                '## Envelope\n| task | acceptance check | owned files | gate | landing | agent | tier |\n'
-                '|---|---|---|---|---|---|---|\n| SMOKE-1 | smoke | x | true | lands-after-green | lane-worker-push | routine |\n')
-            report_body = '# Loop: smoke loop1 · Goal: ' + '0' * 64 + '\n\n'
+            (repo / 'codex/charter-smoke-loop1.md').write_text(
+                '# Charter: smoke loop1\n\nharness: pi\nroot: sol / medium\nlanes: 2\nstanding: none\n\n'
+                '## First wave\n\n| Task | Scope | Route | Note |\n|---|---|---|---|\n| SMOKE-1 | x | worker | |\n')
+            report_body = '# Closeout: smoke loop1 · Charter: ' + '0' * 64 + '\n\n'
             report_body += '\n\n'.join(section + '\nSmoke complete.' for section in (
-                '## Outcome', '## Evidence', '## Pending', '## Questions',
-                '## Stalls and deaths', '## Tokens and wakeups')) + '\n'
+                '## Landed', '## Parked', '## For ratification', '## Notes')) + '\n'
             script.write_text(json.dumps({'rules': [
                 {'match': 'SMOKE_ROOT_GUARD', 'once': True, 'toolCalls': [tool('bash', command='git push --force origin main')]},
                 {'match': '^Task: SMOKE_DENIED_CHILD$', 'once': True, 'toolCalls': [tool('bash', command='git commit --allow-empty -m denied')]},
-                {'match': '^Task: SMOKE_GRANTED_CHILD$', 'once': True, 'delayMs': 1500, 'toolCalls': [tool('bash', command='git commit --allow-empty -m granted')]},
-                {'match': r'^\[main .*\] (denied|granted)', 'once': True, 'toolCalls': [tool('bash', command='git push origin main')]},
-                {'match': 'SMOKE_SPAWN_DENIED', 'once': True, 'toolCalls': [tool('subagent', agent='lane-worker', task='SMOKE_DENIED_CHILD', async_=True)]},
-                {'match': 'SMOKE_SPAWN_GRANTED', 'once': True, 'toolCalls': [tool('subagent', agent='lane-worker-push', task='SMOKE_GRANTED_CHILD', async_=True)]},
+                {'match': '^Task: SMOKE_LANDING_CHILD$', 'once': True, 'delayMs': 1500, 'toolCalls': [tool('bash', command='git commit --allow-empty -m landing')]},
+                {'match': r'^\[main .*\] (denied|landing)', 'once': False, 'toolCalls': [tool('bash', command='git push origin main')]},
+                {'match': 'SMOKE_SPAWN_DENIED', 'once': True, 'toolCalls': [tool('subagent', agent='worker', task='SMOKE_DENIED_CHILD', async_=True)]},
+                {'match': 'SMOKE_SPAWN_LANDING', 'once': True, 'toolCalls': [tool('subagent', agent='worker', task='SMOKE_LANDING_CHILD', async_=True)]},
+                {'match': 'SMOKE_ROOT_PUSH', 'once': True, 'toolCalls': [tool('bash', command='git push origin main')]},
                 # The armed launch now opens a state log, so the one nudge is the close-out one.
-                {'match': '^## TURN ENDINGS|^close out:', 'once': True, 'toolCalls': [tool('write', path=report, content=report_body)]},
+                {'match': '^## Turn endings|^## No lane is live', 'once': True, 'toolCalls': [tool('write', path=report, content=report_body)]},
                 {'match': 'Successfully wrote', 'text': 'Smoke report is written.'},
                 # The faux model reads only the latest message: an idle root's turn starts on pi-subagents' wake line.
                 {'match': r'completed|Completed|finished|^' + re.escape(package_wake_text()) + '$', 'text': 'The child returned; work is still owed.'},
@@ -188,30 +187,31 @@ class InstalledLoopSmoke(unittest.TestCase):
                                     entry = json.loads(line).get('message', {})
                                 except ValueError:
                                     continue
-                                if entry.get('role') == 'toolResult' and entry.get('toolName') == 'bash' and ('push requires' in json.dumps(entry) or 'To ' in json.dumps(entry)):
+                                if entry.get('role') == 'toolResult' and entry.get('toolName') == 'bash' and ('lanes never push' in json.dumps(entry) or 'To ' in json.dumps(entry)):
                                     return entry
                         time.sleep(.1)
                     self.fail(f'child session push result missing: {message}')
 
                 spawn('SMOKE_SPAWN_DENIED')
                 denial = child_push('SMOKE_DENIED_CHILD')
-                self.assertTrue(denial.get('isError'), 'step 3 ungranted child pushed')
-                self.assertIn('push requires a push-granted lane identity', json.dumps(denial))
+                self.assertTrue(denial.get('isError'), 'step 3 lane pushed')
+                self.assertIn('lanes never push', json.dumps(denial))
                 self.assertEqual(git('rev-parse', 'refs/heads/main', cwd=remote), initial)
                 self.assertNotEqual(git('rev-parse', 'HEAD'), initial, 'step 3 lane must commit before denied push')
                 self.assertEqual(git('log', '-1', '--format=%s'), 'denied')
                 rpc.wait(lambda e: e.get('type') == 'message_end' and e.get('message', {}).get('customType') == 'subagent-notify', 'denied child completion wake')
                 # Wait for the wake-started turn to finish before the next user prompt.
                 rpc.wait(lambda e: e.get('type') == 'agent_end', 'denied wake turn', len(rpc.events) - 1)
-                print('step 3: async ungranted lane committed; required guard denied push; remote unchanged', flush=True)
-                index = spawn(f'You are the campaign root. Report {report}. SMOKE_SPAWN_GRANTED')
-                pushed = child_push('SMOKE_GRANTED_CHILD')
-                self.assertFalse(pushed.get('isError'), 'step 4 lane push grant disabled')
-                granted = git('rev-parse', 'HEAD')
-                self.assertNotEqual(granted, initial)
-                self.assertEqual(git('log', '-1', '--format=%s'), 'granted')
-                self.assertEqual(git('rev-parse', 'refs/heads/main', cwd=remote), granted)
-                print('step 4: async granted lane committed and pushed its HEAD', flush=True)
+                print('step 3: async lane committed; required guard denied its push; remote unchanged', flush=True)
+                index = spawn(f'You are the campaign root. Report {report}. SMOKE_SPAWN_LANDING')
+                refused = child_push('SMOKE_LANDING_CHILD')
+                self.assertTrue(refused.get('isError'), 'step 4 lane pushed')
+                self.assertIn('lanes never push', json.dumps(refused))
+                landed = git('rev-parse', 'HEAD')
+                self.assertNotEqual(landed, initial)
+                self.assertEqual(git('log', '-1', '--format=%s'), 'landing')
+                self.assertEqual(git('rev-parse', 'refs/heads/main', cwd=remote), initial)
+                print('step 4: a second async lane committed; its push was refused too; remote unchanged', flush=True)
                 wake_text = package_wake_text()
                 notify = rpc.wait(lambda e: e.get('type') == 'message_end' and e.get('message', {}).get('customType') == 'subagent-notify', 'step 5 completion wake disabled', index)
                 notify_index = rpc.events.index(notify)
@@ -231,6 +231,13 @@ class InstalledLoopSmoke(unittest.TestCase):
                 self.assertEqual(len(nudges), 1, 'step 6 exactly one nudge')
                 self.assertTrue((repo / report).is_file())
                 print('steps 6-7: exactly one continuation nudge, report written, no further nudge', flush=True)
+                push = len(rpc.events)
+                rpc.send(type='prompt', message='SMOKE_ROOT_PUSH')
+                pushed = rpc.wait(lambda e: e.get('type') == 'tool_execution_end' and e.get('toolName') == 'bash', 'step 7b root push', push)
+                self.assertFalse(pushed.get('isError', False), pushed)
+                rpc.wait(lambda e: e.get('type') == 'agent_settled', 'step 7b settle', push)
+                self.assertEqual(git('rev-parse', 'refs/heads/main', cwd=remote), landed)
+                print('step 7b: the root alone pushed the lane commit', flush=True)
             finally:
                 code = rpc.close()
             self.assertEqual(code, 0, 'step 7 launcher exits cleanly')
@@ -241,8 +248,8 @@ class InstalledLoopSmoke(unittest.TestCase):
             after = json.loads((run_dir / 'audit-after.json').read_text())['repos'][str(repo)]['remotes']['origin']['refs']
             changes = [ref for ref in set(before) | set(after) if before.get(ref) != after.get(ref)]
             self.assertEqual(changes, ['refs/heads/main'], output)
-            self.assertEqual(after['refs/heads/main'], granted)
-            print('step 8: audit records exactly one remote ref change, matching granted lane commit', flush=True)
+            self.assertEqual(after['refs/heads/main'], landed)
+            print('step 8: audit records exactly one remote ref change, matching the root-pushed commit', flush=True)
         elapsed = time.monotonic() - started
         self.assertLess(elapsed, 300, 'installed smoke exceeds five minutes')
         print(f'installed loop smoke: {elapsed:.2f}s, no secrets', flush=True)

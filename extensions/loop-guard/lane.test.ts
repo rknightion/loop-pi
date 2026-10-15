@@ -86,23 +86,26 @@ test("lane tool_call: allows an ordinary bash command", async () => {
   assert.equal(result?.block ?? false, false);
 });
 
-test("lane tool_call: a bound push-granted identity allows a plain non-force git push", async () => {
-  const { api, handlers } = fakeApi();
-  const previous = process.env.PI_SUBAGENT_EXTENSION_BINDINGS;
-  try {
-    process.env.PI_SUBAGENT_EXTENSION_BINDINGS = JSON.stringify({ "loop-pi.guard/1": { agent: "lane-worker-push" } });
-    laneExtension(api as any);
-  } finally {
-    if (previous === undefined) delete process.env.PI_SUBAGENT_EXTENSION_BINDINGS;
-    else process.env.PI_SUBAGENT_EXTENSION_BINDINGS = previous;
-  }
-  const handler = toolCallHandler(handlers);
-  const result = await handler(
-    { type: "tool_call", toolCallId: "1", toolName: "bash", input: { command: "git push" } },
-    fakeCtx(agentDir),
-  );
-  assert.equal(result?.block ?? false, false);
-});
+for (const agent of ["worker", "senior", "senior-escalation", "reviewer", "scout", "lane-worker-push", "unknown"]) {
+  test(`lane tool_call: no bound identity grants a push (${agent}): plain git push is refused`, async () => {
+    const { api, handlers } = fakeApi();
+    const previous = process.env.PI_SUBAGENT_EXTENSION_BINDINGS;
+    try {
+      process.env.PI_SUBAGENT_EXTENSION_BINDINGS = JSON.stringify({ "loop-pi.guard/1": { agent } });
+      laneExtension(api as any);
+    } finally {
+      if (previous === undefined) delete process.env.PI_SUBAGENT_EXTENSION_BINDINGS;
+      else process.env.PI_SUBAGENT_EXTENSION_BINDINGS = previous;
+    }
+    const handler = toolCallHandler(handlers);
+    const result = await handler(
+      { type: "tool_call", toolCallId: "1", toolName: "bash", input: { command: "git push" } },
+      fakeCtx(agentDir),
+    );
+    assert.equal(result?.block, true);
+    assert.match(result?.reason ?? "", /lanes never push/);
+  });
+}
 
 test("lane tool_call: allows a harmless unparseable command (fallback scan, no fail-closed)", async () => {
   const { api, handlers } = fakeApi();
@@ -145,7 +148,7 @@ test("lane tool_call: watch_process runs the same shell-command gate as bash", a
     fakeCtx(agentDir),
   );
   assert.equal(noGrantPush?.block, true);
-  assert.match(noGrantPush?.reason ?? "", /push requires a push-granted lane identity/);
+  assert.match(noGrantPush?.reason ?? "", /lanes never push/);
 });
 
 test("lane tool_call: hook script denial blocks bash even when rules.ts allows it", async () => {
@@ -232,10 +235,10 @@ test("lane: extensionBindings is refused at the top level and inside pi-subagent
   const { api, handlers } = fakeApi();
   laneExtension(api as any);
   const handler = toolCallHandler(handlers);
-  const binding = { "loop-pi.guard/1": { agent: "lane-worker-push" } };
+  const binding = { "loop-pi.guard/1": { agent: "worker" } };
   for (const input of [
-    { agent: "lane-worker", task: "x", extensionBindings: binding },
-    { agent: "lane-worker", task: "x", options: { extensionBindings: binding } },
+    { agent: "worker", task: "x", extensionBindings: binding },
+    { agent: "worker", task: "x", options: { extensionBindings: binding } },
   ]) {
     const result = await handler({ type: "tool_call", toolCallId: "1", toolName: "subagent", input }, fakeCtx(agentDir));
     assert.equal(result?.block, true, JSON.stringify(input));
@@ -248,7 +251,7 @@ test("lane: a subagent call naming a model outside the gpt-6 family is blocked",
   laneExtension(api as any);
   const handler = toolCallHandler(handlers);
   const result = await handler(
-    { type: "tool_call", toolCallId: "1", toolName: "subagent", input: { tasks: [{ agent: "mapper", model: "gpt-5.6-sol" }] } },
+    { type: "tool_call", toolCallId: "1", toolName: "subagent", input: { tasks: [{ agent: "scout", model: "gpt-5.6-sol" }] } },
     fakeCtx(agentDir),
   );
   assert.equal(result?.block, true);

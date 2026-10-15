@@ -72,7 +72,7 @@ test(
 
     // Settings: load pi-subagents as a package, and exclude ~/.agents from agent discovery.
     // pi-subagents scans that user agent directory recursively, so an agent-config checkout kept
-    // there would shadow this test's own `lane-worker` agent with a real one. Excluding it keeps
+    // there would shadow this test's own `worker` agent with a real one. Excluding it keeps
     // the test hermetic.
     mkdirSync(join(agentDir, "agents"), { recursive: true });
     writeFileSync(
@@ -97,10 +97,10 @@ test(
     // itself reports "Model \"faux/faux-1\" not found... list it in
     // `subagentOnlyExtensions` or `extensions`".
     writeFileSync(
-      join(agentDir, "agents", "lane-worker.md"),
+      join(agentDir, "agents", "worker.md"),
       [
         "---",
-        "name: lane-worker",
+        "name: worker",
         "description: Test lane worker for the loop-guard e2e proof",
         "tools: bash",
         "extensions: []",
@@ -116,7 +116,7 @@ test(
       {
         match: "SPAWN_CHILD_MARKER",
         once: true,
-        toolCalls: [{ name: "subagent", args: { agent: "lane-worker", task: "CHILD_FORBIDDEN_MARKER do the thing" } }],
+        toolCalls: [{ name: "subagent", args: { agent: "worker", task: "CHILD_FORBIDDEN_MARKER do the thing" } }],
       },
       { match: "CHILD_FORBIDDEN_MARKER", once: true, toolCalls: [{ name: "bash", args: { command: "git push --force origin main" } }] },
       { match: ".*", text: "ok" },
@@ -203,8 +203,8 @@ test("root's required extension registration rejects an external runner's public
     packages: [PI_SUBAGENTS_PACKAGE_DIR],
     subagents: { agentExcludeDirs: ["~/.agents"] },
   }));
-  writeFileSync(join(agentDir, "agents", "lane-worker.md"), [
-    "---", "name: lane-worker", "description: Test external runner",
+  writeFileSync(join(agentDir, "agents", "worker.md"), [
+    "---", "name: worker", "description: Test external runner",
     "runner:", "  type: external-cli", `  command: ${JSON.stringify(process.execPath)}`,
     `  args: [${JSON.stringify(runner)}]`, "---", "Test external runner.",
   ].join("\n"));
@@ -220,7 +220,7 @@ test("root's required extension registration rejects an external runner's public
     'name: "inspect_child_contract", label: "Inspect child contract", description: "Test launch preflight",',
     'parameters: { type: "object", properties: {} },',
     'async execute(_id, _args, _signal, _update, ctx) {',
-    'const result = await resolveSubagentLaunchContract({ agent: "lane-worker", cwd: ctx.cwd,',
+    'const result = await resolveSubagentLaunchContract({ agent: "worker", cwd: ctx.cwd,',
     'parentSessionId: ctx.sessionManager.getSessionId() });',
     'return { content: [{ type: "text", text: JSON.stringify(result) }], details: result };',
     '} }); }',
@@ -275,8 +275,8 @@ test("a required lane guard throwing at session_start refuses the child before i
     packages: [PI_SUBAGENTS_PACKAGE_DIR],
     subagents: { agentExcludeDirs: ["~/.agents"] },
   }));
-  writeFileSync(join(agentDir, "agents", "lane-worker.md"), [
-    "---", "name: lane-worker", "description: Test faulty lane guard", "tools: bash",
+  writeFileSync(join(agentDir, "agents", "worker.md"), [
+    "---", "name: worker", "description: Test faulty lane guard", "tools: bash",
     "extensions: []", `subagentOnlyExtensions: ${FAUX_EXTENSION}`, "model: faux/faux-1",
     "---", "Test lane worker.",
   ].join("\n"));
@@ -284,7 +284,7 @@ test("a required lane guard throwing at session_start refuses the child before i
     extensions: [FAUX_EXTENSION, join(fixture, "extensions", "loop-guard", "root.ts")],
     fauxScriptPath: writeFauxScript([
       { match: "SPAWN_FAULTY_GUARD", once: true, toolCalls: [
-        { name: "subagent", args: { agent: "lane-worker", task: "CHILD_TASK_MARKER", async: false } },
+        { name: "subagent", args: { agent: "worker", task: "CHILD_TASK_MARKER", async: false } },
       ] },
       { match: "CHILD_TASK_MARKER", once: true, toolCalls: [
         { name: "bash", args: { command: `touch '${taskMarker}'` } },

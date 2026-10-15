@@ -30,22 +30,22 @@ test("required native child boundary refuses policy overrides without widening c
     writeFileSync(join(home, "extensions/subagent/config.json"), JSON.stringify(config));
     const capture = join(fixture, "capture.ts");
     writeFileSync(capture, `import {writeFileSync} from 'node:fs'; export default function(pi){pi.on('session_start',(_event,ctx)=>{writeFileSync(${JSON.stringify(join(fixture, "identity-"))}+process.pid+'.json',JSON.stringify({pid:process.pid,ppid:process.ppid,execPath:process.execPath,argv:process.argv,cwd:ctx.cwd,bindings:process.env.PI_SUBAGENT_EXTENSION_BINDINGS,depth:process.env.PI_SUBAGENT_DEPTH,session:ctx.sessionManager.getSessionFile()}));});}`);
-    for (const agent of ["complex-worker", "mapper"]) writeFileSync(join(home, "agents", `${agent}.md`), [
-      "---", `name: ${agent}`, "description: Disposable policy fixture", `tools: ${agent === "complex-worker" ? "bash, subagent" : "bash"}`,
-      ...(agent === "complex-worker" ? ["allowedAgents: mapper"] : []), "extensions: []", `subagentOnlyExtensions: ${FAUX_EXTENSION}, ${capture}`,
+    for (const agent of ["senior", "scout"]) writeFileSync(join(home, "agents", `${agent}.md`), [
+      "---", `name: ${agent}`, "description: Disposable policy fixture", `tools: ${agent === "senior" ? "bash, subagent" : "bash"}`,
+      ...(agent === "senior" ? ["allowedAgents: scout"] : []), "extensions: []", `subagentOnlyExtensions: ${FAUX_EXTENSION}, ${capture}`,
       "model: faux/faux-1", "timeoutMs: 60000", "---", "Synthetic fixture only.",
     ].join("\n"));
     const marker = join(cwd, "leaf-ran");
     const hostMarker = join(cwd, "host-ran");
     const workflow = join(cwd, "workflow.js");
-    writeFileSync(workflow, 'const r = await runs.run("leaf",{agent:"mapper",task:"LEAF_POLICY",async:true}); return r;');
+    writeFileSync(workflow, 'const r = await runs.run("leaf",{agent:"scout",task:"LEAF_POLICY",async:true}); return r;');
     const values: Record<string, unknown> = {
       acceptance: { level: "verified", verify: [{ id: "local", command: `touch '${hostMarker}'` }] },
       gate: { command: `touch '${hostMarker}'` }, workflow,
-      thinking: "low", extensionBindings: { "loop-pi.guard/1": { agent: "lane-worker-push" } },
+      thinking: "low", extensionBindings: { "loop-pi.guard/1": { agent: "worker" } },
       model: "faux/faux-1", timeoutMs: 50000, maxRuntimeMs: 50000,
     };
-    const nested = { agent: "mapper", task: "LEAF_POLICY", async: true,
+    const nested = { agent: "scout", task: "LEAF_POLICY", async: true,
       ...(field === "control" ? {} : shape === "options" ? { options: { [field]: values[field] } } : { [field]: values[field] }) };
     if (field === "workflow" && shape === "top") {
       delete (nested as Record<string, unknown>).agent;
@@ -53,7 +53,7 @@ test("required native child boundary refuses policy overrides without widening c
     }
     const script = join(fixture, "faux.json");
     writeFileSync(script, JSON.stringify({ rules: [
-      { match: "ROOT_POLICY", once: true, toolCalls: [{ name: "subagent", args: { agent: "complex-worker", task: "CHILD_POLICY", async: true } }] },
+      { match: "ROOT_POLICY", once: true, toolCalls: [{ name: "subagent", args: { agent: "senior", task: "CHILD_POLICY", async: true } }] },
       { match: "CHILD_POLICY", once: true, toolCalls: [{ name: "subagent", args: nested }] },
       { match: "LEAF_POLICY", once: true, toolCalls: [{ name: "bash", args: { command: `touch '${marker}'` } }] },
       { match: ".*", text: "synthetic done" },

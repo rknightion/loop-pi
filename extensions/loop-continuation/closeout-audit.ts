@@ -67,7 +67,7 @@ export function closeoutMessage(argv: string[], result: AuditResult, lines: read
   const verdict =
     result.code === 0
       ? "clean"
-      : "NOT clean: a non-zero result is never clean; list every ungranted change in the report";
+      : "NOT clean: a non-zero result is never clean; list every ungranted change under the closeout's ## Notes";
   const parts = [`loop-closeout: \`${argv.join(" ")}\` exited ${result.code ?? "without a code"} (${verdict}).`];
   if (result.stdout.trim()) parts.push(`stdout:\n${tail(result.stdout)}`);
   if (result.stderr.trim()) parts.push(`stderr:\n${tail(result.stderr)}`);

@@ -3,13 +3,13 @@
 // contract (pi.events channels, custom-entry names, incident path, sync trigger).
 //
 // It also arms the root (in the `input` hook, the only one that can refuse before a model turn):
-// arm-time checks (arm.ts), the protocol marker `$LOOP_PI_RUN_DIR/loop-pi-proto`, the ops and audit
-// grants freeze, and the `open` event. It writes the harness facts the root cannot forge
+// arm-time checks against the charter (arm.ts), the protocol marker `$LOOP_PI_RUN_DIR/loop-pi-proto`,
+// the audit grants and standing freeze, and the `open` event the root no longer writes. It writes the harness facts the root cannot forge
 // (harness-facts.ts), the root context-overflow incident with `loopPi.onIncident`, and at
 // `/loop-closeout` runs the closeout audit itself (closeout-audit.ts).
 
 import { execFile } from "node:child_process";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type {
   AgentBeforeSettleEvent,
@@ -29,7 +29,7 @@ import {
   checkArm,
   defaultArmEnv,
   existingOpen,
-  namesGoalPath,
+  namesCharterPath,
   NOT_ARMED_WARNING,
   openEvent,
   PROTO_FILE,
@@ -55,11 +55,22 @@ import {
 } from "./state.ts";
 import { nudgeTextFor } from "./nudge-text.ts";
 import { createTranscriptSync } from "./transcript-sync.ts";
-import { CONTEXT_OVERFLOW_CLASS, OPS_GRANTS_REJECTED_CLASS, runOnIncident, writeIncident, writeRootIncident } from "./incident.ts";
-import { loopStateBinary, readDigest } from "./close-out.ts";
-import { freezeOpsGrants } from "./ops-grants.ts";
+import { CONTEXT_OVERFLOW_CLASS, runOnIncident, writeIncident, writeRootIncident } from "./incident.ts";
+import { loopStateBinary, readDigest, stateLogPath } from "./close-out.ts";
 import { freezeStanding, STANDING_REJECTED_CLASS } from "./standing.ts";
 import { lastAssistantText } from "./stop-controls.ts";
+import {
+  classifyRootStop,
+  judgementText,
+  lastAssistantMessage,
+  RECOVERY_STOPPED_CLASS,
+  RESUME_CUSTOM_TYPE,
+  RESUME_EVENT,
+  resumeDelayMs,
+  resumeText,
+  rootRecoveryConfig,
+  type SettleEvidence,
+} from "./root-recovery.ts";
 
 /** How often an open session re-checks the checkpoint throttle (lanes run without extensions). */
 const SYNC_TICK_MS = 60 * 1000;
@@ -68,7 +79,8 @@ const SYNC_TICK_MS = 60 * 1000;
 export const LOOP_CLOSEOUT_EVENT = "loop-closeout";
 const OPEN_TIMEOUT_MS = 30_000;
 
-function appendOpen(agentDir: string, log: string, event: Record<string, unknown>, cwd: string): Promise<{ ok: boolean; detail: string }> {
+/** Append one event to the state log through the loop-state CLI, by ext. */
+function appendEvent(agentDir: string, log: string, event: Record<string, unknown>, cwd: string): Promise<{ ok: boolean; detail: string }> {
   return new Promise((done) => {
     try {
       const child = execFile(loopStateBinary(agentDir), ["append", log, "--by", "ext"], { cwd, timeout: OPEN_TIMEOUT_MS }, (error, stdout, stderr) => {
@@ -100,6 +112,20 @@ export default function (pi: ExtensionAPI) {
   let closeoutRunning = false;
   // The relaunch warning is for a session's first input only (S3).
   let sawInput = false;
+  // Automatic root recovery (root-recovery.ts). `harnessAbort` attributes this run's abort to the
+  // request ceiling or the recovery controller (their synchronous pre-abort events), never the operator.
+  let harnessAbort: SettleEvidence["harnessAbort"] = null;
+  let ceilingLimit: SettleEvidence["ceilingLimit"] = null;
+  /** Resumes sent since the root last completed a healthy model request. */
+  let resumeAttempt = 0;
+  /** When the pending resume is due (epoch ms); kept across runs that start before it fires. */
+  let resumeDueAt: number | null = null;
+  let resumeTimer: ReturnType<typeof setTimeout> | null = null;
+  let resumeCause: { cause: string; detail: string } | null = null;
+  /** Bumped by every cancel, so a resume whose judgement append raced a cancel is not sent. */
+  let resumeEpoch = 0;
+  /** The failed message a stop incident was written for, so one failure writes one incident. */
+  let stoppedFor: string | null = null;
 
   const runDir = (): string | undefined => process.env.LOOP_PI_RUN_DIR || undefined;
   let protocolSeen = false;
@@ -159,8 +185,7 @@ export default function (pi: ExtensionAPI) {
 
   function recordIncident(cwd: string, cls?: string, extra?: Record<string, unknown>) {
     try {
-      const subdir =
-        cls === OPS_GRANTS_REJECTED_CLASS || cls === AUDIT_GRANTS_REJECTED_CLASS || cls === STANDING_REJECTED_CLASS ? "ops" : undefined;
+      const subdir = cls === AUDIT_GRANTS_REJECTED_CLASS || cls === STANDING_REJECTED_CLASS ? "ops" : undefined;
       writeIncident(getAgentDir(), sessionId, cwd, cls, extra, subdir);
     } catch {
       // Resolving the home must not trap the session either.
@@ -190,10 +215,9 @@ export default function (pi: ExtensionAPI) {
     if (agentDir && file) runOnIncident(agentDir, file);
   }
 
-  /** S3 success: ops grants, audit grants and standing freeze, then `open` when the log has none (S4). */
-  async function arm(parsed: ParsedLaunch, check: { runDir: string; goalText: string; goalSha256: string; log: string }, ctx: ExtensionContext) {
-    const { opsLine, auditLine, standingLine, goal: _goal, ...launch } = parsed;
-    const frozen = freezeOpsGrants(opsLine);
+  /** Arm success: audit grants and standing freeze, then `open` when the log has none. */
+  async function arm(parsed: ParsedLaunch, check: { runDir: string; charterText: string; charterSha256: string; log: string }, ctx: ExtensionContext) {
+    const { hasOpsLine: _ops, auditLine, standingLine, charter, ...launch } = parsed;
     const audit = freezeAuditGrants(auditLine, check.runDir);
     const standing = freezeStanding(standingLine, check.runDir);
     state = {
@@ -201,24 +225,19 @@ export default function (pi: ExtensionAPI) {
       launch,
       nudgeCount: 0,
       chainIncidentWritten: false,
-      opsPath: frozen.opsPath,
-      ops: frozen.ops,
       auditGrantsPath: audit.path,
       auditGrantsSha256: audit.sha256,
       standingPath: standing.path,
       standingSha256: standing.sha256,
-      concurrency: runConcurrency(check.goalText),
+      concurrency: runConcurrency(check.charterText),
       rootContext: {
-        goalPath: parsed.goal, goalSha256: check.goalSha256, goalText: check.goalText,
+        goalPath: charter, goalSha256: check.charterSha256, goalText: check.charterText,
         cwd: ctx.cwd, runDir: check.runDir, sessionId: ctx.sessionManager.getSessionId(),
         sessionFile: ctx.sessionManager.getSessionFile() ?? null,
-        opsSha256: frozen.ops && opsLine.kind === "line" ? opsLine.sha256 : null,
+        opsSha256: null,
       },
     };
     persist();
-    if (frozen.rejected !== null) {
-      recordIncident(ctx.cwd, OPS_GRANTS_REJECTED_CLASS, { reason: frozen.rejected, ops_path: frozen.opsPath });
-    }
     if (audit.rejected !== null) {
       recordIncident(ctx.cwd, AUDIT_GRANTS_REJECTED_CLASS, { reason: audit.rejected, audit_grants_path: audit.sourcePath });
     }
@@ -226,12 +245,7 @@ export default function (pi: ExtensionAPI) {
       recordIncident(ctx.cwd, STANDING_REJECTED_CLASS, { reason: standing.rejected, standing_path: standing.sourcePath });
     }
     if (existingOpen(check.log)) return;
-    const built = openEvent(check.goalText, check.goalSha256);
-    if ("error" in built) {
-      notify(ctx, `loop-continuation: open was not appended to ${check.log}: ${built.error}`, "warning");
-      return;
-    }
-    const result = await appendOpen(getAgentDir(), check.log, built.event, ctx.cwd);
+    const result = await appendEvent(getAgentDir(), check.log, openEvent(check.charterText, check.charterSha256), ctx.cwd);
     if (!result.ok) notify(ctx, `loop-continuation: open was not appended to ${check.log}: ${result.detail}`, "warning");
   }
 
@@ -262,6 +276,136 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  function clearResumeTimer() {
+    if (resumeTimer) clearTimeout(resumeTimer);
+    resumeTimer = null;
+  }
+
+  /** Forget a pending resume entirely: healthy progress, the owner's own input, or a hard stop. */
+  function cancelResume() {
+    resumeEpoch++;
+    clearResumeTimer();
+    resumeDueAt = null;
+    resumeCause = null;
+  }
+
+  function recoverySettings(): unknown {
+    try {
+      return JSON.parse(readFileSync(join(getAgentDir(), "settings.json"), "utf8"));
+    } catch {
+      return {};
+    }
+  }
+
+  /** The state log of the armed launch, or null. */
+  function armedLog(cwd: string): string | null {
+    if (!state.armed || !state.launch) return null;
+    return stateLogPath(resolveReportPath(state.launch.report, cwd));
+  }
+
+  async function recordJudgement(ctx: ExtensionContext, text: string) {
+    const log = armedLog(ctx.cwd);
+    if (!log) return;
+    try {
+      const result = await appendEvent(getAgentDir(), log, { ev: "judgement", text }, ctx.cwd);
+      if (!result.ok) notify(ctx, `loop-continuation: could not record "${text}" in ${log}: ${result.detail}`, "warning");
+    } catch {
+      // Recording must never trap the session.
+    }
+  }
+
+  /** A stop-class failure: one root incident and one judgement per failed message, then wait for the owner. */
+  function recordRecoveryStop(ctx: ExtensionContext, failed: { timestamp?: unknown; errorMessage?: unknown } | null, cause: string, detail: string) {
+    cancelResume();
+    const key = JSON.stringify([failed?.timestamp ?? null, failed?.errorMessage ?? null, cause]);
+    if (stoppedFor === key) return;
+    stoppedFor = key;
+    const at = new Date().toISOString();
+    try {
+      const agentDir = getAgentDir();
+      const file = writeRootIncident(agentDir, sessionId, at, "recovery-stopped", {
+        v: 1, session: sessionId || "unknown", class: RECOVERY_STOPPED_CLASS, at, home: agentDir, cwd: ctx.cwd, cause, detail,
+      });
+      if (file) runOnIncident(agentDir, file);
+    } catch {
+      // Incident bookkeeping must never trap the session.
+    }
+    notify(ctx, `loop-continuation: not resuming automatically after ${cause} (${detail}); the owner must act`, "error");
+    void recordJudgement(ctx, judgementText("stop", resumeAttempt, cause, detail));
+  }
+
+  /** Arm (or re-arm, keeping its due time) the resume timer for the next attempt. */
+  function scheduleResume(ctx: ExtensionContext, cause: string, detail: string) {
+    const config = rootRecoveryConfig(recoverySettings());
+    if (!config.enabled) return;
+    const delay = resumeDelayMs(resumeAttempt + 1, config);
+    resumeDueAt ??= Date.now() + delay;
+    resumeCause = { cause, detail };
+    clearResumeTimer();
+    resumeTimer = setTimeout(() => {
+      resumeTimer = null;
+      void fireResume(ctx, delay);
+    }, Math.max(0, resumeDueAt - Date.now()));
+    resumeTimer.unref?.();
+  }
+
+  /** The backoff elapsed: resume only an armed, idle root that is still stopped on a failed request. */
+  async function fireResume(ctx: ExtensionContext, delay: number) {
+    const cause = resumeCause;
+    resumeDueAt = null;
+    resumeCause = null;
+    const stillStopped = (): boolean => {
+      try {
+        if (!state.armed || !state.launch || !ctx.isIdle()) return false; // A running turn decides again when it settles.
+        if (reportCounts(state.launch, ctx.cwd)) return false;
+        const last = lastAssistantMessage(ctx.sessionManager.getBranch());
+        return !!last && (last.stopReason === "error" || last.stopReason === "aborted");
+      } catch {
+        return false;
+      }
+    };
+    if (!cause || !stillStopped()) return;
+    const epoch = resumeEpoch;
+    const attempt = resumeAttempt + 1;
+    // Recorded before it is sent, so every resume the root receives is in the state log.
+    await recordJudgement(ctx, judgementText("resume", attempt, cause.cause, cause.detail, delay));
+    if (epoch !== resumeEpoch || !stillStopped()) return; // The owner or a run took over meanwhile.
+    resumeAttempt = attempt;
+    // Reset the recovery episode as an owner's idle input would; only this event does so.
+    pi.events.emit(RESUME_EVENT, {});
+    pi.sendMessage(
+      {
+        customType: RESUME_CUSTOM_TYPE,
+        content: resumeText(attempt, cause.cause as never, cause.detail, delay),
+        display: true,
+        details: { attempt, cause: cause.cause, detail: cause.detail, delayMs: delay },
+      },
+      { triggerTurn: true },
+    );
+  }
+
+  /** After a run settles: resume, stop, or leave alone (see root-recovery.ts). */
+  function decideRecovery(ctx: ExtensionContext) {
+    const evidence: SettleEvidence = { harnessAbort, ceilingLimit, contextWindow: ctx.model?.contextWindow };
+    harnessAbort = null;
+    ceilingLimit = null;
+    if (!state.armed || !state.launch) return;
+    let last: ReturnType<typeof lastAssistantMessage>;
+    try {
+      if (reportCounts(state.launch, ctx.cwd)) return cancelResume();
+      last = lastAssistantMessage(ctx.sessionManager.getBranch());
+    } catch {
+      return;
+    }
+    const decision = classifyRootStop(last, evidence);
+    if (decision.action === "none") {
+      if (decision.why === "operator-cancelled") cancelResume();
+      return;
+    }
+    if (decision.action === "stop") return recordRecoveryStop(ctx, last, decision.cause, decision.detail);
+    scheduleResume(ctx, decision.cause, decision.detail);
+  }
+
   async function runCloseout(lines: string[], pending: unknown[]) {
     const dir = runDir();
     if (!dir || closeoutRunning) return;
@@ -287,8 +431,9 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  // Answers other extensions: the launch's report path, its frozen ops grants and the goal's slot cap. A reply with
-  // nulls means this extension is loaded but no launch has been recognised (or it had no ops line).
+  // Answers other extensions: the launch's closeout path (key `reportPath`, S1), its frozen audit grants and
+  // standing, and the charter's `lanes:` cap. `opsPath`/`ops` stay in the reply for older readers and are
+  // always null: v3 has no ops lane. A reply with nulls means no launch has been recognised.
   pi.events.on("loop-continuation:query-launch", (data) => {
     const req = data as {
       cwd?: string;
@@ -308,8 +453,8 @@ export default function (pi: ExtensionAPI) {
     req.reply({
       reportPath,
       ...(state.armed && state.rootContext ? { rootContext: { ...state.rootContext } } : {}),
-      opsPath: state.opsPath ?? null,
-      ops: state.ops ?? null,
+      opsPath: null,
+      ops: null,
       auditGrantsPath: state.auditGrantsPath ?? null,
       auditGrantsSha256: state.auditGrantsSha256 ?? null,
       standingPath: state.standingPath ?? null,
@@ -328,6 +473,15 @@ export default function (pi: ExtensionAPI) {
     const d = data as { runId?: unknown; id?: unknown } | null;
     const id = typeof d?.runId === "string" ? d.runId : typeof d?.id === "string" ? d.id : undefined;
     if (id) liveRuns.delete(id);
+  });
+
+  pi.events.on("loop-recovery:request-timeout", (data) => {
+    harnessAbort = "request-timeout";
+    const limit = (data as { limitType?: unknown } | null)?.limitType;
+    ceilingLimit = limit === "inactivity" || limit === "absolute" ? limit : null;
+  });
+  pi.events.on("loop-recovery:abort", () => {
+    harnessAbort ??= "recovery-abort";
   });
 
   pi.events.on(LOOP_CLOSEOUT_EVENT, (data) => {
@@ -350,6 +504,11 @@ export default function (pi: ExtensionAPI) {
     }
     state = INITIAL_STATE;
     protocolSeen = false;
+    cancelResume();
+    resumeAttempt = 0;
+    harnessAbort = null;
+    ceilingLimit = null;
+    stoppedFor = null;
     for (const entry of ctx.sessionManager.getBranch()) {
       if (entry.type === "custom" && entry.customType === STATE_CUSTOM_TYPE) {
         state = (entry as CustomEntry<ContinuationState>).data ?? INITIAL_STATE;
@@ -368,6 +527,11 @@ export default function (pi: ExtensionAPI) {
   pi.on("message_end", (event, ctx) => {
     const message = event.message as { role?: string; stopReason?: unknown; errorMessage?: unknown };
     if (message.role !== "assistant") return;
+    if (message.stopReason === "stop" || message.stopReason === "toolUse") {
+      // Healthy progress: the next outage starts its backoff from the base delay again.
+      resumeAttempt = 0;
+      cancelResume();
+    }
     if (message.stopReason !== "error") {
       overflowFactWritten = false;
       overflowIncidentWritten = false;
@@ -408,13 +572,13 @@ export default function (pi: ExtensionAPI) {
       const deadline = marker === "waiting" ? waitingDeadline(lastText) : null;
 
       // Read the digest only when a WAITING would be released or a plain stop nudged.
-      let closeOut: { digest: CloseOutDigest | null; queryWatchers: () => unknown[] | null } | undefined;
+      let closeOut: { digest: CloseOutDigest | null; queryWatchers: () => unknown[] | null; liveRuns: number } | undefined;
       if (event.outcome === "completed" && state.armed && state.launch && !reportCounted && marker !== "paused") {
         const digest = await readDigest({
           agentDir: getAgentDir(),
           reportPath: resolveReportPath(state.launch.report, cwd),
         });
-        closeOut = { digest, queryWatchers };
+        closeOut = { digest, queryWatchers, liveRuns: liveRuns.size };
       }
 
       const decision = evaluateSettle({
@@ -461,6 +625,8 @@ export default function (pi: ExtensionAPI) {
   // Arming happens here, not in before_agent_start: only `input` can stop the model turn (S3).
   pi.on("input", async (event, ctx) => {
     triggerSync(false);
+    // The owner's own input takes over from any pending automatic resume.
+    if (event.source !== "extension") cancelResume();
     // The notice before an idle-parent wake reached no message_start, so the wake is the push.
     if (isParentWake(event)) {
       pushDetected = true;
@@ -470,7 +636,7 @@ export default function (pi: ExtensionAPI) {
     sawInput = true;
     const parsed = parseLaunch(event.text, ctx.cwd, new Date().toISOString());
     if (!parsed) {
-      if (first && !state.armed && namesGoalPath(event.text)) notify(ctx, NOT_ARMED_WARNING, "warning");
+      if (first && !state.armed && namesCharterPath(event.text)) notify(ctx, NOT_ARMED_WARNING, "warning");
       return { action: "continue" as const };
     }
     const check = checkArm(parsed, defaultArmEnv(ctx.cwd));
@@ -495,7 +661,17 @@ export default function (pi: ExtensionAPI) {
     triggerSync(false);
   });
 
-  pi.on("agent_settled", () => {
+  pi.on("agent_start", () => {
+    // A run is starting: hold the resume timer, keeping its due time, until this run settles.
+    clearResumeTimer();
+  });
+
+  pi.on("agent_settled", (_event, ctx) => {
+    try {
+      decideRecovery(ctx);
+    } catch {
+      // Recovery bookkeeping must never trap the session.
+    }
     if (quotaError !== null) {
       appendFact(runDir(), "quota-exhausted", sessionId, quotaError);
       quotaError = null;
@@ -504,6 +680,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", () => {
+    cancelResume();
     if (syncTicker) clearInterval(syncTicker);
     syncTicker = null;
     triggerSync(true);

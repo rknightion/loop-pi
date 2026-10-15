@@ -90,7 +90,7 @@ export function installRequestCeiling(pi: ExtensionAPI, supplied: CeilingConfig 
       wallClockMs: kind === "absolute" ? config.absoluteMs : config.inactivityMs,
       limitType: kind, absoluteMs: config.absoluteMs, inactivityMs: config.inactivityMs,
       idleMs: now - (progress?.lastModelEventAt ?? startedAt), lastModelEventAt: progress?.lastModelEventAt ?? null};
-    pi.events.emit("loop-recovery:request-timeout", {});
+    pi.events.emit("loop-recovery:request-timeout", { limitType: kind });
     ctx.abort();
   };
   const arm = (ctx: ExtensionContext) => {

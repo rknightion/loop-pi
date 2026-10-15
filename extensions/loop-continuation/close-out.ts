@@ -1,18 +1,18 @@
-// Close-out support: read `loop-state digest <log> --json` for the launch's state log.
+// Idle-check support: read `loop-state digest <log> --json` for the launch's state log (S3).
 // Every failure (no binary, no log, a timeout, unusable output) yields null, and the caller
 // then behaves as it did before close-out existed.
 
 import { execFile } from "node:child_process";
 import { accessSync, constants, existsSync, readFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { join } from "node:path";
+import { deriveLogPath } from "../loop-state/core.ts";
 import type { CloseOutDigest } from "./state.ts";
 
 export const DIGEST_TIMEOUT_MS = 10_000;
 
-/** `.../report-<name>-loop<N>.md` -> `.../state-<name>-loop<N>.jsonl` (the basename only). */
-export function stateLogPath(reportPath: string): string {
-  const name = basename(reportPath).replace(/^report-/, "state-").replace(/\.md$/, ".jsonl");
-  return join(dirname(reportPath), name);
+/** S3: `.../closeout-<name>-loop<N>.md` -> `.../state-<name>-loop<N>.jsonl`, or null for any other name. */
+export function stateLogPath(closeoutPath: string): string | null {
+  return deriveLogPath(closeoutPath);
 }
 
 /** `<agentDir>/bin/loop-state` when executable, else `loop-state` for PATH lookup. */
@@ -34,10 +34,9 @@ function parseDigest(stdout: string): CloseOutDigest | null {
     return null;
   }
   if (typeof value !== "object" || value === null) return null;
-  const { live_lanes, admissible } = value as { live_lanes?: unknown; admissible?: unknown };
+  const { live_lanes } = value as { live_lanes?: unknown };
   if (typeof live_lanes !== "number" || !Number.isFinite(live_lanes)) return null;
-  if (!Array.isArray(admissible)) return null;
-  return { live_lanes, admissible: admissible.map(String) };
+  return { live_lanes };
 }
 
 // `digest --json` names parked tasks but deliberately does not make them admissible by time.
@@ -81,7 +80,7 @@ export interface ReadDigestOptions {
 
 export function readDigest(opts: ReadDigestOptions): Promise<CloseOutDigest | null> {
   const log = stateLogPath(opts.reportPath);
-  if (!existsSync(log)) return Promise.resolve(null);
+  if (!log || !existsSync(log)) return Promise.resolve(null);
   return new Promise((resolve) => {
     try {
       execFile(

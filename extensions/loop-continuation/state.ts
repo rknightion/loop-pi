@@ -2,7 +2,6 @@
 // runtime imports here, so this module (and its reducer) is unit-testable without a live session.
 
 import type { LaunchInfo } from "./launch-detect.ts";
-import type { OpsGrants } from "./ops-grants.ts";
 import { continuationClockStopped } from "./stop-controls.ts";
 
 export const STATE_CUSTOM_TYPE = "loop-continuation-state";
@@ -38,20 +37,22 @@ export const MAX_NUDGES = 3;
 export const WAITING_STALE_TOLERANCE_MS = 5000;
 
 /** Why a "nudge" decision was reached, for wording the nudge text. */
-export type NudgeReason = "unmarked" | "stale-waiting" | "close-out" | "expired-park";
+export type NudgeReason = "unmarked" | "stale-waiting" | "idle" | "expired-park";
 
 /** The reason on the loop-wait timer this extension arms to back a WAITING deadline. */
 export const AUTO_ARM_REASON = "loop-continuation auto-arm for WAITING deadline";
 export const TIME_PARK_ARM_REASON = "loop-continuation time-gated park deadline";
 
-/** The part of `loop-state digest --json` the close-out check reads. */
+/** The part of `loop-state digest --json` the idle check reads: live lanes from the automatic
+ *  dispatch and return events. v3 roots write no `admit` events, so `admissible` is never read. */
 export interface CloseOutDigest {
   live_lanes: number;
-  admissible: string[];
   /** Local enrichment from recorded evidence-later parks; not part of digest --json's schema. */
   timeParkDeadline?: string;
 }
 
+/** Frozen at arm. The `goal*` names are kept for readers of persisted state; under v3 they hold the
+ *  charter's path, sha256 and text. `opsSha256` is always null (v3 has no ops lane). */
 export interface FrozenRootContext {
   goalPath: string;
   goalSha256: string;
@@ -64,7 +65,7 @@ export interface FrozenRootContext {
 }
 
 export interface ContinuationState {
-  /** Accepted Goal and root identity; optional for sessions armed by an older build. */
+  /** Accepted charter and root identity; optional for sessions armed by an older build. */
   rootContext?: FrozenRootContext;
   armed: boolean;
   launch: LaunchInfo | null;
@@ -72,10 +73,6 @@ export interface ContinuationState {
   nudgeCount: number;
   /** Whether the chain-exhausted incident has already been written for this chain. */
   chainIncidentWritten: boolean;
-  /** Absolute path of the ops file named by the launch's `Ops grants:` line; absent without one. */
-  opsPath?: string | null;
-  /** The ops grants frozen at launch. null: no ops line, or one that was rejected. */
-  ops?: OpsGrants | null;
   /** The audit grants copy frozen into the run dir at arm (S2), or null. */
   auditGrantsPath?: string | null;
   /** The sha256 the launch's `Audit grants:` line stated and the frozen copy matched, or null. */
@@ -84,7 +81,7 @@ export interface ContinuationState {
   standingPath?: string | null;
   /** The sha256 the launch's `Standing:` line stated and the frozen copy matched, or null. */
   standingSha256?: string | null;
-  /** The goal's `## Run` `concurrency:` read at arm: a positive integer, or absent. */
+  /** The charter's `lanes:` cap read at arm: a positive integer, or absent. */
   concurrency?: number | null;
 }
 
@@ -119,16 +116,17 @@ export interface SettleInput {
   /** Arms a loop-wait timer at `at`; returns the arming reply, or null when it did not reply. */
   armTimer: (at: string, reason: string) => { id: string; at: string } | null;
   /**
-   * Close-out inputs, supplied only when a digest could have been read. `digest` is null when
+   * Idle-check inputs, supplied only when a digest could have been read. `digest` is null when
    * the binary, the log or the output is unusable; `queryWatchers` returns every active
-   * loop-wait watcher, or null when loop-wait did not reply.
+   * loop-wait watcher, or null when loop-wait did not reply; `liveRuns` counts this process's
+   * async subagent runs not yet complete (absent: none known).
    */
-  closeOut?: { digest: CloseOutDigest | null; queryWatchers: () => unknown[] | null };
+  closeOut?: { digest: CloseOutDigest | null; queryWatchers: () => unknown[] | null; liveRuns?: number };
 }
 
-/** True when the digest shows no live lane and nothing admissible. */
+/** True when the digest shows no live lane and no time-gated park; unknown (null) is never drained. */
 export function digestIsDrained(digest: CloseOutDigest | null): boolean {
-  return digest !== null && digest.live_lanes === 0 && digest.admissible.length === 0 && !digest.timeParkDeadline;
+  return digest !== null && digest.live_lanes === 0 && !digest.timeParkDeadline;
 }
 
 export type SettleDecision =
@@ -161,8 +159,9 @@ function isStaleWaitingDeadline(deadlineIso: string, nowIso: string): boolean {
  *     deadline has passed and it must reconcile;
  *   - recorded evidence-later parks with a future clock get one covering timer; expired clocks
  *     nudge the root to reconcile without automatically readmitting the task;
- *   - before the WAITING check, close out (`reason: "close-out"`) when the digest is drained,
- *     has no active time-gated evidence park and nothing but the auto-arm is armed;
+ *   - before the WAITING check, nudge as idle (`reason: "idle"`) when the state log shows no live
+ *     lane (and this process tracks none), no active time-gated evidence park, and nothing but the
+ *     auto-arm is armed: a WAITING on nothing is not a wait;
  *   - otherwise nudge (`reason: "unmarked"`), up to MAX_NUDGES per chain; the next stop after that
  *     is allowed (release-exhausted) and, the first time in the chain, calls for an incident file.
  * A push-started turn resets the chain before any of the above is evaluated.
@@ -206,15 +205,15 @@ export function evaluateSettle(input: SettleInput): SettleDecision {
     // Missing wait provider falls through to bounded nudging, never an idle release on trust.
   }
 
-  // Close-out: a WAITING that would be released, or a plain stop that would be nudged, ends the run
-  // instead when the state log shows nothing live and nothing admissible and nothing but this
-  // extension's own auto-arm is armed to wake the session. It still counts as a nudge, so the
-  // strike cap bounds it.
-  if (input.closeOut && state.nudgeCount < MAX_NUDGES && digestIsDrained(input.closeOut.digest)) {
+  // Idle: a WAITING that would be released, or a plain stop that would be nudged, gets the idle
+  // nudge instead when no lane is live (the automatic dispatch/return events and this process's
+  // async runs) and nothing but this extension's own auto-arm is armed to wake the session. It
+  // still counts as a nudge, so the strike cap bounds it.
+  if (input.closeOut && state.nudgeCount < MAX_NUDGES && digestIsDrained(input.closeOut.digest) && !(input.closeOut.liveRuns ?? 0)) {
     const timers = input.queryTimers();
     const watchers = input.closeOut.queryWatchers();
     if (timers !== null && watchers !== null && watchers.length === 0 && timers.every((t) => t.reason === AUTO_ARM_REASON)) {
-      return { action: "nudge", newState: { ...state, nudgeCount: state.nudgeCount + 1 }, reason: "close-out" };
+      return { action: "nudge", newState: { ...state, nudgeCount: state.nudgeCount + 1 }, reason: "idle" };
     }
   }
 

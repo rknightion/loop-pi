@@ -37,8 +37,8 @@ function fixture() {
   // lane metadata fails here, not in a live loop.
   const shipped = JSON.parse(readFileSync(join(ROOT, "home", "extensions", "subagent", "config.json"), "utf8"));
   writeFileSync(join(agentDir, "extensions", "subagent", "config.json"), JSON.stringify({ ...shipped, worktree: true, worktreeProvider: "native", worktreeBaseDir: freshDir("naming-native-") }));
-  writeFileSync(join(agentDir, "agents", "lane-worker.md"), [
-    "---", "name: lane-worker", "description: Naming proof", "tools: bash", "extensions: []",
+  writeFileSync(join(agentDir, "agents", "worker.md"), [
+    "---", "name: worker", "description: Naming proof", "tools: bash", "extensions: []",
     `subagentOnlyExtensions: ${FAUX_EXTENSION}`, "model: faux/faux-1", "---", "", "worker",
   ].join("\n"));
   return { repo, runDir, agentDir, subRoot, out };
@@ -95,7 +95,7 @@ test("native governed default allocation keeps the full private brief out of ref
   const task = `Lane: N1 · Task: ${privateTask(901)} (native naming proof) · Tier: guarded\nObjective: NATIVE_WORK`;
   // No Landing or explicit worktree flag: native package defaults, not retained-cwd rewriting.
   const script = writeFauxScript([
-    { match: "SPAWN_NATIVE", once: true, toolCalls: [{ name: "subagent", args: { agent: "lane-worker", task } }] },
+    { match: "SPAWN_NATIVE", once: true, toolCalls: [{ name: "subagent", args: { agent: "worker", task } }] },
     { match: "NATIVE_WORK", once: true, toolCalls: [{ name: "bash", args: { command: `pwd > '${f.out}/cwd' && echo NATIVE_READY` } }] },
     { match: "NATIVE_READY", once: true, delayMs: 8_000, text: "NATIVE_DONE" },
     { match: ".*", text: "ok" },
@@ -134,7 +134,7 @@ test("concurrent private-brief siblings share clean refs and resume without chan
   const f = fixture();
   const tasks = [1, 2].map((n) => `Lane: S${n} · Task: ${privateTask(910 + n)} (sibling proof) · Tier: guarded\nLanding: returns candidate\nObjective: SIBLING_${n}`);
   const rules = [
-    { match: "SPAWN_SIBLINGS", once: true, toolCalls: tasks.map((task) => ({ name: "subagent", args: { agent: "lane-worker", task, worktree: true } })) },
+    { match: "SPAWN_SIBLINGS", once: true, toolCalls: tasks.map((task) => ({ name: "subagent", args: { agent: "worker", task, worktree: true } })) },
     ...[1, 2].flatMap((n) => [
       { match: `SIBLING_${n}`, once: true, toolCalls: [{ name: "bash", args: { command: `pwd > '${f.out}/cwd-${n}' && echo sibling-${n} > candidate && git add candidate && git commit -qm sibling-${n} && echo READY_${n}` } }] },
       { match: `READY_${n}`, once: true, delayMs: 1_000, text: `CHECKPOINT_${n}` },

@@ -4,7 +4,6 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { evaluateBashCommand } from "./rules.ts";
-import { hasLanePushGrant } from "./push-grant.ts";
 import { FAUX_EXTENSION, LANE_EXTENSION, PI_SUBAGENTS_PACKAGE_DIR, ROOT_EXTENSION, cleanupAll, freshDir, startPiRpc, waitForCondition, writeFauxScript } from "./rpc-test-helpers.ts";
 
 after(cleanupAll);
@@ -29,8 +28,8 @@ function bashResult(dir: string): Record<string, unknown> | undefined {
   return undefined;
 }
 
-for (const agent of ["lane-worker", "lane-worker-push"]) {
-  test(`async push grant: ${agent}, spoofed bindings replaced, real local push outcome`, { timeout: 60_000 }, async () => {
+for (const agent of ["worker", "senior", "senior-escalation"]) {
+  test(`lanes never push: ${agent}, spoofed bindings replaced, real local push denied`, { timeout: 60_000 }, async () => {
     const home = freshDir("push-home-");
     const cwd = freshDir("push-repo-");
     const remote = freshDir("push-remote-");
@@ -48,7 +47,7 @@ for (const agent of ["lane-worker", "lane-worker-push"]) {
     writeFileSync(capture, `import {writeFileSync} from 'node:fs'; import {join} from 'node:path'; import {getAgentDir} from '@earendil-works/pi-coding-agent'; export default function(pi){pi.on('before_agent_start',()=>{writeFileSync(join(getAgentDir(),'binding.json'),process.env.PI_SUBAGENT_EXTENSION_BINDINGS||'null');});}`);
     writeFileSync(join(home, "agents", `${agent}.md`), ["---", `name: ${agent}`, "description: Push grant test", "tools: bash", "extensions: []", `subagentOnlyExtensions: ${FAUX_EXTENSION}, ${capture}`, "model: faux/faux-1", "---", "Test worker."].join("\n"));
     const script = writeFauxScript([
-      { match: "SPAWN_PUSH", once: true, toolCalls: [{ name: "subagent", args: { agent, task: "CHILD_PUSH", async: true, extensionBindings: { "loop-pi.guard/1": { agent: agent === "lane-worker" ? "lane-worker-push" : "lane-worker" }, "spoof/1": { grant: true } } } }] },
+      { match: "SPAWN_PUSH", once: true, toolCalls: [{ name: "subagent", args: { agent, task: "CHILD_PUSH", async: true, extensionBindings: { "loop-pi.guard/1": { agent: agent === "worker" ? "senior" : "worker" }, "spoof/1": { grant: true } } } }] },
       { match: "CHILD_PUSH", once: true, toolCalls: [{ name: "bash", args: { command: "git push origin HEAD:refs/heads/main" } }] },
       { match: ".*", text: "done" },
     ]);
@@ -59,26 +58,21 @@ for (const agent of ["lane-worker", "lane-worker-push"]) {
       assert.equal(launch.isError ?? false, false, JSON.stringify(launch));
       const result = await waitForCondition(() => bashResult(join(home, "sessions")), 30_000);
       assert.deepEqual(JSON.parse(readFileSync(join(home, "binding.json"), "utf8")), { "loop-pi.guard/1": { agent } });
-      if (agent === "lane-worker") {
-        assert.equal(result.isError, true);
-        assert.match(JSON.stringify(result.content), /push requires a push-granted lane identity/);
-        assert.throws(() => git(remote, "rev-parse", "refs/heads/main"));
-      } else {
-        assert.equal(result.isError, false);
-        assert.equal(git(remote, "rev-parse", "refs/heads/main"), git(cwd, "rev-parse", "HEAD"));
-      }
+      assert.equal(result.isError, true);
+      assert.match(JSON.stringify(result.content), /lanes never push/);
+      assert.throws(() => git(remote, "rev-parse", "refs/heads/main"));
     } finally { await session.close(); }
   });
 }
 
-test("missing child identity denies a real bash push by default", { timeout: 30_000 }, async () => {
+test("a child without identity cannot push either", { timeout: 30_000 }, async () => {
   const script = writeFauxScript([{ match: "PUSH_MISSING", once: true, toolCalls: [{ name: "bash", args: { command: "git push" } }] }, { match: ".*", text: "done" }]);
   const session = startPiRpc({ extensions: [FAUX_EXTENSION, LANE_EXTENSION], fauxScriptPath: script, agentDir: freshDir(), subagentTempRoot: freshDir(), cwd: freshDir() });
   try {
     session.send({ id: "p", type: "prompt", message: "PUSH_MISSING" });
     const end = await session.waitFor(e => e.type === "tool_execution_end" && e.toolName === "bash");
     assert.equal(end.isError, true);
-    assert.match(JSON.stringify(end.result), /push requires a push-granted lane identity/);
+    assert.match(JSON.stringify(end.result), /lanes never push/);
   } finally { await session.close(); }
 });
 
@@ -92,11 +86,11 @@ for (const shape of ["top-level", "options"] as const) test(`a lane's model cann
   git(cwd, "remote", "add", "origin", remote);
   mkdirSync(join(home, "agents"), { recursive: true });
   writeFileSync(join(home, "settings.json"), JSON.stringify({ packages: [PI_SUBAGENTS_PACKAGE_DIR], subagents: { agentExcludeDirs: ["~/.agents"] } }));
-  writeFileSync(join(home, "agents", "lane-worker.md"), ["---", "name: lane-worker", "description: Nested spoof test", "tools: bash", `extensions: ${LANE_EXTENSION}`, `subagentOnlyExtensions: ${FAUX_EXTENSION}`, "model: faux/faux-1", "---", "Test worker."].join("\n"));
+  writeFileSync(join(home, "agents", "worker.md"), ["---", "name: worker", "description: Nested spoof test", "tools: bash", `extensions: ${LANE_EXTENSION}`, `subagentOnlyExtensions: ${FAUX_EXTENSION}`, "model: faux/faux-1", "---", "Test worker."].join("\n"));
   // pi-subagents 0.77.0 accepts the binding at the top level or inside `options`.
-  const forged = { "loop-pi.guard/1": { agent: "lane-worker-push" } };
+  const forged = { "loop-pi.guard/1": { agent: "senior" } };
   const script = writeFauxScript([
-    { match: "NESTED_SPOOF", once: true, toolCalls: [{ name: "subagent", args: { agent: "lane-worker", task: "NESTED_CHILD_PUSH", async: true, ...(shape === "options" ? { options: { extensionBindings: forged } } : { extensionBindings: forged }) } }] },
+    { match: "NESTED_SPOOF", once: true, toolCalls: [{ name: "subagent", args: { agent: "worker", task: "NESTED_CHILD_PUSH", async: true, ...(shape === "options" ? { options: { extensionBindings: forged } } : { extensionBindings: forged }) } }] },
     { match: "NESTED_CHILD_PUSH", once: true, toolCalls: [{ name: "bash", args: { command: "git push origin HEAD:refs/heads/main" } }] },
     { match: ".*", text: "done" },
   ]);
@@ -116,19 +110,11 @@ for (const shape of ["top-level", "options"] as const) test(`a lane's model cann
   } finally { await session.close(); }
 });
 
-test("push identity accepts only the six granted agents and fails closed on invalid bindings", () => {
-  for (const agent of ["lane-worker-push", "lane-worker-retry-push", "complex-worker-push", "super-worker-push", "megasuper-worker-push", "lane-worker-low-push"]) {
-    assert.equal(hasLanePushGrant(JSON.stringify({ "loop-pi.guard/1": { agent } })), true);
-  }
-  for (const raw of [undefined, "", "{", "null", "{}", JSON.stringify({ "loop-pi.guard/1": { agent: "unknown-push" } }), JSON.stringify({ "loop-pi.guard/1": { agent: "lane-worker" } }), JSON.stringify({ "loop-pi.guard/1": { agent: "ops" } }), JSON.stringify({ "loop-pi.guard/1": { agent: "lane-worker-low" } }), JSON.stringify({ "loop-pi.guard/1": { agent: "super-worker" } }), JSON.stringify({ "loop-pi.guard/1": { agent: "megasuper-worker" } })]) {
-    assert.equal(hasLanePushGrant(raw), false, String(raw));
-  }
-});
-
-test("no-grant push check follows wrappers, aliases and interpreter fallback, not inert text", () => {
+test("no identity grants a push: a lane's push is refused through wrappers, aliases and interpreter fallback, not inert text", () => {
   for (const command of ["git push", "env X=y git -C . push", "bash -c 'git push'", "git -c alias.ship=push ship", "python -c \"import os; os.system('git push')\""]) {
-    assert.equal(evaluateBashCommand(command, "lane", 0, false).block, true, command);
-    assert.equal(evaluateBashCommand(command, "lane", 0, true).block, false, command);
+    assert.equal(evaluateBashCommand(command, "lane").block, true, command);
+    assert.match(evaluateBashCommand(command, "lane").reason ?? "", /lanes never push/, command);
+    assert.equal(evaluateBashCommand(command, "root").block, false, command);
   }
-  assert.equal(evaluateBashCommand("echo 'git push'", "lane", 0, false).block, false);
+  assert.equal(evaluateBashCommand("echo 'git push'", "lane").block, false);
 });

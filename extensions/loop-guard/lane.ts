@@ -17,7 +17,6 @@ import { hasSubagentField } from "./subagent-view.ts";
 import { installRequestCeiling, installRetryBackoff } from "../request-ceiling/index.ts";
 import { evaluateBashCommand, evaluateSubagentPolicyFields, wrappedGateCommands, bindGateExecution } from "./rules.ts";
 import { loadGateDeclarations } from "./gates.ts";
-import { hasLanePushGrant } from "./push-grant.ts";
 import { parseLaneBinding } from "./ops.ts";
 import { acquireOpsLock, type OpsLock } from "./ops-lock.ts";
 import { bashProtectedPath, isLoopControlToolPath, protoActive, runDirFromEnv, toolWriteRefusal } from "./guard-paths.ts";
@@ -29,7 +28,6 @@ export { isLoopControlToolPath };
 export default function (pi: ExtensionAPI) {
   // Capture once at extension load: later tool calls cannot widen the launch grant.
   const rawBindings = process.env.PI_SUBAGENT_EXTENSION_BINDINGS;
-  const pushGranted = hasLanePushGrant(rawBindings);
   const binding = parseLaneBinding(rawBindings);
   const ops = binding.ops;
   // The run dir: the environment's, else the one the root bound (SEAMS S1). Once observed,
@@ -80,7 +78,7 @@ export default function (pi: ExtensionAPI) {
     if (locked) return locked;
     const p2 = proto();
     const gates = loadGateDeclarations(ctx.cwd);
-    const decision = evaluateBashCommand(command, "lane", 0, pushGranted, {
+    const decision = evaluateBashCommand(command, "lane", 0, {
       gates,
       ops: ops?.entry,
       cwd: ctx.cwd,

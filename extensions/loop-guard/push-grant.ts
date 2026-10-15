@@ -1,26 +1,7 @@
 // Async child identity is supplied by the trusted root tool_call handler (or the dispatcher),
-// never by the model or by prompt text. Missing/invalid identity denies pushes and ops grants.
+// never by the model or by prompt text. Missing/invalid identity denies ops grants. No identity
+// grants a push: only the root pushes (SEAMS S6), so the lane guard refuses `git push` outright.
 import { GUARD_NAMESPACE, OPS_AGENTS, OPS_PROBE_AGENT, PROBE_KIND, isBindableRunDir, validateOpsEntry, type OpsEntry } from "./ops.ts";
-
-const PUSH_AGENTS: ReadonlySet<string> = new Set([
-  "lane-worker-push",
-  "lane-worker-retry-push",
-  "complex-worker-push",
-  "super-worker-push",
-  "megasuper-worker-push",
-  "lane-worker-low-push",
-]);
-
-export function hasLanePushGrant(rawBindings: string | undefined): boolean {
-  if (!rawBindings) return false;
-  try {
-    const bindings = JSON.parse(rawBindings);
-    const agent = bindings?.[GUARD_NAMESPACE]?.agent;
-    return typeof agent === "string" && PUSH_AGENTS.has(agent);
-  } catch {
-    return false;
-  }
-}
 
 export interface BindOptions {
   /** The loop run dir (SEAMS S1), bound so a lane without `LOOP_PI_RUN_DIR` in its environment

@@ -1,26 +1,17 @@
-// Fixed text of the pi "TURN ENDINGS" block, as carried by sources/loop/harness-pi.md. Every
-// loop-pi root is given that block at launch; this extension re-sends the identical block as the
-// nudge so a root that stops without it gets the same reminder it was given at launch.
+// Fixed text of the "Turn endings" block of the v3 pi harness file (harness-pi.md). Every loop-pi
+// root reads that block at launch; this extension re-sends the identical block as the nudge so a
+// root that stops without it gets the same reminder it was given at launch.
 import type { NudgeReason } from "./state.ts";
 
 export const NUDGE_TEXT = [
-  "## TURN ENDINGS: a message with no tool call stops the run",
+  "## Turn endings",
   "",
-  "A message with no tool call ends your turn. Four endings stop a run while work is still owed; do",
-  "not use any of them:",
-  "1. A summary of what was done that announces the next step without taking it.",
-  "2. An offer to carry on unless the operator would prefer otherwise.",
-  "3. A list of decisions when, by your own account, none of them blocks the remaining work.",
-  "4. Deciding this is a good place to report because the turn was long or a milestone is done.",
-  "Status notes and recommendations are welcome: put them in the same message as your next tool call",
-  "and continue with whatever does not depend on an answer. End a turn only when the run-end report is",
-  "written and pinged, when paused, or when a lane, a `watch_start` watcher or a `wake_at` timer will",
-  "wake this session. When waiting, make the last line",
-  "`WAITING: <what> until <YYYY-MM-DDTHH:MM[:SS]Z>` with a future deadline; arm `wake_at` for it",
-  "first. When paused, make it `PAUSED: <reason>`. Never poll `subagent` status between wakes.",
-  "Launch each lane as its own `subagent` call. Give any `bash` call that can run past 15 minutes a",
-  "`timeout`, or run it under `watch_start`: the watchdog reads a longer silent turn as stalled.",
-  "This does not override confirmation for risky or destructive actions.",
+  "A message with no tool call ends your turn. Never end a turn with a summary that announces the next",
+  "step, an offer to carry on, a list of decisions none of which blocks the remaining work, or a",
+  "decision that this is a good place to stop. End a turn only when the closeout is written, when",
+  "paused, or when a lane, a watch_start watcher or a wake_at timer will wake this session; when",
+  "waiting, arm wake_at and make the last line `WAITING: <what> until <YYYY-MM-DDTHH:MM[:SS]Z>`; when",
+  "paused, `PAUSED: <reason>`. Launch each lane as its own subagent call.",
 ].join("\n");
 
 // Prepended to NUDGE_TEXT when the stop's WAITING: deadline had already passed: that
@@ -36,8 +27,16 @@ export const STALE_WAITING_NOTE = [
   "`PAUSED: <reason>` if there is nothing left to wait on.",
 ].join("\n");
 
-/** Sent when the loop state log shows nothing admissible, no live lane and nothing armed to wake. */
-export const CLOSE_OUT_TEXT = "close out: nothing admissible remains; generate the report and end the run";
+/** Sent when no lane is live and nothing is armed to wake the session. It never leads with an owner
+ *  control phrase: the root decides from the board whether work remains (contract sections 2, 12). */
+export const IDLE_TEXT = [
+  "## No lane is live and nothing will wake this session",
+  "",
+  "No lane is running and no watch_start watcher or wake_at timer is armed, so a WAITING line waits on",
+  "nothing. Dispatch the next ready, unexcluded task from the board in the charter's priority order",
+  "(contract section 2). If none remains in the charter's scope, run the closeout sweep and write the",
+  "closeout file (contract section 12). Otherwise end with `PAUSED: <reason>`.",
+].join("\n");
 
 export const EXPIRED_PARK_NOTE = [
   "## A time-gated park deadline has passed",
@@ -49,7 +48,7 @@ export const EXPIRED_PARK_NOTE = [
 
 /** The nudge message body for a given nudge reason. */
 export function nudgeTextFor(reason: NudgeReason): string {
-  if (reason === "close-out") return CLOSE_OUT_TEXT;
+  if (reason === "idle") return IDLE_TEXT;
   if (reason === "expired-park") return `${EXPIRED_PARK_NOTE}\n\n${NUDGE_TEXT}`;
   return reason === "stale-waiting" ? `${STALE_WAITING_NOTE}\n\n${NUDGE_TEXT}` : NUDGE_TEXT;
 }

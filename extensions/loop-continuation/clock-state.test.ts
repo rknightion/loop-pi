@@ -14,10 +14,10 @@ const PAST = "2026-09-30T23:59:00Z";
 function input(overrides: Partial<SettleInput> = {}): SettleInput {
   return {
     outcome: "completed",
-    state: { armed: true, launch: { report: "report-x-loop1.md", loop: 1, launchTs: NOW }, nudgeCount: 0, chainIncidentWritten: false },
+    state: { armed: true, launch: { report: "closeout-x-loop1.md", loop: 1, launchTs: NOW }, nudgeCount: 0, chainIncidentWritten: false },
     pushDetected: false, reportCounted: false, marker: null, waitingDeadline: null, now: NOW,
     queryTimers: () => [], armTimer: () => ({ id: "clock", at: FUTURE }),
-    closeOut: { digest: { live_lanes: 0, admissible: [], timeParkDeadline: FUTURE }, queryWatchers: () => [] },
+    closeOut: { digest: { live_lanes: 0, timeParkDeadline: FUTURE }, queryWatchers: () => [] },
     ...overrides,
   };
 }
@@ -42,7 +42,7 @@ test("clock parks arm once across repeated settle boundaries and respect an earl
 test("expired parks request bounded reconciliation rather than close-out or rearming overdue timers", () => {
   const expired = input({
     marker: "waiting", waitingDeadline: FUTURE,
-    closeOut: { digest: { live_lanes: 0, admissible: [], timeParkDeadline: PAST }, queryWatchers: () => [] },
+    closeOut: { digest: { live_lanes: 0, timeParkDeadline: PAST }, queryWatchers: () => [] },
     queryTimers: () => { throw new Error("expired park should not query timers"); },
     armTimer: () => { throw new Error("expired park must not rearm"); },
   });

@@ -40,7 +40,7 @@ function scaffold(observer: (repo: string) => string = () => "", delayClosingApp
   mkdirSync(join(repo, "codex"));
   mkdirSync(join(agentDir, "bin"));
   mkdirSync(join(agentDir, "agents"));
-  const report = join(repo, "codex", "report-camp-loop1.md");
+  const report = join(repo, "codex", "closeout-camp-loop1.md");
   const log = join(repo, "codex", "state-camp-loop1.jsonl");
   if (delayClosingAppend) {
     // Enlarge the real write-to-exit window, not the test's wait: the real CLI has

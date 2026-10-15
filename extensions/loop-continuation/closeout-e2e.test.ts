@@ -8,7 +8,7 @@ import { chmodSync, readFileSync, realpathSync, symlinkSync, unlinkSync, writeFi
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { cleanupAll, FAUX_EXTENSION, startPiRpc, writeFauxScript } from "../loop-wait/test-helpers.ts";
-import { addAuthority, cleanupFixtures, fakePi, fresh, git, loopFixture } from "./test-fixture.ts";
+import { cleanupFixtures, fakePi, fresh, git, loopFixture, setCharterKeys } from "./test-fixture.ts";
 
 after(cleanupAll);
 after(cleanupFixtures);
@@ -100,7 +100,7 @@ test("/loop-closeout still dispatches a non-downgraded audit after the armed mar
   const digest = createHash("sha256").update(grants).digest("hex");
   const grantsPath = join(f.repo, "codex", "grants-x-loop3.json");
   writeFileSync(grantsPath, grants);
-  addAuthority(f, `audit grants: ${grantsPath} sha256=${digest}`);
+  setCharterKeys(f, `audit grants: ${grantsPath} sha256=${digest}`);
   const rpc = startPiRpc({
     extensions: [FAUX_EXTENSION, LOOP_WAIT_ROOT, new URL("./index.ts", import.meta.url).pathname],
     fauxScriptPath: writeFauxScript([

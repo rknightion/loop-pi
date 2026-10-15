@@ -12,7 +12,7 @@ test("only the gpt-6 family on openai is allowed", () => {
 });
 
 test("any subagent model override is found wherever it sits: agent files pin the route", () => {
-  assert.deepEqual(subagentModelOverrides({ agent: "lane-worker", task: "x" }), []);
+  assert.deepEqual(subagentModelOverrides({ agent: "worker", task: "x" }), []);
   assert.deepEqual(subagentModelOverrides({ model: "openai/gpt-6-luna:max" }), ["openai/gpt-6-luna:max"]);
   assert.deepEqual(
     subagentModelOverrides({ tasks: [{ agent: "a", model: "openai/gpt-5.6-luna" }], chain: [{ model: { id: "gpt-5.5" } }] }),
@@ -29,20 +29,20 @@ test("a request for a model outside the family is sent under a model name the pr
 });
 
 test("a subagent call may not shorten or reset a run deadline: agent files pin it", () => {
-  assert.equal(subagentOverrideBlock({ agent: "mapper", task: "x" }), undefined);
+  assert.equal(subagentOverrideBlock({ agent: "scout", task: "x" }), undefined);
   // A host acceptance gate's own timeout is not a run deadline.
-  assert.equal(subagentOverrideBlock({ agent: "gate-runner", acceptance: { command: "just test", timeoutMs: 600000 } }), undefined);
+  assert.equal(subagentOverrideBlock({ agent: "scout", acceptance: { command: "just test", timeoutMs: 600000 } }), undefined);
   for (const input of [
-    { agent: "mapper-deep", task: "x", timeoutMs: 1500000 },
-    { agent: "mapper", maxRuntimeMs: 900000 },
-    { tasks: [{ agent: "gate-runner", task: "x", timeoutMs: 1800000 }] },
+    { agent: "scout", task: "x", timeoutMs: 1500000 },
+    { agent: "scout", maxRuntimeMs: 900000 },
+    { tasks: [{ agent: "scout", task: "x", timeoutMs: 1800000 }] },
   ]) {
     assert.match(subagentOverrideBlock(input)?.reason ?? "", /run deadline/, JSON.stringify(input));
   }
-  assert.match(subagentOverrideBlock({ agent: "mapper", model: "gpt-6-luna" })?.reason ?? "", /model override/);
-  assert.equal(subagentOverrideBlock({ agent: "mapper-deep", task: "x" }), undefined);
+  assert.match(subagentOverrideBlock({ agent: "scout", model: "gpt-6-luna" })?.reason ?? "", /model override/);
+  assert.equal(subagentOverrideBlock({ agent: "scout", task: "x" }), undefined);
   for (const model of ["openai/gpt-6.1-sol:medium", "openai/gpt-6-luna:high"]) {
-    assert.match(subagentOverrideBlock({ agent: "mapper-deep", model })?.reason ?? "", /model override/);
+    assert.match(subagentOverrideBlock({ agent: "scout", model })?.reason ?? "", /model override/);
   }
 });
 

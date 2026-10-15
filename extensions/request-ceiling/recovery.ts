@@ -172,6 +172,9 @@ export function installRecovery(pi: ExtensionAPI, loadSettings: (ctx?: Extension
     query.reply({ managed: opted, allowed: opted ? ceilingAllowed && mayContinue() : true, attempts, maxAttempts: attemptLimit });
   });
   pi.on("model_select", () => { reset(); opted = false; });
+  // loop-continuation's automatic root resume (SEAMS.md "Automatic root recovery"): after its backoff
+  // it resets an idle episode exactly as an owner's idle input would. Wakes never emit this.
+  pi.events.on("loop-recovery:resume", () => { if (!active) reset(); });
   pi.events.on("loop-recovery:request-timeout", () => { if (active) timedOut = true; });
   pi.on("session_start", reset);
   pi.on("session_shutdown", reset);

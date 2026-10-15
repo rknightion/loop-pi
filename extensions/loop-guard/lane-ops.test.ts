@@ -105,11 +105,11 @@ test("ops lane: a forbidden command passes only on a full allow match", async ()
   }
 });
 
-test("ops lane: every other rule stays (force push, push grant, git add -A, background, control files)", async () => {
+test("ops lane: every other rule stays (force push, lane push, git add -A, background, control files)", async () => {
   const l = lane(opsBinding({ ...RELEASE, surface: "release:svc-rules", allow: ["^git push origin main$", "^.*$"] }));
   try {
     await assertVerdict(l, "git push --force origin main", true, /force-push/);
-    await assertVerdict(l, "git push origin main", true, /push-granted/);
+    await assertVerdict(l, "git push origin main", true, /lanes never push/);
     await assertVerdict(l, "git add -A", true);
     await assertVerdict(l, "sleep 100 &", true);
     await assertVerdict(l, "echo x > codex/state-c-loop1.jsonl", true, /belong to the root/);
@@ -148,7 +148,7 @@ test("ops lane: credential creation passes only for kind credential-create", asy
 });
 
 test("a binding forged for a non-ops agent grants nothing", async () => {
-  const l = lane(opsBinding(RELEASE, "lane-worker"));
+  const l = lane(opsBinding(RELEASE, "worker"));
   try {
     await assertVerdict(l, "gh release create v1.2.3", true, /blocked for lanes/);
   } finally {

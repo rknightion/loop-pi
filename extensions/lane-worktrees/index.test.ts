@@ -29,7 +29,7 @@ function setup(opts: { marker?: boolean } = {}) {
   git(repo, "add", ".gitignore");
   git(repo, "commit", "-qm", "init");
   mkdirSync(join(repo, "codex"));
-  const report = join(repo, "codex", "report-x-loop1.md");
+  const report = join(repo, "codex", "closeout-x-loop1.md");
   const log = join(repo, "codex", "state-x-loop1.jsonl");
   const runDir = fresh("lw-run-20261004T000000Z-");
   if (opts.marker !== false) writeFileSync(join(runDir, "loop-pi-proto"), "2\n");
@@ -82,7 +82,7 @@ function setup(opts: { marker?: boolean } = {}) {
     /** A root subagent launch through tool_call; returns the (mutated) input and the call id. */
     async launch(task: string, extra: Record<string, unknown> = { isolation: "worktree" }) {
       const id = `call-${++calls}`;
-      const input: Record<string, unknown> = { agent: "lane-worker", task, ...extra };
+      const input: Record<string, unknown> = { agent: "worker", task, ...extra };
       const result = await handlers.get("tool_call")!({ type: "tool_call", toolName: "subagent", toolCallId: id, input }, ctx);
       return { id, input, result };
     },
@@ -443,7 +443,7 @@ test("conflicting inputs and workflow launches keep native validation; baseRef a
     ]) {
       const { input } = await s.launch(brief("L1", "T1"), extra);
       assert.equal(input.cwd, undefined);
-      assert.deepEqual(input, { agent: "lane-worker", task: brief("L1", "T1"), ...extra });
+      assert.deepEqual(input, { agent: "worker", task: brief("L1", "T1"), ...extra });
     }
     const earlier = git(s.repo, "rev-parse", "HEAD");
     git(s.repo, "tag", "candidate-base");
@@ -838,7 +838,7 @@ test("native naming never repairs malformed lane metadata or changes explicit sh
     }
     for (const extra of [{ worktree: false }, { isolation: "none" }, { isolation: "worktree", worktree: false }, { workflow: "example" }]) {
       const a = await s.launch(text, extra);
-      assert.deepEqual(a.input, { agent: "lane-worker", task: text, ...extra });
+      assert.deepEqual(a.input, { agent: "worker", task: text, ...extra });
     }
     const extra = { version: 1, key: "valid", unexpected: true };
     const a = await s.launch(text, { worktree: true, lane: extra });

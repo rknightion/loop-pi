@@ -42,7 +42,7 @@ function makeRepo(): { repo: string; head: string; log: string; report: string }
     repo,
     head: git("rev-parse", "HEAD").trim(),
     log: join(repo, "codex", "state-camp-loop1.jsonl"),
-    report: join(repo, "codex", "report-camp-loop1.md"),
+    report: join(repo, "codex", "closeout-camp-loop1.md"),
   };
 }
 
@@ -160,8 +160,8 @@ test("native review dispatch records explicit constituents, admitted tiers and o
   h.start();
   h.call("review", { agent: "reviewer", task: "Lane: R1 · Task: T1,T2 · Tier: routine\nObjective: review", });
   h.result("review", "", { runId: "review-run" });
-  h.call("security", { agent: "security-reviewer", task: "Lane: R2 · Task: batch · Tier: guarded\nTasks: T1, missing\nSurface: brief-probe",
-    extensionBindings: { "loop-pi.guard/1": { agent: "security-reviewer", surface: "bound-probe" } } });
+  h.call("security", { agent: "reviewer", task: "Lane: R2 · Task: batch · Tier: guarded\nTasks: T1, missing\nSurface: brief-probe",
+    extensionBindings: { "loop-pi.guard/1": { agent: "reviewer", surface: "bound-probe" } } });
   h.result("security", "", { runId: "security-run" });
   await h.shutdown();
   const dispatches = events(r.log).filter((row) => row.ev === "dispatch");
@@ -186,8 +186,8 @@ test("a dispatch's guard-bound surface is read from pi-subagents 0.77.0 `options
   execFileSync(BIN, ["append", r.log, "admit", "task=T1", "source=envelope", "owned=src/x.ts", "accept=ok", "tier=guarded"]);
   const h = harness({ reportPath: r.report, cwd: r.repo });
   h.start();
-  h.call("security", { agent: "security-reviewer", task: "Lane: R2 · Task: T1 · Tier: guarded\nSurface: brief-probe",
-    options: { extensionBindings: { "loop-pi.guard/1": { agent: "security-reviewer", surface: "bound-probe" } } } });
+  h.call("security", { agent: "reviewer", task: "Lane: R2 · Task: T1 · Tier: guarded\nSurface: brief-probe",
+    options: { extensionBindings: { "loop-pi.guard/1": { agent: "reviewer", surface: "bound-probe" } } } });
   h.result("security", "", { runId: "security-run" });
   await h.shutdown();
   const dispatches = events(r.log).filter((row) => row.ev === "dispatch");
@@ -514,7 +514,7 @@ test("without a launch (query-launch unanswered) nothing is written and nothing 
 
 test("a failing append warns and leaves the tool call untouched", async () => {
   const r = makeRepo();
-  const h = harness({ reportPath: join(r.repo, "no-such-dir", "codex", "report-x-loop1.md"), cwd: r.repo });
+  const h = harness({ reportPath: join(r.repo, "no-such-dir", "codex", "closeout-x-loop1.md"), cwd: r.repo });
   // An unwritable log directory makes the CLI fail.
   writeFileSync(join(r.repo, "no-such-dir"), "a file where a directory should be");
   h.start();
@@ -573,7 +573,7 @@ test("a dispatch skipped for want of a launch leaves no started deadline behind"
 test("a dispatch whose append fails leaves no started deadline or pending completion behind", async () => {
   const r = makeRepo();
   const blocker = join(r.repo, "no-such-dir");
-  const h = harness({ reportPath: join(blocker, "codex", "report-x-loop1.md"), cwd: r.repo });
+  const h = harness({ reportPath: join(blocker, "codex", "closeout-x-loop1.md"), cwd: r.repo });
   writeFileSync(blocker, "a file where a directory should be");
   h.start();
   h.call("tc1", { agent: "lane-worker", task: BRIEF });

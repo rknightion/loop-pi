@@ -7,7 +7,7 @@ import { chmodSync, closeSync, constants, existsSync, openSync, readdirSync, rea
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { runOnIncident } from "./incident.ts";
-import { addAuthority, cleanupFixtures, fakePi, fresh, loopFixture } from "./test-fixture.ts";
+import { cleanupFixtures, fakePi, fresh, loopFixture, setCharterKeys } from "./test-fixture.ts";
 
 after(cleanupFixtures);
 
@@ -191,7 +191,7 @@ test("/loop-closeout runs loop-pi-audit closeout with the frozen grants and push
   const grantsPath = join(f.repo, "codex", "grants-x-loop3.json");
   writeFileSync(grantsPath, grants);
   const digest = createHash("sha256").update(grants).digest("hex");
-  addAuthority(f, `audit grants: ${grantsPath} sha256=${digest}`);
+  setCharterKeys(f, `audit grants: ${grantsPath} sha256=${digest}`);
   const pi = await fakePi({ agentDir: f.agentDir, cwd: f.repo, runDir: f.runDir });
   try {
     await pi.input(`${f.launch}\nAudit grants: ${grantsPath} sha256=${digest}`);

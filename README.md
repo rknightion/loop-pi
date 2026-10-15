@@ -18,23 +18,33 @@ The loop contract itself (run contract, lane briefs, waits, closeout) is the
 Three pi extensions, a home template and an installer:
 
 - `extensions/loop-guard` fences plainly typed mistakes in the root and every lane: force and
-  delete pushes, backgrounding with `&`, `nohup`, `disown` or `setsid`, a `subagent` call
+  delete pushes, any `git push` from a lane (only the root pushes), backgrounding with `&`, `nohup`, `disown` or `setsid`, a `subagent` call
   overriding the pinned model or run deadline, models outside the configured family. It also runs optional guard scripts
   (see below). The root entry registers the lane entries as required child extensions, so every
   child is fenced whatever its own agent file says.
 - `extensions/loop-wait` gives lanes `watch_process` and the root `watch_start`, `wake_at` and
   `wake_cancel`, so a wait is a timer or a process watcher rather than a polling loop. A fired
   timer or a finished watcher starts the next root turn.
-- `extensions/loop-continuation` re-prompts a root that stops before the loop is finished, detects
-  launch files, and triggers an optional transcript sync script.
+- `extensions/loop-continuation` arms the root on a v3 launch ("You are the root" plus one
+  `codex/closeout-<name>-loop<N>.md` path, or a bare `launch-*` file path), checks it against the
+  run's `codex/charter-*` file and appends the state log's `open` itself. It re-prompts a root that
+  stops before the loop is finished (a counted closeout or `PAUSED:` ends that; a root with no live
+  lane and nothing armed to wake it is told to dispatch ready work or close out), and triggers an
+  optional transcript sync script.
+- Recovery is automatic for an armed root: when a provider error, a stalled request or a
+  request-ceiling abort leaves it stopped, loop-continuation resumes it after a backoff that starts
+  at 1 minute and doubles to a 15-minute cap (`loopPi.rootRecovery`), with no attempt limit, and
+  records each resume as a `judgement` in the state log. Authentication, quota, policy and
+  context-length failures still stop the root and write an incident; an operator's abort is never
+  resumed. Lanes are not auto-resumed.
 - `extensions/request-ceiling` bounds each model request in the root and every lane by 15 minutes
   without observed model progress and 75 minutes absolute elapsed time (both configurable), and
   turns an output-budget stop with no output into an incident. Transport keepalives cannot extend
   inactivity; active encrypted reasoning may continue past an hour. Either one sends the
   session a follow-up message that starts its next turn, a bounded number of times in a row.
   It also adds jitter to pi's retry wait after a 5xx and holds a 429 retry to a flat 60 s.
-- `home/` holds the agent files (mapper, lane-worker, reviewer, ops, ops-probe and so on), the pi
-  settings and the policy header for the dedicated loop home.
+- `home/` holds the five agent files (`worker`, `senior`, `senior-escalation`, `reviewer`, `scout`),
+  the lane policy, the pi settings and the policy header for the dedicated loop home.
 - `bin/loop-pi-install` builds a pinned runtime, validates it, installs one pi home and writes a
   launcher. `bin/loop-pi-preflight` refuses a target repository that is not safe to loop in, and
   `bin/loop-pi-audit` snapshots remote state before a run and reports every ungranted remote change
@@ -86,12 +96,25 @@ The agent files name `openai/gpt-6.1-sol` and `openai/gpt-6-*` models. If you us
 through the overlay and set `modelFamily` and `rootRoute` to match; the installer refuses a build
 where they disagree.
 
-### Ops agents
+### Agents
 
-`ops` runs the commands of one granted ops surface of any kind (deploy, probe, release, secret
-write). `ops-probe` is the same shape with `thinking: low` for read-only probes, readbacks and
-summaries, and may only be bound to a surface of `kind: probe`. Both are single-flight and are
-bound to their surface by the root guard.
+| Agent | Model / thinking | Writes | Job |
+|---|---|---|---|
+| `worker` | `gpt-6.1-sol` / medium | yes | one task in its own worktree; hands back an uncommitted candidate |
+| `senior` | `gpt-6.1-sol` / high | yes | judgement, shared contracts and compose or board batches; the only agent that may spawn children (`scout`, `worker`, `reviewer`), at most two levels deep, when its brief grants a count |
+| `senior-escalation` | `gpt-6-astra` / high | yes | the same work after repair rounds failed, or when the owner names it |
+| `reviewer` | `gpt-6.1-sol` / high | no | reads a diff or patch and returns PASS or FAIL with findings by severity |
+| `scout` | `gpt-6.1-sol` / low | no | read-only mapping, sweeps, wave drafts, CI or log reduction |
+
+Each body is short and points at the run's `LANE.md`, which the brief's `Rules:` line names, for the
+working rules and the `lane-return` block. The installer appends `home/lane-policy.md`, the generic
+lane rules, to every agent file that sets `inheritGlobalContext: false`.
+
+No lane pushes: the lane guard refuses `git push` and its wrappers whatever the agent, and every agent
+runs behind the `nopush` launcher as a second fence. Implementation lanes hand back an uncommitted
+candidate; compose and board lanes commit locally. When an install ships a different agent set, the
+installer moves any `agents/*.md` file in the home that the build no longer ships into
+`<home>/backups/agents-<timestamp>/` instead of deleting it, and `--check` reports it as `STALE`.
 
 ### Guard scripts
 

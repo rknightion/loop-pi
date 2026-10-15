@@ -28,5 +28,5 @@ test("the rendered custom description refuses workflow, parallel included, and a
   assert.match(header, /refuse/i);
   assert.match(header, /async `subagent` call with \{agent, task\}, one call per lane/);
   // The header's claim holds: the guard refuses the shape the package advertises.
-  assert.equal(evaluateSubagentCall({ workflow: "parallel", args: { tasks: [{ agent: "lane-worker", task: "x" }] } }).block, true);
+  assert.equal(evaluateSubagentCall({ workflow: "parallel", args: { tasks: [{ agent: "worker", task: "x" }] } }).block, true);
 });

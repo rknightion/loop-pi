@@ -51,34 +51,11 @@ function block(reason: string): Decision {
 }
 
 // ---------------------------------------------------------------------------
-// The C3 agent set (SEAMS.md "Names and paths"): the only names the root may
-// spawn. Frozen; a change here means re-freezing SEAMS.md first.
+// The agent set (SEAMS.md "Roles"): the only names the root may spawn. Frozen; a change here means
+// re-freezing SEAMS.md first. `senior` is the only parent (depth 2); the rest are leaves. The
+// export keeps its C3 name for the callers that import it.
 // ---------------------------------------------------------------------------
-export const C3_AGENTS: ReadonlySet<string> = new Set([
-  "mapper",
-  "mapper-deep",
-  "gate-runner",
-  "lane-worker",
-  "lane-worker-push",
-  "lane-worker-retry",
-  "lane-worker-retry-push",
-  "complex-worker",
-  "complex-worker-push",
-  "super-worker",
-  "super-worker-push",
-  "megasuper-worker",
-  "megasuper-worker-push",
-  "reviewer",
-  "reviewer-high",
-  "security-reviewer",
-  "rescue-astra-medium",
-  "rescue-astra",
-  "lane-worker-low",
-  "lane-worker-low-push",
-  "triager",
-  "ops",
-  "ops-probe",
-]);
+export const C3_AGENTS: ReadonlySet<string> = new Set(["worker", "senior", "senior-escalation", "reviewer", "scout"]);
 
 // ---------------------------------------------------------------------------
 // Lexer
@@ -1279,13 +1256,13 @@ function isCommitDashA(commitArgs: string[]): boolean {
  *  invocation (course correction, main thread, 2026-09-27: a `-c
  *  alias.<name>=<value>` whose <name> shadows a real built-in is ignored by
  *  real git, so relying on the expanded reading alone would miss it). */
-function checkGitPushAddCommit(gitArgs: string[], pushGranted = true): Decision | null {
+function checkGitPushAddCommit(gitArgs: string[], role: Role): Decision | null {
   const sub = gitArgs[0];
   if (sub === "push" && isForcePush(gitArgs.slice(1))) {
     return block("loop-guard: force-push forms are blocked for every role (SEAMS.md push grant).");
   }
-  if (sub === "push" && !pushGranted) {
-    return block("loop-guard: git push requires a push-granted lane identity (SEAMS.md push grant).");
+  if (sub === "push" && role === "lane") {
+    return block("loop-guard: lanes never push; only the root runs `git push` (SEAMS.md push authority).");
   }
   if (sub === "add" && isBulkAdd(gitArgs.slice(1))) {
     return block("loop-guard: `git add -A`, `.` or `--all` is blocked; add explicit pathspecs.");
@@ -1708,22 +1685,23 @@ function opsRefusal(segment: string[], stripped: string[], forbidden: ForbiddenC
 }
 
 // ---------------------------------------------------------------------------
-// Loop control files. Every lane is refused writes into `codex/ops-*`, `codex/state-*` and
-// `codex/goal-*` (and the `codex` directory itself for removal-shaped commands). Edit and write
+// Loop control files. Every lane is refused writes into `codex/ops-*`, `codex/state-*`,
+// `codex/goal-*` and the v3 run files `codex/charter-*`, `codex/launch-*` and `codex/closeout-*`
+// (and the `codex` directory itself for removal-shaped commands). Edit and write
 // tool paths are checked exactly (lane.ts); for bash this is best effort: redirection targets and
 // the path arguments of common file-writing commands.
 // ---------------------------------------------------------------------------
 
-const LOOP_CONTROL_FILE = /(?:^|\/)codex\/(?:ops|state|goal)-[^/]*$/i;
+const LOOP_CONTROL_FILE = /(?:^|\/)codex\/(?:ops|state|goal|charter|launch|closeout)-[^/]*$/i;
 const LOOP_CONTROL_DIR = /(?:^|\/)codex$/i;
-const LOOP_CONTROL_SAMPLES = ["ops-c-loop1.json", "state-c-loop1.jsonl", "goal-c-loop1.md"];
+const LOOP_CONTROL_SAMPLES = ["ops-c-loop1.json", "state-c-loop1.jsonl", "goal-c-loop1.md", "charter-c-loop1.md", "launch-c-loop1.txt", "closeout-c-loop1.md"];
 // Protocol 2 (SEAMS S2/S8): the frozen audit grants source joins the lane deny list.
 const GRANTS_FILE = /(?:^|\/)codex\/grants-[^/]*$/i;
 const GRANTS_SAMPLE = "grants-c-loop1.json";
-// Protocol 2 root fence: the planner's files (ops, grants, launch, goal). The root writes its state
+// Protocol 2 root fence: the planner's files (ops, grants, launch, goal, charter). The root writes its state
 // log through loop-state and its report, never its own authority.
-const ROOT_CONTROL_FILE = /(?:^|\/)codex\/(?:ops|grants|launch|goal)-[^/]*$/i;
-const ROOT_CONTROL_SAMPLES = ["ops-c-loop1.json", "grants-c-loop1.json", "launch-c-loop1.txt", "goal-c-loop1.md"];
+const ROOT_CONTROL_FILE = /(?:^|\/)codex\/(?:ops|grants|launch|goal|charter)-[^/]*$/i;
+const ROOT_CONTROL_SAMPLES = ["ops-c-loop1.json", "grants-c-loop1.json", "launch-c-loop1.txt", "goal-c-loop1.md", "charter-c-loop1.md"];
 
 export interface LoopControlOptions {
   /** Protocol 2: also treat `codex/grants-*` as a loop control file. */
@@ -2043,7 +2021,7 @@ export function textRunsPush(text: string, depth = 0): boolean {
 
 const FALLBACK_REDIRECT = />{1,2}\|?[ \t]*([^\s;&|()<>]+)/g;
 
-export function fallbackScan(text: string, role: Role, depth = 0, pushGranted = true, lane: LaneContext = {}, networkForm?: string): Decision {
+export function fallbackScan(text: string, role: Role, depth = 0, lane: LaneContext = {}, networkForm?: string): Decision {
   if (role === "lane" && lane.ops) {
     // On unparseable shell text try both literal imports and the fallback's loose spelling.
     // Neither reading can manufacture an executable command form for an allow match.
@@ -2068,17 +2046,17 @@ export function fallbackScan(text: string, role: Role, depth = 0, pushGranted = 
       }
       if (bare !== "git") continue;
       const tokens = ["git", ...segment.slice(i + 1)];
-      const literal = checkGitPushAddCommit(gitArguments(tokens), pushGranted);
+      const literal = checkGitPushAddCommit(gitArguments(tokens), role);
       if (literal) return block(fallbackReason(literal.reason ?? ""));
       const resolved = resolveGitArguments(tokens);
       if (resolved.shellCommand !== undefined && depth < MAX_FALLBACK_DEPTH) {
-        const nested = fallbackScan(resolved.shellCommand, role, depth + 1, pushGranted, lane);
+        const nested = fallbackScan(resolved.shellCommand, role, depth + 1, lane);
         if (nested.block) return nested;
       } else if (resolved.aliasText !== undefined && depth < MAX_FALLBACK_DEPTH) {
-        const nested = fallbackScan(resolved.aliasText, role, depth + 1, pushGranted, lane);
+        const nested = fallbackScan(resolved.aliasText, role, depth + 1, lane);
         if (nested.block) return nested;
       } else {
-        const expanded = checkGitPushAddCommit(resolved.args, pushGranted);
+        const expanded = checkGitPushAddCommit(resolved.args, role);
         if (expanded) return block(fallbackReason(expanded.reason ?? ""));
       }
     }
@@ -2162,7 +2140,6 @@ export function evaluateBashCommand(
   command: string,
   role: Role,
   gitAliasDepth = 0,
-  pushGranted = true,
   lane: LaneContext = {},
   // Guard-owned context retained when recursively evaluating a git alias or declared gate.
   enclosingNetworkCommand?: string,
@@ -2185,7 +2162,7 @@ export function evaluateBashCommand(
   if (!parsed && command.includes("loop-gate-lock")) {
     return block("loop-guard: unparseable gate wrapper commands are refused; use a direct name-only invocation.");
   }
-  if (!parsed) return fallbackScan(command, role, 0, pushGranted, lane);
+  if (!parsed) return fallbackScan(command, role, 0, lane);
   if (parsed.interpreterScripts.some((script) => script.includes("loop-gate-lock")) || parsed.segments.some((raw) => {
     const words = stripWrappers(raw);
     return isInterpreterHead(basename(words[0] ?? "")) && words.slice(1).some((arg) => arg.includes("loop-gate-lock"));
@@ -2231,7 +2208,7 @@ export function evaluateBashCommand(
       if (!declared || declared.segments.some((s) => basename(stripWrappers(s)[0] ?? "") === "loop-gate-lock")) {
         return block("loop-guard: nested gate wrappers are not supported in declarations.");
       }
-      const decision = evaluateBashCommand(gate.command, role, gitAliasDepth, pushGranted, { ...lane, gates: undefined }, enclosingNetworkCommand ?? command.trim());
+      const decision = evaluateBashCommand(gate.command, role, gitAliasDepth, { ...lane, gates: undefined }, enclosingNetworkCommand ?? command.trim());
       if (decision.block) return decision;
     }
 
@@ -2247,7 +2224,7 @@ export function evaluateBashCommand(
       // alias-expanded reading alone would miss it. Rather than hardcode a
       // built-in-name list (which drifts against git's own set), always check
       // the literal subcommand token too and block if either reading blocks.
-      const literalDecision = checkGitPushAddCommit(gitArguments(stripped), pushGranted);
+      const literalDecision = checkGitPushAddCommit(gitArguments(stripped), role);
       if (literalDecision) return literalDecision;
 
       const resolved = resolveGitArguments(stripped);
@@ -2258,16 +2235,16 @@ export function evaluateBashCommand(
         // alias cycle; past the bound the alias text gets the fallback scan.
         const aliasDecision =
           gitAliasDepth >= MAX_GIT_ALIAS_DEPTH
-            ? fallbackScan(resolved.shellCommand, role, 0, pushGranted, lane)
-            : evaluateBashCommand(resolved.shellCommand, role, gitAliasDepth + 1, pushGranted, lane, enclosingNetworkCommand ?? command.trim());
+            ? fallbackScan(resolved.shellCommand, role, 0, lane)
+            : evaluateBashCommand(resolved.shellCommand, role, gitAliasDepth + 1, lane, enclosingNetworkCommand ?? command.trim());
         if (aliasDecision.block) return aliasDecision;
       } else if (resolved.unparseable) {
         // The alias's own body could not be lexed (e.g. an unterminated
         // quote): never treat it as an inert literal subcommand string.
-        const aliasDecision = fallbackScan(resolved.aliasText ?? rawSegment.join(" "), role, 0, pushGranted, lane);
+        const aliasDecision = fallbackScan(resolved.aliasText ?? rawSegment.join(" "), role, 0, lane);
         if (aliasDecision.block) return aliasDecision;
       } else {
-        const aliasExpandedDecision = checkGitPushAddCommit(resolved.args, pushGranted);
+        const aliasExpandedDecision = checkGitPushAddCommit(resolved.args, role);
         if (aliasExpandedDecision) return aliasExpandedDecision;
       }
     }
@@ -2284,7 +2261,7 @@ export function evaluateBashCommand(
         if (refusal) return block(`loop-guard (ops): ${refusal}`);
       }
       for (const arg of stripped.slice(1)) {
-        const decision = fallbackScan(arg, role, 0, pushGranted, lane, networkForm);
+        const decision = fallbackScan(arg, role, 0, lane, networkForm);
         if (decision.block) return decision;
       }
     }
@@ -2328,7 +2305,7 @@ export function evaluateBashCommand(
   for (const script of parsed.interpreterScripts) {
     // A stdin script's body is part of the command form: granting only `python3 -`
     // must not grant arbitrary network code. Match the full original command here.
-    const decision = fallbackScan(script, role, 0, pushGranted, lane, enclosingNetworkCommand ?? command.trim());
+    const decision = fallbackScan(script, role, 0, lane, enclosingNetworkCommand ?? command.trim());
     if (decision.block) return decision;
   }
 
@@ -2375,7 +2352,7 @@ export function isAsyncSubagentLaunch(input: SubagentInput): boolean {
 
 /** Every check reads the merged view (SEAMS: pi-subagents 0.77.0 `options`), so a field moved
  *  into `options` is refused exactly as at the top level. */
-export function evaluateSubagentCall(raw: SubagentInput): Decision {
+export function evaluateSubagentCall(raw: SubagentInput, roster: ReadonlySet<string> = C3_AGENTS): Decision {
   const merged = subagentCallView(raw);
   if (!merged.ok) return block(merged.reason);
   const input: SubagentInput = merged.view;
@@ -2384,8 +2361,8 @@ export function evaluateSubagentCall(raw: SubagentInput): Decision {
   }
   const policy = evaluateSubagentPolicyFields(input);
   if (policy.block) return policy;
-  if (isSubagentLaunch(input) && typeof input.agent === "string" && !C3_AGENTS.has(input.agent)) {
-    return block(`loop-guard: '${input.agent}' is outside the C3 agent set the root may spawn.`);
+  if (isSubagentLaunch(input) && typeof input.agent === "string" && !roster.has(input.agent)) {
+    return block(`loop-guard: '${input.agent}' is outside the agent set the root may spawn (${[...roster].join(", ")}).`);
   }
   return allow();
 }

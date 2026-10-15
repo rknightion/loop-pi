@@ -19,10 +19,15 @@ The installed home's `lane-policy.md` is appended, after a `<!-- lane-policy -->
 the body of every agent file whose frontmatter says `inheritGlobalContext: false`. When the build
 carries `bin/loop-state` it is installed into `<home>/bin/`. `--variant NAME` is recorded in the
 home receipt so each session can name the variant it ran with.
+
+An `agents/*.md` file in the installed home that the build no longer ships is moved, not deleted,
+to `<home>/backups/agents-<UTC timestamp>/` (`--check` reports it as STALE and exits 1). A file
+named by `--external-managed` is exempt.
 """
 from __future__ import annotations
 
 import argparse
+import datetime
 import hashlib
 import json
 import os
@@ -61,14 +66,12 @@ HOME_TOOLS = ("loop-state", "loop-pi-nopush")
 LANE_POLICY = "lane-policy.md"
 LANE_POLICY_MARKER = "<!-- lane-policy -->"
 NEVER_MANAGED = {"auth.json"}
+# Agent files the build no longer ships are moved here, inside the home, never deleted.
+BACKUP_DIR = "backups"
 MIN_NODE = (22, 19, 0)
 # Fixed discovery order, independent of the installing shell (Homebrew first).
 NODE_CANDIDATES = ("/opt/homebrew/bin/node", "/usr/local/bin/node", "/usr/bin/node")
-AGENT_SET = {"mapper", "mapper-deep", "gate-runner", "lane-worker", "lane-worker-push", "lane-worker-low",
-             "lane-worker-low-push", "lane-worker-retry", "lane-worker-retry-push", "complex-worker",
-             "complex-worker-push", "super-worker", "super-worker-push", "megasuper-worker",
-             "megasuper-worker-push", "reviewer", "reviewer-high", "security-reviewer", "rescue-astra-medium",
-             "rescue-astra", "ops", "ops-probe", "triager"}
+AGENT_SET = {"worker", "senior", "senior-escalation", "reviewer", "scout"}
 SMOKE_COMMAND = "loop-closeout"
 # Defaults for settings.json `loopPi`; the extensions use the same ones (model-family.ts).
 DEFAULT_FAMILY = {"provider": "openai", "pattern": r"^gpt-6(\.[0-9]+)?(-[a-z0-9]+)+$", "name": "gpt-6"}
@@ -658,6 +661,38 @@ def stale_managed(home: Path, plan_files: set, external: Tuple[str, ...] = ()) -
     return sorted(set(previous) - plan_files - set(external))
 
 
+def retired_agents(home: Path, plan_files: set, external: Tuple[str, ...] = ()) -> List[str]:
+    """`agents/*.md` files in the installed home that this build no longer ships. A file another tool
+    owns (`--external-managed`) is never retired."""
+    agents = home / "agents"
+    if agents.is_symlink() or not agents.is_dir():
+        return []
+    keep = set(plan_files) | set(external)
+    return sorted(f"agents/{path.name}" for path in agents.glob("*.md")
+                  if (path.is_file() or path.is_symlink()) and f"agents/{path.name}" not in keep)
+
+
+def retire_agents(home: Path, retired: List[str]) -> Optional[Path]:
+    """Move retired agent files into `<home>/backups/agents-<UTC timestamp>/`; nothing is deleted.
+    Returns the backup directory, or None when there is nothing to move."""
+    if not retired:
+        return None
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backups = home / BACKUP_DIR
+    backups.mkdir(mode=0o700, exist_ok=True)
+    destination, serial = backups / f"agents-{stamp}", 0
+    while True:
+        try:
+            destination.mkdir(mode=0o700)
+            break
+        except FileExistsError:
+            serial += 1
+            destination = backups / f"agents-{stamp}-{serial}"
+    for rel in retired:
+        os.replace(home / rel, destination / Path(rel).name)
+    return destination
+
+
 def parse_vars(items: List[str]) -> Dict[str, str]:
     variables = {}
     for item in items:
@@ -782,12 +817,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             changes = drift(prefix, target, node, version)
             for path, _, _ in changes:
                 print(f"DRIFT: {path}")
-            stale = stale_managed(target.home, set(home_plan(prefix, target.home, variables)), target.external)
+            plan_files = set(home_plan(prefix, target.home, variables))
+            retired = retired_agents(target.home, plan_files, target.external)
+            stale = [rel for rel in stale_managed(target.home, plan_files, target.external) if rel not in retired]
             for rel in stale:
                 print(f"STALE: {target.home / rel} is no longer managed")
-            if not changes and not stale:
+            for rel in retired:
+                print(f"STALE: {target.home / rel} is an agent this build no longer ships; install moves it to a backup")
+            if not changes and not stale and not retired:
                 print(f"OK: {label} installed; home and launcher match")
-            return 1 if changes or stale else 0
+            return 1 if changes or stale or retired else 0
         provenance = {"source_repo": args.source_repo, "source_commit": source_commit(SRC),
                       "overlay_commit": args.overlay_commit}
         prefix = build(data, label, files, pin, node, args.allow_missing_extensions, args.policy_source, provenance)
@@ -795,10 +834,15 @@ def main(argv: Optional[List[str]] = None) -> int:
             check_candidate_destinations(scratch, (target.home, target.bin_dir, data))
         target.home.mkdir(mode=0o700, parents=True, exist_ok=True)
         (target.home / "tmp").mkdir(mode=0o700, exist_ok=True)
-        stale = stale_managed(target.home, set(home_plan(prefix, target.home, variables)), target.external)
+        plan_files = set(home_plan(prefix, target.home, variables))
+        retired = retired_agents(target.home, plan_files, target.external)
+        stale = [rel for rel in stale_managed(target.home, plan_files, target.external) if rel not in retired]
         for path, data_bytes, mode in drift(prefix, target, node, version):
             atomic_write(path, data_bytes, mode)
             print(f"wrote {path}")
+        backup = retire_agents(target.home, retired)
+        for rel in retired:
+            print(f"retired {target.home / rel} -> {backup / Path(rel).name}")
         for rel in stale:
             print(f"STALE (left in place): {target.home / rel}")
         manifest = json.loads((prefix / BUILD_MANIFEST).read_text())

@@ -1,10 +1,10 @@
 // Test support for loop-continuation (not a test file; `test-` files are excluded from builds).
-// `loopFixture` builds a loop that passes the S3 arm checks: a git repository with codex/goal-*.md,
-// a run dir, and an agent home whose bin/loop-state is this checkout's. `fakePi` loads index.ts
+// `loopFixture` builds a v3 loop that passes the arm checks: a git repository with
+// codex/charter-*.md, a run dir, and an agent home whose bin/loop-state is this checkout's. `fakePi` loads index.ts
 // against a fake ExtensionAPI.
 
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,38 +18,62 @@ export function fresh(prefix = "loop-cont-"): string {
   return dir;
 }
 
-/** Append `## Authority` lines (it is the goal's last section), e.g. `ops: <path> sha256=<hex>`. */
-export function addAuthority(fixture: { goal: string }, ...lines: string[]): void {
-  writeFileSync(fixture.goal, `${lines.join("\n")}\n`, { flag: "a" });
+/** Set charter header keys (`key: value` lines before its first `##`), replacing a key already there,
+ *  e.g. `standing: <path> sha256=<hex>`. */
+export function setCharterKeys(fixture: { charter: string }, ...lines: string[]): void {
+  let text = readFileSync(fixture.charter, "utf8");
+  for (const line of lines) {
+    const key = line.slice(0, line.indexOf(":")).trim().toLowerCase();
+    // Keys are plain words (`standing`, `audit grants`): no regex escaping needed.
+    const existing = new RegExp(`^${key}\\s*:.*$`, "mi");
+    text = existing.test(text) ? text.replace(existing, () => line) : text.replace(/^## First wave/m, () => `${line}\n\n## First wave`);
+  }
+  writeFileSync(fixture.charter, text);
 }
 
 export function cleanupFixtures(): void {
   while (made.length) rmSync(made.pop()!, { recursive: true, force: true });
 }
 
-export function goalText(opts: { host?: string; tier?: string; rootModel?: string | null; concurrency?: string | null } = {}): string {
+/** A charter in the v3 template's shape (charter.md). */
+export function charterText(opts: { host?: string; root?: string | null; lanes?: string | null } = {}): string {
   return [
-    "# Goal: x loop3",
-    "## Run",
-    `tier: ${opts.tier ?? "guarded"}`,
-    "root: llm - fixture",
-    ...(opts.rootModel === null ? [] : [`root-model: ${opts.rootModel ?? "provider/model-a"}`]),
-    ...(opts.concurrency === null ? [] : [`concurrency: ${opts.concurrency ?? "2"}`]),
-    ...(opts.host ? [`host: ${opts.host}`] : []),
-    "## Envelope",
-    "| task | acceptance check | owned files | gate | landing | agent | tier |",
-    "|---|---|---|---|---|---|---|",
-    "| T-1 (first task) | a passes | a/** | just check | lands-after-green | lane-worker-push | routine |",
-    "| `T-2` | b passes | b/** | just check | returns candidate | lane-worker | guarded |",
-    "## Authority",
-    "push agents: lane-worker-push",
+    "# Charter: x loop3",
+    "",
+    "harness:    pi",
+    ...(opts.root === null ? [] : [`root:       ${opts.root ?? "sol / medium"}`]),
+    "aim:        exercise the fixture",
+    "priorities: label:priority-high > status:\"To Do\"",
+    "exclude:    label:needs-owner",
+    ...(opts.lanes === null ? [] : [`lanes:      ${opts.lanes ?? "2"}`]),
+    "gate:       just check",
+    "gate-route: just check",
+    "guarded-paths: none",
+    "standing:   none",
+    "authority:",
+    "  - live: read the fixture database",
+    ...(opts.host ? [`host:       ${opts.host}`] : []),
+    "overnight:  keep building waves",
+    "budget:     none",
+    "",
+    "## First wave",
+    "",
+    "| Task | Scope | Route | Note |",
+    "|---|---|---|---|",
+    "| T-1 (first task) | a/** | worker | |",
+    "| `T-2` | b/** | senior (shared seam) | |",
+    "",
+    "## Decisions already made",
+    "",
+    "- none",
     "",
   ].join("\n");
 }
 
 export interface LoopFixture {
   repo: string;
-  goal: string;
+  charter: string;
+  /** The closeout path (the launch's `report`, S1). */
   report: string;
   log: string;
   runDir: string;
@@ -71,13 +95,13 @@ export function initRepo(repo: string): void {
   git(repo, "commit", "-qm", "init");
 }
 
-export function loopFixture(opts: { host?: string; tier?: string; rootModel?: string | null; concurrency?: string | null; agentDir?: string } = {}): LoopFixture {
+export function loopFixture(opts: { host?: string; root?: string | null; lanes?: string | null; agentDir?: string } = {}): LoopFixture {
   const repo = fresh("loop-cont-repo-");
   initRepo(repo);
   mkdirSync(join(repo, "codex"));
-  const goal = join(repo, "codex", "goal-x-loop3.md");
-  writeFileSync(goal, goalText(opts));
-  const report = join(repo, "codex", "report-x-loop3.md");
+  const charter = join(repo, "codex", "charter-x-loop3.md");
+  writeFileSync(charter, charterText(opts));
+  const report = join(repo, "codex", "closeout-x-loop3.md");
   const log = join(repo, "codex", "state-x-loop3.jsonl");
   const runDir = fresh("loop-cont-run-");
   const agentDir = opts.agentDir ?? fresh("loop-cont-home-");
@@ -87,8 +111,8 @@ export function loopFixture(opts: { host?: string; tier?: string; rootModel?: st
   } catch {
     // already linked
   }
-  const launch = `You are the root. Read ${goal} in full. Write ${report} as the terminal action.`;
-  return { repo, goal, report, log, runDir, agentDir, launch };
+  const launch = `You are the root. Read ${charter} in full. Write ${report} as the terminal action.`;
+  return { repo, charter, report, log, runDir, agentDir, launch };
 }
 
 type Handler = (event: any, ctx: any) => any;
@@ -159,4 +183,24 @@ export async function fakePi(opts: { agentDir: string; cwd: string; runDir?: str
       else process.env.LOOP_PI_RUN_DIR = previous.run;
     },
   };
+}
+
+/** A closeout that counts under S2 for the fixture's loop 3. */
+export function closeoutBody(loop = 3): string {
+  return [
+    `# Closeout: x loop${loop} · Charter: ${"0".repeat(64)}`,
+    "",
+    "## Landed",
+    "- none",
+    "",
+    "## Parked",
+    "- none",
+    "",
+    "## For ratification",
+    "- none",
+    "",
+    "## Notes",
+    "- fixture",
+    "",
+  ].join("\n");
 }

@@ -129,8 +129,9 @@ m.render_policy(prefix, "the loop-pi home templates")
             self.assertEqual(config["runnerLaunchers"], {"nopush": [str(wrapper)]})
             for path in (home / "agents").glob("*.md"):
                 front = path.read_text().split("---", 2)[1].splitlines()
-                expected = not path.stem.endswith("-push") and path.stem not in ("ops", "ops-probe")
-                self.assertEqual("launcher: nopush" in front, expected, path.name)
+                # No push twins exist: every lane agent runs behind the wrapper, and none grants a push.
+                self.assertFalse(path.stem.endswith("-push"), path.name)
+                self.assertIn("launcher: nopush", front, path.name)
             install("--check")
             wrapper.write_text("drift\n")
             self.assertIn(str(wrapper), install("--check", expected=1).stdout)
@@ -141,6 +142,93 @@ m.render_policy(prefix, "the loop-pi home templates")
             install("--check")
             install("--bin", str(root.parent / "outside"), expected=2)
             self.assertEqual((root / "sentinel").read_text(), "untouched")
+
+
+class AgentRetirementTests(unittest.TestCase):
+    """Installing moves agent files the build no longer ships into a backup inside the home."""
+
+    PREBUILD = '''
+import importlib.machinery, importlib.util, json, shutil, sys
+from pathlib import Path
+loader = importlib.machinery.SourceFileLoader("installer", sys.argv[1])
+spec = importlib.util.spec_from_loader(loader.name, loader)
+m = importlib.util.module_from_spec(spec); loader.exec_module(m)
+files = m.source_files(); label = m.build_label(files, m.pins(), "the loop-pi home templates\\0loop-pi-install")
+prefix = Path.home() / "data" / label
+for rel, source in files:
+    destination = prefix / rel; destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, destination)
+m.render_policy(prefix, "the loop-pi home templates")
+(prefix / m.BUILD_MANIFEST).write_text(json.dumps({"label": label, "missing_extensions": []}))
+'''
+
+    def test_install_backs_up_retired_agents_and_check_reports_them(self):
+        import sys
+        with tempfile.TemporaryDirectory(prefix="loop-pi-retire-") as temporary:
+            root = Path(temporary).resolve()
+            env = {key: os.environ[key] for key in ("PATH", "TMPDIR") if key in os.environ}
+            env.update(HOME=str(root), GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+            (root / "sentinel").write_text("untouched")
+            built = subprocess.run([sys.executable, "-c", self.PREBUILD, str(HERE / "loop-pi-install")],
+                                   env=env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(built.returncode, 0, built.stderr)
+            home = root / "pi"
+            args = [sys.executable, str(HERE / "loop-pi-install"), "--candidate-source", "--scratch-root", str(root),
+                    "--home", str(home), "--data", str(root / "data"), "--bin", str(root / "bin"),
+                    "--launcher", "loop-pi-test"]
+            def install(*extra, expected=0):
+                result = subprocess.run([*args, *extra], env=env, text=True, capture_output=True, timeout=30)
+                self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+                return result
+            install()
+            shipped = {path.name: path.read_bytes() for path in (home / "agents").glob("*.md")}
+            self.assertEqual(set(shipped), {f"{name}.md" for name in m.AGENT_SET})
+            # Two retired v2 agents (one was managed by the old receipt) and one unrelated file.
+            (home / "agents/lane-worker.md").write_text("v2 lane worker\n")
+            (home / "agents/lane-worker-push.md").write_text("v2 push twin\n")
+            (home / "agents/notes.txt").write_text("not an agent\n")
+            stale = install("--check", expected=1).stdout
+            self.assertIn(f"STALE: {home / 'agents/lane-worker.md'}", stale)
+            self.assertIn(f"STALE: {home / 'agents/lane-worker-push.md'}", stale)
+            self.assertNotIn("notes.txt", stale)
+            self.assertTrue((home / "agents/lane-worker.md").exists(), "--check writes nothing")
+            output = install().stdout
+            self.assertIn("retired", output)
+            self.assertEqual({path.name for path in (home / "agents").glob("*.md")}, set(shipped))
+            self.assertEqual((home / "agents/notes.txt").read_text(), "not an agent\n")
+            for name, data in shipped.items():
+                self.assertEqual((home / "agents" / name).read_bytes(), data)
+            backups = sorted((home / "backups").glob("agents-*"))
+            self.assertEqual(len(backups), 1, backups)
+            self.assertEqual((backups[0] / "lane-worker.md").read_text(), "v2 lane worker\n")
+            self.assertEqual((backups[0] / "lane-worker-push.md").read_text(), "v2 push twin\n")
+            install("--check")
+            # Nothing retired, no new backup; a later retirement gets its own backup directory.
+            install()
+            self.assertEqual(len(sorted((home / "backups").glob("agents-*"))), 1)
+            (home / "agents/old-reviewer.md").write_text("again\n")
+            install()
+            backups = sorted((home / "backups").glob("agents-*"))
+            self.assertEqual(len(backups), 2, backups)
+            self.assertEqual(sum((b / "old-reviewer.md").is_file() for b in backups), 1)
+            self.assertEqual((root / "sentinel").read_text(), "untouched")
+
+    def test_external_managed_agents_are_never_retired(self):
+        prefix = fake_prefix(self.tmp)
+        (prefix / "home/agents").mkdir()
+        (prefix / "home/agents/worker.md").write_text("---\nname: worker\n---\n")
+        tgt = target(self.tmp, external=("agents/mine.md",))
+        (tgt.home / "agents").mkdir(parents=True)
+        for name in ("worker.md", "mine.md", "gone.md"):
+            (tgt.home / "agents" / name).write_text("x\n")
+        plan = set(m.home_plan(prefix, tgt.home, {}))
+        self.assertEqual(m.retired_agents(tgt.home, plan, tgt.external), ["agents/gone.md"])
+        self.assertEqual(m.retired_agents(tgt.home, plan), ["agents/gone.md", "agents/mine.md"])
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
 
 
 class ScratchContainmentTests(unittest.TestCase):
@@ -203,7 +291,7 @@ print(label)
             home = link / "missing" / "pi"
         else:
             link = home / ("agents" if location in ("broken", "unreadable") else location)
-            name = "lane-worker.md" if location == "agents" else "loop-pi-nopush"
+            name = "worker.md" if location == "agents" else "loop-pi-nopush"
             (escape / name).write_text("outside managed sentinel")
         link.parent.mkdir(parents=True, exist_ok=True)
         if location == "unreadable":
@@ -322,7 +410,7 @@ class NopushNativeCanary(unittest.TestCase):
         faux = HERE.parent / "extensions/test-support/faux-extension.ts"
         agents = overlay / "home/agents"
         agents.mkdir(parents=True)
-        for name in ("lane-worker", "complex-worker-push", "lane-worker-push"):
+        for name in ("worker", "senior"):
             text = (HERE.parent / "home/agents" / f"{name}.md").read_text()
             text = text.replace("model: openai/gpt-6.1-sol", "model: faux/faux-1")
             text = text.replace("extensions:\n", f"extensions: []\nsubagentOnlyExtensions: {faux}\n")
@@ -370,19 +458,18 @@ class NopushNativeCanary(unittest.TestCase):
             return tool("subagent", agent=agent, task=task, **{"async": True, "worktree": False, **options})
         script.write_text(json.dumps({"rules": [
             {"match": "^CONTROL_ROOT$", "once": True, "toolCalls": [tool("bash", command="./push.sh", timeout=15)]},
-            {"match": "^WRAPPED_ROOT$", "once": True, "toolCalls": [spawn("lane-worker", "WRAPPED_CHILD\nLanding: returns candidate")]},
+            {"match": "^WRAPPED_ROOT$", "once": True, "toolCalls": [spawn("worker", "WRAPPED_CHILD\nLanding: returns candidate")]},
             {"match": "^Task: WRAPPED_CHILD", "once": True, "toolCalls": [tool("bash", command="./push.sh", timeout=15)]},
-            {"match": "^LOCAL_ROOT$", "once": True, "toolCalls": [spawn("lane-worker", "LOCAL_CHILD\nLanding: returns candidate")]},
+            {"match": "^LOCAL_ROOT$", "once": True, "toolCalls": [spawn("worker", "LOCAL_CHILD\nLanding: returns candidate")]},
             {"match": "^Task: LOCAL_CHILD", "once": True, "toolCalls": [tool("bash", command="./local.sh", timeout=15)]},
-            {"match": "^GUARD_ROOT$", "once": True, "toolCalls": [spawn("lane-worker", "GUARD_CHILD\nLanding: returns candidate")]},
+            {"match": "^GUARD_ROOT$", "once": True, "toolCalls": [spawn("worker", "GUARD_CHILD\nLanding: returns candidate")]},
             {"match": "^Task: GUARD_CHILD", "once": True, "toolCalls": [tool("bash", command="git push local HEAD:refs/heads/forbidden", timeout=15)]},
-            {"match": "^FOREGROUND_ROOT$", "once": True, "toolCalls": [spawn("complex-worker-push", "FOREGROUND_PARENT\nLanding: returns candidate\nDelegation: one local faux child")]},
-            {"match": "^Task: FOREGROUND_PARENT", "once": True, "toolCalls": [spawn("lane-worker", "FOREGROUND_CHILD\nLanding: returns candidate", **{"async": False})]},
-            {"match": "^ASYNC_ROOT$", "once": True, "toolCalls": [spawn("complex-worker-push", "ASYNC_PARENT\nLanding: returns candidate\nDelegation: one local faux child")]},
-            {"match": "^Task: ASYNC_PARENT", "once": True, "toolCalls": [spawn("lane-worker", "NESTED_CHILD\nLanding: returns candidate")]},
+            {"match": "^FOREGROUND_ROOT$", "once": True, "toolCalls": [spawn("senior", "FOREGROUND_PARENT\nLanding: returns candidate\nDelegation: one local faux child")]},
+            {"match": "^Task: FOREGROUND_PARENT", "once": True, "toolCalls": [spawn("worker", "FOREGROUND_CHILD\nLanding: returns candidate", **{"async": False})]},
+            {"match": "^ASYNC_ROOT$", "once": True, "toolCalls": [spawn("senior", "ASYNC_PARENT\nLanding: returns candidate\nDelegation: one local faux child")]},
+            {"match": "^Task: ASYNC_PARENT", "once": True, "toolCalls": [spawn("worker", "NESTED_CHILD\nLanding: returns candidate")]},
             {"match": "^Task: NESTED_CHILD", "once": True, "toolCalls": [tool("bash", command="./push.sh", timeout=15)]},
-            {"match": "^PUSH_ROOT$", "once": True, "toolCalls": [spawn("lane-worker-push", "PUSH_CHILD\nLanding: returns candidate")]},
-            {"match": "^Task: PUSH_CHILD", "once": True, "toolCalls": [tool("bash", command="git push local HEAD:refs/heads/granted", timeout=15)]},
+            {"match": "^ROOT_PUSH$", "once": True, "toolCalls": [tool("bash", command="git push local HEAD:refs/heads/rootpush", timeout=15)]},
             {"match": ".*", "text": "faux done"},
         ]}))
         node = m.node_binary()
@@ -438,7 +525,7 @@ class NopushNativeCanary(unittest.TestCase):
             self.assertTrue(result.get("isError"), result)
             self.assertIn("remote-loop-pi-push-denied", json.dumps(result))
             statuses = terminal_runs()
-            wrapped = [s for s in statuses if s.get("steps", [{}])[0].get("agent") == "lane-worker"]
+            wrapped = [s for s in statuses if s.get("steps", [{}])[0].get("agent") == "worker"]
             self.assertTrue(wrapped, statuses)
             self.assertTrue(all(s.get("launcher", {}).get("name") == "nopush" for s in wrapped), wrapped)
             print("WRAPPED: unknown helper denial; native status launcher.name=nopush", flush=True)
@@ -451,7 +538,7 @@ class NopushNativeCanary(unittest.TestCase):
             prompt("GUARD_ROOT")
             _, result = child_result("GUARD_CHILD")
             self.assertTrue(result.get("isError"), result)
-            self.assertIn("push requires a push-granted lane identity", json.dumps(result))
+            self.assertIn("lanes never push", json.dumps(result))
             self.assertNotEqual(command("git", "--git-dir", str(local), "rev-parse", "forbidden", expected=None).returncode, 0)
             terminal_runs()
             print("REQUIRED GUARD: wrapped child explicit push refused by required lane guard", flush=True)
@@ -465,9 +552,9 @@ class NopushNativeCanary(unittest.TestCase):
             terminal_runs()
             parent_status_path, _ = run_for_session(parent_session)
             parent_recovery = json.loads((parent_status_path.parent / "recovery-descriptor.json").read_text())
-            self.assertEqual(parent_recovery["agent"], "complex-worker-push")
+            self.assertEqual(parent_recovery["agent"], "senior")
             self.assertEqual(parent_recovery["maxSubagentDepth"], 2)
-            print("NESTED FOREGROUND: complex-worker-push async:false lane-worker refused by native producer", flush=True)
+            print("NESTED FOREGROUND: senior async:false worker refused by native producer", flush=True)
             prompt("ASYNC_ROOT")
             parent_session, nested_launch = child_result("ASYNC_PARENT", "subagent")
             self.assertFalse(nested_launch.get("isError", False), nested_launch)
@@ -479,7 +566,7 @@ class NopushNativeCanary(unittest.TestCase):
             self.assertTrue(any(s.get("launcher", {}).get("name") == "nopush" for s in statuses))
             parent_status_path, parent_status = run_for_session(parent_session)
             parent_recovery = json.loads((parent_status_path.parent / "recovery-descriptor.json").read_text())
-            self.assertEqual(parent_recovery["agent"], "complex-worker-push")
+            self.assertEqual(parent_recovery["agent"], "senior")
             self.assertEqual(parent_recovery["maxSubagentDepth"], 2)
             nested_status_path, nested_status = run_for_session(nested_session)
             self.assertEqual(nested_status_path.parent.parent.parent.name, "nested-subagent-runs")
@@ -505,18 +592,19 @@ class NopushNativeCanary(unittest.TestCase):
             nested_recovery = json.loads((nested_status_path.parent / "recovery-descriptor.json").read_text())
             self.assertEqual(nested_recovery["maxSubagentDepth"], 2)
             self.assertEqual(nested_recovery["capabilityCeiling"]["allowedAgents"], parent_recovery["allowedAgents"])
-            self.assertEqual(nested_status["steps"][0]["agent"], "lane-worker")
+            self.assertEqual(nested_status["steps"][0]["agent"], "worker")
             self.assertEqual(nested_status["launcher"]["name"], "nopush")
-            print("NESTED ASYNC: fresh nested lane-worker wrapper denied script push", flush=True)
-            prompt("PUSH_ROOT")
-            _, result = child_result("PUSH_CHILD")
-            self.assertFalse(result.get("isError"), result)
-            self.assertEqual(git("--git-dir", str(local), "rev-parse", "granted"), sha)
+            print("NESTED ASYNC: fresh nested worker wrapper denied script push", flush=True)
+            result = prompt("ROOT_PUSH")
+            self.assertFalse(result.get("isError", False), result)
+            self.assertEqual(git("--git-dir", str(local), "rev-parse", "rootpush"), sha)
             statuses = terminal_runs()
             receipts = [json.loads(line) for line in (run_dir / "push-log.jsonl").read_text().splitlines()]
-            self.assertTrue(any(r.get("agent") == "lane-worker-push" and r.get("new") == sha
-                                and r.get("ref") == "refs/heads/granted" for r in receipts), receipts)
-            self.assertTrue(all("launcher" not in s for s in statuses if s.get("steps", [{}])[0].get("agent") == "lane-worker-push"))
+            self.assertTrue(any(r.get("actor") == "root" and r.get("new") == sha
+                                and r.get("ref") == "refs/heads/rootpush" for r in receipts), receipts)
+            self.assertFalse(any(r.get("actor") == "lane" for r in receipts), receipts)
+            # Every lane agent runs behind the wrapper: there is no push-granted, unwrapped twin.
+            self.assertTrue(statuses and all(s.get("launcher", {}).get("name") == "nopush" for s in statuses), statuses)
             self.assertEqual((root / "sentinel").read_text(), "untouched")
             (root / "canary-receipt.json").write_text(json.dumps({"base": m.source_commit(HERE.parent),
                 "fixtureSha": sha, "prefix": str(prefix), "statuses": statuses, "pushReceipts": receipts,
@@ -526,7 +614,7 @@ class NopushNativeCanary(unittest.TestCase):
                 "nestedParentRouteId": parent_route_id, "nestedParentSession": str(parent_session),
                 "wrongParentIdentityControlsRejected": True,
                 "nestedStatusPath": str(nested_status_path)}, indent=2) + "\n")
-            print("PUSH REGRESSION: lane-worker-push real local-bare push receipt matches fixture SHA", flush=True)
+            print("ROOT PUSH: the root alone pushed a local bare ref, receipt matches fixture SHA, no lane receipt", flush=True)
             print(f"CANARY PASS: scratch install, full transcripts and receipt at {root}", flush=True)
         finally:
             code = rpc.close()
@@ -860,16 +948,16 @@ class InstallerTests(unittest.TestCase):
         self.assertIn(f"extensions/{entry}", rels)
         self.assertFalse(any(rel.startswith("extensions/loop-status/") and "test" in rel.rsplit("/", 1)[1] for rel in rels))
 
-    def test_ops_probe_is_in_the_installed_agent_set(self):
-        self.assertIn("ops-probe", m.AGENT_SET)
+    def test_the_installed_agent_set_is_the_v3_roster(self):
+        self.assertEqual(m.AGENT_SET, {"worker", "senior", "senior-escalation", "reviewer", "scout"})
         prefix = fake_prefix(self.tmp)
         agents = prefix / "home/agents"
         agents.mkdir(parents=True)
-        for name in m.AGENT_SET - {"ops-probe"}:
+        for name in m.AGENT_SET - {"scout"}:
             (agents / f"{name}.md").write_text("---\nname: x\n---\n")
         with self.assertRaises(m.InstallError) as ctx:
             m.check_agent_set(prefix)
-        self.assertIn("ops-probe", str(ctx.exception))
+        self.assertIn("scout", str(ctx.exception))
 
     def agent_file(self, front_extra: str, body: str = "body\n") -> str:
         return f"---\nname: a\nmodel: openai/gpt-6-luna\n{front_extra}---\n{body}"
@@ -918,7 +1006,7 @@ class InstallerTests(unittest.TestCase):
         self.assertFalse((self.tmp / "bin/loop-state").exists(), "not installed next to the launcher")
         self.assertEqual(m.drift(prefix, tgt, "/usr/bin/node"), [])
 
-    def test_mapper_routes_survive_a_scratch_overlay_install(self):
+    def test_agent_routes_survive_a_scratch_overlay_install(self):
         prefix = fake_prefix(self.tmp)
         overlay = self.tmp / "overlay"
         (overlay / "home").mkdir(parents=True)
@@ -931,30 +1019,54 @@ class InstallerTests(unittest.TestCase):
                 destination.write_bytes(source.read_bytes())
         tgt = target(self.tmp, variant="fast")
         apply(prefix, tgt)
+        # SEAMS S4: model and thinking per role, in the source file and in the installed copy.
         for name, model, thinking in (
-            ("mapper-deep", "gpt-6.1-sol", "medium"),
-            ("mapper", "gpt-6.1-sol", "low"),
+            ("worker", "gpt-6.1-sol", "medium"),
+            ("senior", "gpt-6.1-sol", "high"),
+            ("senior-escalation", "gpt-6-astra", "high"),
+            ("reviewer", "gpt-6.1-sol", "high"),
+            ("scout", "gpt-6.1-sol", "low"),
         ):
             source = (m.SRC / "home/agents" / f"{name}.md").read_text()
             installed = (tgt.home / "agents" / f"{name}.md").read_text()
             for text in (source, installed):
                 front = text.split("---", 2)[1].splitlines()
-                self.assertIn(f"model: openai/{model}", front)
-                self.assertIn(f"thinking: {thinking}", front)
-        smoke = (m.SRC / "extensions/test-support/smoke-overlay/home/agents/mapper-deep.md").read_text()
+                self.assertIn(f"model: openai/{model}", front, name)
+                self.assertIn(f"thinking: {thinking}", front, name)
+        smoke_agents = m.SRC / "extensions/test-support/smoke-overlay/home/agents"
+        self.assertEqual({path.stem for path in smoke_agents.glob("*.md")}, m.AGENT_SET)
         # The offline smoke overlay must stay on its scripted provider, not a live model.
-        self.assertIn("model: faux/faux-1", smoke.split("---", 2)[1].splitlines())
-        self.assertIn("thinking: medium", smoke.split("---", 2)[1].splitlines())
+        for path in smoke_agents.glob("*.md"):
+            self.assertIn("model: faux/faux-1", path.read_text().split("---", 2)[1].splitlines(), path.name)
         self.assertEqual(m.drift(prefix, tgt, "/usr/bin/node"), [])
 
-    def test_the_variant_is_recorded_in_the_home_receipt(self):
-        prefix = fake_prefix(self.tmp)
-        tgt = target(self.tmp, variant="fast")
-        apply(prefix, tgt)
-        self.assertEqual(json.loads((tgt.home / m.HOME_MANIFEST).read_text())["variant"], "fast")
-        plain = target(self.tmp, name=".loop-pi-plain")
-        apply(prefix, plain)
-        self.assertNotIn("variant", json.loads((plain.home / m.HOME_MANIFEST).read_text()))
+    def test_agent_tools_delegation_and_timeouts_follow_the_roster(self):
+        def front(name):
+            text = (m.SRC / "home/agents" / f"{name}.md").read_text()
+            return dict(line.split(": ", 1) for line in text.split("---", 2)[1].splitlines() if ": " in line)
+        write = "read, bash, edit, write, grep, find, ls, watch_process"
+        read = "read, grep, find, ls, bash"
+        expected = {
+            "worker": (write, "14400000"),
+            "senior": (write + ", subagent", "14400000"),
+            "senior-escalation": (write, "14400000"),
+            "reviewer": (read, "7200000"),
+            "scout": (read, "3600000"),
+        }
+        for name, (tools, timeout) in expected.items():
+            fields = front(name)
+            self.assertEqual(fields["tools"], tools, name)
+            self.assertEqual(fields["timeoutMs"], timeout, name)
+            self.assertEqual(fields["async"], "true", name)
+            self.assertEqual(fields["launcher"], "nopush", name)
+            self.assertEqual(fields["inheritGlobalContext"], "false", name)
+            # Only senior is a parent, and only of the three read/write leaves (depth 2).
+            if name == "senior":
+                self.assertEqual(fields["allowedAgents"], "scout, worker, reviewer")
+                self.assertEqual(fields["maxSubagentDepth"], "2")
+            else:
+                self.assertNotIn("subagent", fields["tools"].split(", "), name)
+                self.assertNotIn("allowedAgents", fields, name)
 
     def test_root_route_and_family_come_from_settings(self):
         agents = {"loopPi": {"modelFamily": {"provider": "example", "pattern": "^m7-[a-z]+$", "name": "m7"},
@@ -964,10 +1076,10 @@ class InstallerTests(unittest.TestCase):
                                "loop-pi", "x")
         self.assertIn("--provider example --model m7-large --thinking high", text)
         (prefix / "home/agents").mkdir()
-        (prefix / "home/agents/mapper.md").write_text("---\nname: mapper\nmodel: example/m7-small\n---\n")
+        (prefix / "home/agents/scout.md").write_text("---\nname: scout\nmodel: example/m7-small\n---\n")
         m.check_model_family(prefix)
-        (prefix / "home/agents/mapper.md").write_text("---\nname: mapper\nmodel: openai/gpt-6-sol\n---\n")
-        with self.assertRaisesRegex(m.InstallError, "mapper"):
+        (prefix / "home/agents/scout.md").write_text("---\nname: scout\nmodel: openai/gpt-6-sol\n---\n")
+        with self.assertRaisesRegex(m.InstallError, "scout"):
             m.check_model_family(prefix)
         (prefix / "home/settings.json").write_text(json.dumps({"loopPi": {"rootRoute": {"model": "x; rm -rf /"}}}))
         with self.assertRaises(m.InstallError):
@@ -1066,7 +1178,7 @@ class InstallerTests(unittest.TestCase):
         for name in m.AGENT_SET:
             (prefix / "home/agents" / f"{name}.md").write_text("---\n")
         m.check_agent_set(prefix)
-        (prefix / "home/agents/scout.md").write_text("---\n")
+        (prefix / "home/agents/mapper.md").write_text("---\n")
         with self.assertRaises(m.InstallError):
             m.check_agent_set(prefix)
 
@@ -1076,11 +1188,11 @@ class InstallerTests(unittest.TestCase):
         for name in m.AGENT_SET:
             (prefix / "home/agents" / f"{name}.md").write_text("---\nname: x\nmodel: openai/gpt-6-luna\n---\n")
         m.check_model_family(prefix)
-        (prefix / "home/agents/mapper.md").write_text("---\nname: mapper\nmodel: openai/gpt-5.6-luna\n---\n")
-        with self.assertRaisesRegex(m.InstallError, "mapper"):
+        (prefix / "home/agents/scout.md").write_text("---\nname: scout\nmodel: openai/gpt-5.6-luna\n---\n")
+        with self.assertRaisesRegex(m.InstallError, "scout"):
             m.check_model_family(prefix)
-        (prefix / "home/agents/mapper.md").write_text("---\nname: mapper\n---\nmodel: openai/gpt-6-luna\n")
-        with self.assertRaisesRegex(m.InstallError, "mapper"):
+        (prefix / "home/agents/scout.md").write_text("---\nname: scout\n---\nmodel: openai/gpt-6-luna\n")
+        with self.assertRaisesRegex(m.InstallError, "scout"):
             m.check_model_family(prefix)
 
     def test_keys_pi_writes_into_settings_are_kept_not_reported_as_drift(self):
@@ -1199,29 +1311,40 @@ class LauncherTests(unittest.TestCase):
         self.assertTrue(log[0].startswith("node run=none"))
 
 
-LANE_RETURN_V2 = """```lane-return
-{"v":2,"lane":"<id>","status":"complete|partial|blocked|failed","sha":"<full>|null","landed":true|false,
- "base":"<full SHA>","check":"<exact command>","exit":<int>|null,"tail":"<last <= 40 lines>",
- "ci":"<run id>|null","coderabbit":{"ran":true|false,"major":<n>,"unreviewed":<n>}|null,
- "questions":["..."]}
+LANE_RETURN_V3 = """```lane-return
+{"v":3,"lane":"<id>","task":"<ID>","status":"complete|partial|blocked|failed",
+ "base":"<full SHA>","worktree":"<abs path>","patch":"<abs path>","patch_sha256":"<hex>",
+ "check":"<exact command>","exit":<int>|null,"tail":"<last lines, at most 40>",
+ "coderabbit":{"ran":true|false,"major":<n>,"unreviewed":<n>}|null,
+ "questions":["<short; details in return.md>"]}
 ```"""
 
 
 class AgentReturnContractTests(unittest.TestCase):
-    """Every lane agent carries the lane-return v2 block itself: an overlay replaces
-    home/lane-policy.md at install time, so the policy cannot be where the contract lives. The
-    triager returns a `triage` block instead, which its own file defines."""
+    """Every agent carries the lane-return v3 block itself (SEAMS S5): an overlay replaces
+    home/lane-policy.md at install time, so the policy cannot be where the contract lives. Each
+    body stays short and points at the run's LANE.md."""
 
-    def test_every_lane_agent_carries_the_lane_return_v2_block(self):
+    def test_every_agent_carries_the_lane_return_v3_block(self):
         agents = sorted((HERE.parent / "home/agents").glob("*.md"))
-        self.assertTrue(agents)
+        self.assertEqual({path.stem for path in agents}, m.AGENT_SET)
         for path in agents:
             text = path.read_text()
             self.assertNotIn("Return exactly:", text, path.name)
-            if path.stem == "triager":
-                self.assertNotIn("```lane-return", text, path.name)
-                continue
-            self.assertEqual(text.count(LANE_RETURN_V2), 1, f"{path.name} lacks the exact lane-return v2 block")
+            self.assertEqual(text.count(LANE_RETURN_V3), 1, f"{path.name} lacks the exact lane-return v3 block")
+            self.assertNotIn('"v":2', text, path.name)
+            # loop-state's return cap reads these sentences: the whole serialized block must fit the
+            # native preview, and the exact check is never abbreviated.
+            self.assertRegex(text, r"serialized fenced block at most 1,800 UTF-16 code units\s+\(including fences,\s*newlines and JSON escapes\)", path.name)
+            self.assertIn("never abbreviate the exact check", text, path.name)
+            self.assertLessEqual(len(text.split("\n---\n", 1)[1].splitlines()), 40, f"{path.name} body is over 40 lines")
+
+    def test_working_roles_point_at_lane_md_and_no_agent_names_a_push_right(self):
+        for path in sorted((HERE.parent / "home/agents").glob("*.md")):
+            text = path.read_text()
+            self.assertIn("LANE.md", text, path.name)
+            self.assertNotIn("push-granted", text, path.name)
+            self.assertNotRegex(text, r"(?i)landing:\s*(lands-after-green|pushes branch)", path.name)
 
 
 if __name__ == "__main__":

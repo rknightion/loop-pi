@@ -32,7 +32,7 @@ function scaffold() {
   mkdirSync(join(repo, "codex"));
   mkdirSync(join(agentDir, "bin"));
   symlinkSync(BIN, join(agentDir, "bin", "loop-state"));
-  const report = join(repo, "codex", "report-camp-loop1.md");
+  const report = join(repo, "codex", "closeout-camp-loop1.md");
   const log = join(repo, "codex", "state-camp-loop1.jsonl");
   const stubDir = freshDir("loop-state-e2e-stub-");
   const stub = join(stubDir, "launch-stub.ts");
@@ -381,8 +381,8 @@ test("S6: a 3.37 MB block-first lane return reaches the root as a short preview 
     JSON.stringify({ packages: [PI_SUBAGENTS_PACKAGE_DIR], subagents: { agentExcludeDirs: ["~/.agents"] } }),
   );
   writeFileSync(
-    join(s.agentDir, "agents", "lane-worker.md"),
-    ["---", "name: lane-worker", "description: Test lane worker", "tools: bash", "extensions: []", `subagentOnlyExtensions: ${FAUX_EXTENSION}`, "model: faux/faux-1", "---", "", "worker"].join("\n"),
+    join(s.agentDir, "agents", "worker.md"),
+    ["---", "name: worker", "description: Test lane worker", "tools: bash", "extensions: []", `subagentOnlyExtensions: ${FAUX_EXTENSION}`, "model: faux/faux-1", "---", "", "worker"].join("\n"),
   );
   const block =
     '```lane-return\n{"v":2,"lane":"L9","status":"complete","sha":null,"landed":false,"base":"b","check":"just check","exit":0,"tail":"ok","ci":null,"coderabbit":null,"questions":[]}\n```';
@@ -391,7 +391,7 @@ test("S6: a 3.37 MB block-first lane return reaches the root as a short preview 
   const huge = `${block}\nFinished.\n${"gate output line 0123456789 abcdefghijklmnopqrstuvwxyz\n".repeat(62_000)}END_OF_RETURN`;
   assert.ok(Buffer.byteLength(huge) > 3_370_000);
   const fauxScript = writeFauxScript([
-    { match: "SPAWN_LANE", once: true, toolCalls: [{ name: "subagent", args: { agent: "lane-worker", task: "Lane: L9 · Task: T9 · Tier: routine\nObjective: CHILD_HUGE_MARKER" } }] },
+    { match: "SPAWN_LANE", once: true, toolCalls: [{ name: "subagent", args: { agent: "worker", task: "Lane: L9 · Task: T9 · Tier: routine\nObjective: CHILD_HUGE_MARKER" } }] },
     { match: "CHILD_HUGE_MARKER", once: true, text: huge },
     { match: ".*", text: "ok" },
   ]);

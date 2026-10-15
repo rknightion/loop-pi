@@ -1,5 +1,5 @@
 ---
-name: security-reviewer
+name: worker
 description: Offline installed-build smoke worker
 tools: bash
 extensions: []

@@ -28,7 +28,7 @@ test("three ignored nudges release the root and write a home/cwd-attributed inci
   const script = join(tmp, "faux-script.json");
   writeFileSync(script, JSON.stringify({ rules: [
     { match: "You are the root", once: true, text: "Still working.", stopReason: "stop" },
-    { match: "TURN ENDINGS", text: "Still working.", stopReason: "stop" },
+    { match: "## Turn endings", text: "Still working.", stopReason: "stop" },
   ] }));
   const rpc = startRpc(cwd, script, home, f.runDir);
   try {
@@ -181,7 +181,7 @@ test("an armed root that stops with plain text gets exactly one nudge, then rele
           stopReason: "stop",
         },
         {
-          match: "TURN ENDINGS",
+          match: "## Turn endings",
           text: "Nothing more to do here.\nPAUSED: waiting on the owner",
           stopReason: "stop",
         },

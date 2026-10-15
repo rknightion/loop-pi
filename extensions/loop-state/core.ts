@@ -38,12 +38,13 @@ export function parseBrief(text: unknown): Brief | null {
   return brief;
 }
 
-/** `report-<name>.md` becomes `state-<name>.jsonl` in the same directory. Null for any other name. */
-export function deriveLogPath(reportPath: string): string | null {
-  const slash = reportPath.lastIndexOf("/");
-  const dir = slash >= 0 ? reportPath.slice(0, slash + 1) : "";
-  const base = reportPath.slice(slash + 1);
-  const m = /^report-(.+)\.md$/.exec(base);
+/** Frozen v3 seam S3: `closeout-<name>.md` becomes `state-<name>.jsonl` in the same directory. Null
+ *  for any other name, including a v2 `report-<name>.md`. */
+export function deriveLogPath(closeoutPath: string): string | null {
+  const slash = closeoutPath.lastIndexOf("/");
+  const dir = slash >= 0 ? closeoutPath.slice(0, slash + 1) : "";
+  const base = closeoutPath.slice(slash + 1);
+  const m = /^closeout-(.+)\.md$/.exec(base);
   return m ? `${dir}state-${m[1]}.jsonl` : null;
 }
 
@@ -55,7 +56,7 @@ export function runIdFromText(text: string): string | null {
 
 const STATUSES = new Set(["complete", "partial", "blocked", "failed"]);
 
-/** The last ```lane-return block that holds a JSON object, v2 or legacy without `v`. */
+/** The last ```lane-return block that holds a JSON object: v3 (lane.md), v2, or legacy without `v`. */
 export function parseLaneReturn(text: string): Record<string, unknown> | null {
   const re = /```lane-return[^\n]*\n([\s\S]*?)```/g;
   let last: Record<string, unknown> | null = null;
@@ -64,7 +65,7 @@ export function parseLaneReturn(text: string): Record<string, unknown> | null {
       const parsed: unknown = JSON.parse(m[1]);
       if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
         const v = (parsed as Record<string, unknown>).v;
-        if (v === undefined || v === 2) last = parsed as Record<string, unknown>;
+        if (v === undefined || v === 2 || v === 3) last = parsed as Record<string, unknown>;
       }
     } catch {
       // A malformed block is ignored; the notify status stands.

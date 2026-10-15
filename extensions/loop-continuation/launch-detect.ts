@@ -1,44 +1,48 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { type AuditLine, parseAuditLine } from "./audit-grants.ts";
-import { type OpsLine, parseOpsLine } from "./ops-grants.ts";
 import { parseStandingLine, type StandingLine } from "./standing.ts";
 
-// Ported from the author's loop_launch.py (frozen spec: seam v2.1 section 1),
-// restricted to the "v2" (strict) report grammar. loop-pi has no pre-existing ACTIVATED_AT
-// migration to support (that machinery in loop_launch.py/fanout_session.py exists only to let
-// old Claude/Codex sessions predating the v2 report header format keep working); a brand-new
-// pi root always writes v2-shaped reports, so this port fixes mode to "v2" and drops the
-// legacy branch entirely. plan.md C7's own release condition ("the report counts (header
-// names this loop, written after the launch)") already assumes the v2 header check.
+// Ported from the author's loop_launch.py (frozen v3 seam S1: run identity and launch recognition).
+// A launch is operator text matching "You are the (campaign) root" with exactly one distinct
+// closeout token `codex/closeout-<name>-loop<N>.md`, or a bare path to an existing `launch-*.txt`
+// or `launch-*.md` whose contents match. v2 `report-*` tokens are not recognised.
 //
-// Also dropped: the "Do not pivot on receipt" mid-run report-path replacement (fanout_session
-// REPLACEMENT_RE) and the "Time budget" line. Neither is named in plan.md's C7 bullets, which
-// cover only arm / release / nudge / strike-cap.
+// Not ported: the "Do not pivot on receipt" mid-run closeout replacement. loop-pi never supported
+// it, and moving the closeout would move the state log derived from it (S3) under live lanes.
 
 export interface LaunchInfo {
-  /** Resolved report path (kept relative if no cwd/base was available at recognition time). */
+  /** Resolved closeout path (kept relative if no cwd/base was available at recognition time). The
+   *  key keeps its v2 name (S1). */
   report: string;
   loop: number | null;
-  /** ISO timestamp of the launch prompt, used to check the report postdates it. */
+  /** ISO timestamp of the launch prompt, used to check the closeout postdates it. */
   launchTs: string;
+  /** Always "v3" for a launch recognised by this build; absent in state armed by an older build. */
+  mode?: "v3";
+  /** sha256 of the recognised launch text (the launch file's bytes for a bare-path launch). */
+  launchSha256?: string;
+  /** The recognised text's optional `Time budget: <N>s|m|h` line, in seconds, or null. */
+  budget?: number | null;
 }
 
-/** A recognised launch plus what its text says about ops grants, audit grants, standing and its goal (never
+/** A recognised launch plus what its text says about audit grants, standing and its charter (never
  *  persisted as part of LaunchInfo). */
 export interface ParsedLaunch extends LaunchInfo {
-  opsLine: OpsLine;
+  /** Whether the text carries an `Ops grants:` line. v3 has no ops lane, so arming refuses one. */
+  hasOpsLine: boolean;
   auditLine: AuditLine;
   standingLine: StandingLine;
-  /** The goal file: the one `codex/goal-*-loop<N>.md` the launch names, else the report's sibling. */
-  goal: string;
+  /** The charter: the one `codex/charter-*-loop<N>.md` the launch names, else the closeout's sibling. */
+  charter: string;
 }
 
 const MARKER_RE = /\bYou are the (?:campaign )?root\b/;
 
-// <name>: "report-<anything>-loop<N>.md".
-const NAME_V2 = "report-[\\w.-]*-loop\\d+\\.md";
+// <name>: "closeout-<anything>-loop<N>.md".
+const NAME = "closeout-[\\w.-]*-loop\\d+\\.md";
 
-// Report-token prefixes: "/abs/.../codex/", "./codex/" or bare "codex/".
+// Closeout-token prefixes: "/abs/.../codex/", "./codex/" or bare "codex/".
 const PREFIX = "(?:/(?:[^\\s`'\"()]*/)*codex/|\\./codex/|codex/)";
 
 // Left boundary: start of text, whitespace, or one of ` ' " (
@@ -47,8 +51,12 @@ const PREFIX = "(?:/(?:[^\\s`'\"()]*/)*codex/|\\./codex/|codex/)";
 const LEFT = "(?:^|(?<=[\\s`'\"(]))";
 const RIGHT = "(?:$|(?=[\\s`'\")\\,;:])|(?=\\.(?:\\s|$)))";
 
-const TOKEN_RE = new RegExp(LEFT + "(" + PREFIX + NAME_V2 + ")" + RIGHT, "g");
-const GOAL_TOKEN_RE = new RegExp(LEFT + "(" + PREFIX + "goal-[\\w.-]*-loop\\d+\\.md)" + RIGHT, "g");
+const TOKEN_RE = new RegExp(LEFT + "(" + PREFIX + NAME + ")" + RIGHT, "g");
+const CHARTER_TOKEN_RE = new RegExp(LEFT + "(" + PREFIX + "charter-[\\w.-]*-loop\\d+\\.md)" + RIGHT, "g");
+const OPS_LINE_RE = /^Ops grants:/m;
+// Optional "Time budget: <N>s|m|h" line in the recognised launch text (S1 `budget`).
+const BUDGET_RE = /^\s*Time budget:\s*(\d+)\s*([smh])\b/im;
+const UNIT_SECONDS: Record<string, number> = { s: 1, m: 60, h: 3600 };
 const LOOP_SUFFIX_RE = /-loop(\d+)\.md$/;
 const BARE_LAUNCH_NAME_RE = /^launch-.*\.(?:txt|md)$/;
 
@@ -64,16 +72,36 @@ function findTokens(text: string, re: RegExp): string[] {
   return tokens;
 }
 
-function findReportTokens(text: string): string[] {
+function findCloseoutTokens(text: string): string[] {
   return findTokens(text, TOKEN_RE);
 }
 
-/** The goal a launch names (one distinct `codex/goal-*-loop<N>.md`), else the report's sibling goal file. */
-function goalFor(text: string, base: string | null, report: string): string {
-  const named = singleTarget(findTokens(text, GOAL_TOKEN_RE), base);
+/** The charter a launch names (one distinct `codex/charter-*-loop<N>.md`), else the closeout's sibling charter. */
+function charterFor(text: string, base: string | null, closeout: string): string {
+  const named = singleTarget(findTokens(text, CHARTER_TOKEN_RE), base);
   if (named) return named.report;
-  const slash = report.lastIndexOf("/");
-  return report.slice(0, slash + 1) + report.slice(slash + 1).replace(/^report-/, "goal-");
+  const slash = closeout.lastIndexOf("/");
+  return closeout.slice(0, slash + 1) + closeout.slice(slash + 1).replace(/^closeout-/, "charter-");
+}
+
+function budgetSeconds(text: string): number | null {
+  const m = BUDGET_RE.exec(text);
+  return m ? parseInt(m[1], 10) * UNIT_SECONDS[m[2].toLowerCase()] : null;
+}
+
+function finalize(target: { report: string; loop: number | null }, text: string, base: string | null, launchTs: string): ParsedLaunch {
+  return {
+    report: target.report,
+    loop: target.loop,
+    launchTs,
+    mode: "v3",
+    launchSha256: createHash("sha256").update(text, "utf8").digest("hex"),
+    budget: budgetSeconds(text),
+    hasOpsLine: OPS_LINE_RE.test(text),
+    auditLine: parseAuditLine(text),
+    standingLine: parseStandingLine(text),
+    charter: charterFor(text, base, target.report),
+  };
 }
 
 function extractLoop(token: string): number | null {
@@ -108,7 +136,7 @@ function resolveToken(token: string, base: string | null): string {
 }
 
 /** Resolve every token against `base`; return the single distinct target, or null for 0 or 2+.
- *  (`loop` is read from a report-shaped name; callers resolving a goal token use `report` only.) */
+ *  (`loop` is read from a closeout-shaped name; callers resolving a charter token use `report` only.) */
 function singleTarget(tokens: string[], base: string | null): { report: string; loop: number | null } | null {
   const absolutes = tokens.filter((t) => t.startsWith("/")).map(normalizePath);
   const targets = new Map<string, string>(); // resolved path -> original token (first wins)
@@ -127,7 +155,7 @@ function singleTarget(tokens: string[], base: string | null): { report: string; 
 
 function recognize(text: string, base: string | null): { report: string; loop: number | null } | null {
   if (!MARKER_RE.test(text)) return null;
-  return singleTarget(findReportTokens(text), base);
+  return singleTarget(findCloseoutTokens(text), base);
 }
 
 /** The parent of the nearest enclosing `codex/` directory, or null if there is none. */
@@ -160,10 +188,10 @@ export interface ReadFile {
 const defaultReadFile: ReadFile = (path) => readFileSync(path, "utf8");
 
 /**
- * Recognise a loop launch in `text` (seam v2.1 section 1, v2/strict mode only).
+ * Recognise a loop launch in `text` (frozen v3 seam S1).
  *
- * `cwd` resolves a relative report token pasted directly in `text`; `launchTs` is the ISO
- * timestamp of the prompt, used later to check the report postdates the launch. `readFile` lets
+ * `cwd` resolves a relative closeout token pasted directly in `text`; `launchTs` is the ISO
+ * timestamp of the prompt, used later to check the closeout postdates the launch. `readFile` lets
  * tests stub file reads for the bare `launch-*.txt`/`launch-*.md` path form.
  */
 export function parseLaunch(
@@ -175,17 +203,7 @@ export function parseLaunch(
   if (!text) return null;
 
   const direct = recognize(text, cwd || null);
-  if (direct !== null) {
-    return {
-      report: direct.report,
-      loop: direct.loop,
-      launchTs,
-      opsLine: parseOpsLine(text),
-      auditLine: parseAuditLine(text),
-      standingLine: parseStandingLine(text),
-      goal: goalFor(text, cwd || null, direct.report),
-    };
-  }
+  if (direct !== null) return finalize(direct, text, cwd || null, launchTs);
 
   const candidate = bareCandidatePath(text);
   if (candidate === null) return null;
@@ -201,19 +219,11 @@ export function parseLaunch(
   }
   if (typeof content !== "string") return null;
 
-  // A relative report inside the launch file resolves against the parent of the codex/
+  // A relative closeout inside the launch file resolves against the parent of the codex/
   // directory holding the launch file. Outside any codex/ directory there is no base, so the
-  // file must name an absolute report path.
+  // file must name an absolute closeout path.
   const base = codexDirParent(launchPath);
   const inner = recognize(content, base);
   if (inner === null || !inner.report.startsWith("/")) return null;
-  return {
-    report: inner.report,
-    loop: inner.loop,
-    launchTs,
-    opsLine: parseOpsLine(content),
-    auditLine: parseAuditLine(content),
-    standingLine: parseStandingLine(content),
-    goal: goalFor(content, base, inner.report),
-  };
+  return finalize(inner, content, base, launchTs);
 }

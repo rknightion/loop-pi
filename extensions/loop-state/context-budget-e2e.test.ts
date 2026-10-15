@@ -18,15 +18,16 @@ const append = (log: string, ...args: string[]) => execFileSync(BIN, ["append", 
 
 for (const outcome of ["success", "failure", "abort"] as const) {
   test(`80% native same-session state compaction: ${outcome}`, { timeout: 60_000 }, async () => {
-    const s = loopFixture({ rootModel: "faux/faux-1" });
-    const originalGoal = readFileSync(s.goal, "utf8");
+    const s = loopFixture({ root: "faux/faux-1" });
+    const originalGoal = readFileSync(s.charter, "utf8");
     writeFileSync(join(s.agentDir, "settings.json"), JSON.stringify({ retry: { enabled: false }, packages: [PI_SUBAGENTS_PACKAGE_DIR], defaultProjectTrust: "never", subagents: { agentExcludeDirs: ["~/.agents"] } }));
-    // Real authority hash checked at arm, plus an explicit consumed allowance in the frozen Goal.
-    const opsPath = join(s.repo, "codex", "ops.json");
-    const ops = JSON.stringify({ v: 1, ops: [] });
-    writeFileSync(opsPath, ops);
-    const goal = originalGoal + `ops: ${opsPath} sha256=${hash(ops)}\n\n## Decisions\nAttempt ceiling 4; T-1 consumed 2; remaining 2.\n`;
-    writeFileSync(s.goal, goal);
+    // Real authority hash checked at arm, plus an explicit consumed allowance in the frozen charter.
+    const standingPath = join(s.repo, "codex", "standing.md");
+    const standing = "# Standing authority\n";
+    writeFileSync(standingPath, standing);
+    const goal = originalGoal.replace("standing:   none", `standing:   ${standingPath} sha256=${hash(standing)}`) +
+      "\n## Decisions\nAttempt ceiling 4; T-1 consumed 2; remaining 2.\n";
+    writeFileSync(s.charter, goal);
     const observer = join(freshDir(), "observer.ts");
     const facts = join(s.repo, "facts.jsonl");
     writeFileSync(observer, `import { appendFileSync } from "node:fs";
@@ -50,7 +51,7 @@ for (const outcome of ["success", "failure", "abort"] as const) {
     };
     try {
       // Arm first, then populate actual CLI state, not a query-launch stub or a fake SDK context.
-      session.send({ type: "prompt", id: "arm", message: s.launch + `\nOps grants: ${opsPath} sha256=${hash(ops)}` });
+      session.send({ type: "prompt", id: "arm", message: s.launch + `\nStanding: ${standingPath} sha256=${hash(standing)}` });
       await session.waitFor(e => e.type === "agent_settled");
       const before = await rpc("get_state", "identity-before");
       append(s.log, "admit", "task=T-1", "source=envelope", "owned=a/**", "accept=fixture", "tier=routine");
@@ -85,21 +86,21 @@ for (const outcome of ["success", "failure", "abort"] as const) {
       assert.equal(session.events.filter(e => e.type === "tool_execution_start").length, 0, "no child autosponsor");
       const frozen = (await rpc("get_entries", "entries")).entries.filter((e: any) => e.customType === "loop-continuation-state").at(-1).data;
       assert.equal(frozen.rootContext.goalText, goal);
-      assert.equal(frozen.rootContext.opsSha256, hash(ops));
-      assert.deepEqual(frozen.ops, JSON.parse(ops), "successful or failed compaction never changes frozen grants");
+      assert.equal(frozen.rootContext.opsSha256, null, "v3 has no ops lane");
+      assert.equal(frozen.standingSha256, hash(standing), "successful or failed compaction never changes frozen authority");
       if (outcome === "success") {
         assert.ok(terminal.result, "native compaction persisted a real result");
         const summary = terminal.result.summary;
         assert.ok(Buffer.byteLength(summary) <= 32768);
         assert.ok(summary.includes(goal), "the accepted Goal, including consumed allowance, survives exactly");
         assert.match(summary, /implementation_dispatches.*T-1.*2/s);
-        assert.ok(summary.includes(hash(ops)), "frozen authority hash survives");
+        assert.ok(summary.includes(hash(standing)), "frozen authority hash survives");
         const projection = await rpc("get_messages", "projection");
         assert.ok(Buffer.byteLength(JSON.stringify(projection.messages)) < 50_000, "real native model projection is bounded");
         const rawBytes = readFileSync(before.sessionFile).length;
         assert.ok(rawBytes > 450_000, "full previous history stays on disk");
         // Editing the source Goal cannot silently replace the frozen Goal on a later compaction.
-        writeFileSync(s.goal, originalGoal);
+        writeFileSync(s.charter, originalGoal);
         session.send({ type: "prompt", id: "small", message: "short follow-up" });
         await session.waitFor(e => e.type === "agent_settled" && session.events.filter(x => x.type === "agent_settled").length === 3);
         const contexts = readFileSync(facts, "utf8").trim().split("\n").map(l => JSON.parse(l)).filter(r => r.type === "context");
@@ -136,7 +137,7 @@ for (const outcome of ["success", "failure", "abort"] as const) {
 // Prove native transport already meets the preview requirement; add no wrapper.
 for (const explicitOutput of [true, false]) {
 test(`native async public subagent return previews 2000 characters and retains the complete normalized package artifact: ${explicitOutput ? "explicit" : "default"}`, { timeout: 90_000 }, async (t) => {
-  const s = loopFixture({ rootModel: "faux/faux-1" });
+  const s = loopFixture({ root: "faux/faux-1" });
   mkdirSync(join(s.agentDir, "agents"));
   writeFileSync(join(s.agentDir, "settings.json"), JSON.stringify({ packages: [PI_SUBAGENTS_PACKAGE_DIR], defaultProjectTrust: "never", subagents: { agentExcludeDirs: ["~/.agents"] } }));
   writeFileSync(join(s.agentDir, "agents", "lane-worker.md"), ["---", "name: lane-worker", "description: Fixture", "tools: read", "model: faux/faux-1", "extensions: []", `subagentOnlyExtensions: ${FAUX_EXTENSION}`, "---", "Fixture"].join("\n"));
@@ -214,7 +215,7 @@ test(`native async public subagent return previews 2000 characters and retains t
 // Regression from the security proof: native manual compaction with a live child emits
 // subagent-compaction-resume. Defer until native activity positively reaches zero.
 test("live native child defers without consumption, completion wakes, then the same root compacts", { timeout: 120_000 }, async () => {
-  const s = loopFixture({ rootModel: "faux/faux-1" });
+  const s = loopFixture({ root: "faux/faux-1" });
   mkdirSync(join(s.agentDir, "agents"));
   writeFileSync(join(s.agentDir, "settings.json"), JSON.stringify({ retry: { enabled: false }, packages: [PI_SUBAGENTS_PACKAGE_DIR], defaultProjectTrust: "never", subagents: { agentExcludeDirs: ["~/.agents"] } }));
   writeFileSync(join(s.agentDir, "agents", "lane-worker.md"), ["---", "name: lane-worker", "description: Fixture", "tools: read", "model: faux/faux-1", "extensions: []", `subagentOnlyExtensions: ${FAUX_EXTENSION}`, "---", "Fixture"].join("\n"));
@@ -262,7 +263,7 @@ test("live native child defers without consumption, completion wakes, then the s
     const afterRows = readFileSync(s.log, "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line));
     assert.deepEqual(afterRows.filter(row => ["admit", "dispatch", "park"].includes(row.ev)), beforeRows.filter(row => ["admit", "dispatch", "park"].includes(row.ev)));
     assert.equal(afterRows.find(row => row.ev === "return" && row.run === dispatch.run)?.status, "complete");
-    assert.ok(terminal.result.summary.includes(readFileSync(s.goal, "utf8")), "accepted Goal remains exact");
+    assert.ok(terminal.result.summary.includes(readFileSync(s.charter, "utf8")), "accepted charter remains exact");
     assert.ok(terminal.result.summary.includes(dispatch.run), "actual dispatched identity survives");
     assert.match(terminal.result.summary, /T-2.*parked/s, "parked state survives");
     assert.ok(session.events.some(e => (e.message as any)?.customType === "subagent-notify"), "normal completion notification remains delivered");

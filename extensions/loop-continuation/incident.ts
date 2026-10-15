@@ -3,7 +3,6 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export const CHAIN_EXHAUSTED_CLASS = "loop-continuation-chain-exhausted";
-export const OPS_GRANTS_REJECTED_CLASS = "loop-ops-grants-rejected";
 
 /** Incident bookkeeping must never trap the session. A `subdir` keeps the file out of the top-level watchdog sweep. */
 export function writeIncident(

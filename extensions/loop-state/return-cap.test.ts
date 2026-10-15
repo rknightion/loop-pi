@@ -74,7 +74,7 @@ test("pinned native preview exposes the old allowed 40-line v2 return cut mid-bl
 
 for (const status of ["failed", "partial"]) {
   test(`maximal producer-allowed ${status} return survives the pinned native preview for both consumers`, () => {
-    const policy = readFileSync(new URL("lane-worker.md", agentDir), "utf8");
+    const policy = readFileSync(new URL("worker.md", agentDir), "utf8");
     const budget = serializedBudget(policy);
     const block = maximalReturn(status, budget);
     for (const mode of ["artifact", "saved", "summary"] as const) {
@@ -92,7 +92,7 @@ for (const status of ["failed", "partial"]) {
 }
 
 test("every pi producer shares the serialized preview budget; triage stays a distinct block", () => {
-  const reference = serializedBudget(readFileSync(new URL("lane-worker.md", agentDir), "utf8"));
+  const reference = serializedBudget(readFileSync(new URL("worker.md", agentDir), "utf8"));
   assert.notEqual(reference, null);
   for (const name of readdirSync(agentDir).filter((name) => name.endsWith(".md"))) {
     const policy = readFileSync(new URL(name, agentDir), "utf8");
@@ -408,7 +408,7 @@ for (const [label, trailing] of [
   ["array", "```lane-return\n[]\n```"],
   ["null", "```lane-return\nnull\n```"],
   ["primitive", "```lane-return\n42\n```"],
-  ["unsupported version", '```lane-return\n{"v":3,"status":"complete","exit":0}\n```'],
+  ["unsupported version", '```lane-return\n{"v":4,"status":"complete","exit":0}\n```'], // v3 (lane.md) is supported
   ["unclosed fence", "```lane-return\n{broken"],
 ]) {
   for (const boundary of ["root", "lane"]) {

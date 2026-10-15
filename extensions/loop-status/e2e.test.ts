@@ -55,7 +55,7 @@ test("timers, watchers' next deadline, the nudge chain and the heartbeat age sho
     const heartbeatAt = new Date(Date.now() - 125_000).toISOString();
     writeFileSync(join(codex, "state-demo-loop1.jsonl"), `{"ev":"open","at":"2026-10-08T00:00:00Z"}\n{"ev":"heartbeat","at":"${heartbeatAt}"}\n`);
     for (const [i, message] of [
-      `launch ${join(codex, "report-demo-loop1.md")}`,
+      `launch ${join(codex, "closeout-demo-loop1.md")}`,
       "nudges 2",
       `timer ${new Date(Date.now() + 3_600_000).toISOString()}`,
     ].entries()) {
@@ -75,7 +75,7 @@ test("a goal's slot cap shows as lanes over cap once the launch carries one", as
   const pi = start();
   try {
     await pi.waitFor(isStatus);
-    for (const [i, message] of ["launch /tmp/none/codex/report-demo-loop1.md", "cap 4"].entries()) {
+    for (const [i, message] of ["launch /tmp/none/codex/closeout-demo-loop1.md", "cap 4"].entries()) {
       pi.send({ id: `k${i}`, type: "prompt", message });
       await pi.waitForResponse(`k${i}`);
     }

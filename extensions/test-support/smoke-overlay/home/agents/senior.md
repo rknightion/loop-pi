@@ -1,5 +1,5 @@
 ---
-name: megasuper-worker
+name: senior
 description: Offline installed-build smoke worker
 tools: bash
 extensions: []

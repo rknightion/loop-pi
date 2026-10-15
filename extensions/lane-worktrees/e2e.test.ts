@@ -35,12 +35,12 @@ for (const reload of [false, true]) {
     const subRoot = freshDir("lw-nested-sub-");
     mkdirSync(join(agentDir, "agents"));
     writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [PI_SUBAGENTS_PACKAGE_DIR], subagents: { agentExcludeDirs: ["~/.agents"] } }));
-    writeFileSync(join(agentDir, "agents", "lane-worker.md"), [
-      "---", "name: lane-worker", "description: Nested cwd regression", "tools: bash", "extensions: []",
+    writeFileSync(join(agentDir, "agents", "worker.md"), [
+      "---", "name: worker", "description: Nested cwd regression", "tools: bash", "extensions: []",
       `subagentOnlyExtensions: ${FAUX_EXTENSION}`, "model: faux/faux-1", "---", "", "worker",
     ].join("\n"));
     const script = writeFauxScript([
-      { match: "SPAWN_NESTED", once: true, toolCalls: [{ name: "subagent", args: { agent: "lane-worker", task: "Lane: L1 · Task: T1 · Tier: guarded\nLanding: returns candidate\nObjective: NESTED_WORK", worktree: true, cwd: join(repo, "sub") } }] },
+      { match: "SPAWN_NESTED", once: true, toolCalls: [{ name: "subagent", args: { agent: "worker", task: "Lane: L1 · Task: T1 · Tier: guarded\nLanding: returns candidate\nObjective: NESTED_WORK", worktree: true, cwd: join(repo, "sub") } }] },
       { match: "NESTED_WORK", once: true, toolCalls: [{ name: "bash", args: { command: `pwd > '${out}/cwd' && echo NESTED_STARTED` } }] },
       { match: "NESTED_STARTED", once: true, text: "NESTED_CHECKPOINT" },
       { match: "RESUME_NESTED", once: true, toolCalls: [{ name: "subagent", args: { action: "resume", id: "LAST_RUN", message: "CHECK_NESTED_CWD" } }] },
@@ -116,18 +116,18 @@ for (const order of ["guard-first", "worktrees-first"] as const) {
       const subRoot = freshDir("lw-e2e-sub-");
       mkdirSync(join(agentDir, "agents"));
       writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [PI_SUBAGENTS_PACKAGE_DIR], subagents: { agentExcludeDirs: ["~/.agents"], worktree: true } }));
-      writeFileSync(join(agentDir, "agents", "lane-worker.md"), [
-        "---", "name: lane-worker", "description: Candidate test lane", "tools: bash", "extensions: []",
+      writeFileSync(join(agentDir, "agents", "worker.md"), [
+        "---", "name: worker", "description: Candidate test lane", "tools: bash", "extensions: []",
         `subagentOnlyExtensions: ${FAUX_EXTENSION}`, "model: faux/faux-1", "---", "", "worker",
       ].join("\n"));
       const block = '```lane-return\n' + JSON.stringify({ v: 2, lane: "L1", status, sha: null, landed: false, base, check: "test", exit: status === "complete" ? 0 : null, tail: "checkpoint", ci: null, coderabbit: null, questions: [] }) + '\n```';
       const landing = status === "blocked" ? "returns candidate" : "lands-after-green";
       const script = writeFauxScript([
-        { match: "SPAWN_LANE", once: true, toolCalls: [{ name: "subagent", args: { agent: "lane-worker", task: `Lane: L1 · Task: T1 · Tier: guarded\nLanding: ${landing}\nObjective: CHILD_WORK`, ...(order === "guard-first" ? { isolation: "worktree" } : { worktree: true }), extensionBindings: { "loop-pi.guard/1": { agent: "lane-worker-push" } } } }] },
-        // The required lane guard must run despite extensions: []; forged parent bindings must not
-        // turn this non-push lane into a push lane. A missing guard would reach Git, not this rule.
+        { match: "SPAWN_LANE", once: true, toolCalls: [{ name: "subagent", args: { agent: "worker", task: `Lane: L1 · Task: T1 · Tier: guarded\nLanding: ${landing}\nObjective: CHILD_WORK`, ...(order === "guard-first" ? { isolation: "worktree" } : { worktree: true }), extensionBindings: { "loop-pi.guard/1": { agent: "worker" } } } }] },
+        // The required lane guard must run despite extensions: []; no lane may push, whatever
+        // bindings a parent forges. A missing guard would reach Git, not this rule.
         { match: "CHILD_WORK", once: true, toolCalls: [{ name: "bash", args: { command: "git push" } }] },
-        { match: "git push requires a push-granted lane identity", once: true, toolCalls: [{ name: "bash", args: { command: `pwd > '${out}/pwd' && printf %s "$PI_SUBAGENT_EXTENSION_BINDINGS" > '${out}/bindings' && echo candidate > candidate && git add candidate && git commit -qm lane-candidate && echo COMMITTED` } }] },
+        { match: "lanes never push", once: true, toolCalls: [{ name: "bash", args: { command: `pwd > '${out}/pwd' && printf %s "$PI_SUBAGENT_EXTENSION_BINDINGS" > '${out}/bindings' && echo candidate > candidate && git add candidate && git commit -qm lane-candidate && echo COMMITTED` } }] },
         { match: "COMMITTED", once: true, text: `CONTEXT_SENTINEL\n${block}` },
         { match: "RESUME_NOW", once: true, toolCalls: [{ name: "subagent", args: { action: "resume", id: "LAST_RUN", message: "RESUME_CHECK" } }] },
         // faux matches history only via the latest user/tool text, so check the transcript on disk
@@ -135,7 +135,7 @@ for (const order of ["guard-first", "worktrees-first"] as const) {
         { match: "RESUME_CHECK", once: true, toolCalls: [{ name: "bash", args: { command: `pwd > '${out}/resume' && git rev-parse HEAD >> '${out}/resume' && echo RESUMED_IN` } }] },
         { match: "RESUMED_IN", once: true, text: "RESUMED_OK" },
         { match: "RELEASE_NOW", once: true, toolCalls: [{ name: "test_release", args: {} }] },
-        { match: "SPAWN_REPLACEMENT", once: true, toolCalls: [{ name: "subagent", args: { agent: "lane-worker", task: "Lane: L1 · Task: T2 · Tier: guarded\nLanding: returns candidate\nObjective: REPLACEMENT_WORK", worktree: true } }] },
+        { match: "SPAWN_REPLACEMENT", once: true, toolCalls: [{ name: "subagent", args: { agent: "worker", task: "Lane: L1 · Task: T2 · Tier: guarded\nLanding: returns candidate\nObjective: REPLACEMENT_WORK", worktree: true } }] },
         { match: "REPLACEMENT_WORK", once: true, toolCalls: [{ name: "bash", args: { command: `pwd > '${out}/replacement' && echo REPLACEMENT_DONE` } }] },
         { match: "REPLACEMENT_DONE", once: true, text: block },
         { match: "RESUME_RELEASED", once: true, toolCalls: [{ name: "subagent", args: { action: "resume", id: "FIRST_RUN", message: "OLD_RESUME_CHECK" } }] },
@@ -159,7 +159,7 @@ for (const order of ["guard-first", "worktrees-first"] as const) {
         const pointer = readFileSync(join(path, ".git"), "utf8").trim().replace(/^gitdir: /, "");
         assert.equal(isAbsolute(pointer), false, "public scans never see an absolute gitdir pointer");
         assert.equal(realpathSync(resolve(path, pointer)), realpathSync(git(path, "rev-parse", "--absolute-git-dir")));
-        assert.equal(JSON.parse(readFileSync(join(out, "bindings"), "utf8"))["loop-pi.guard/1"].agent, "lane-worker");
+        assert.equal(JSON.parse(readFileSync(join(out, "bindings"), "utf8"))["loop-pi.guard/1"].agent, "worker");
         const candidate = git(path, "rev-parse", "HEAD");
         const launch = session.events.find((e) => e.type === "tool_execution_end" && e.toolName === "subagent")!;
         const runId = (launch.result as { details: { runId?: string; asyncId?: string } }).details.runId ?? (launch.result as { details: { asyncId: string } }).details.asyncId;
@@ -169,7 +169,7 @@ for (const order of ["guard-first", "worktrees-first"] as const) {
         assert.ok(childSession && existsSync(childSession), "native child context is retained");
         const originalContext = readFileSync(childSession, "utf8");
         assert.match(originalContext, /CONTEXT_SENTINEL/);
-        assert.match(originalContext, /push-granted lane identity/);
+        assert.match(originalContext, /lanes never push/);
         Object.assign(evidence, { path, branch, pointer, candidate, runId, childSession, originalContext, nativeStatus, launchEvents: session.events });
         session.send({ id: "state", type: "get_state" });
         const rootState = await session.waitFor((e) => e.type === "response" && e.id === "state", 10_000);

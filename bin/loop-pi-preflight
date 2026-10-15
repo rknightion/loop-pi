@@ -21,29 +21,11 @@ import subprocess
 import sys
 
 C3_AGENTS = {
-    "mapper",
-    "mapper-deep",
-    "gate-runner",
-    "lane-worker",
-    "lane-worker-push",
-    "lane-worker-low",
-    "lane-worker-low-push",
-    "lane-worker-retry",
-    "lane-worker-retry-push",
-    "complex-worker",
-    "complex-worker-push",
-    "super-worker",
-    "super-worker-push",
-    "megasuper-worker",
-    "megasuper-worker-push",
+    "worker",
+    "senior",
+    "senior-escalation",
     "reviewer",
-    "reviewer-high",
-    "security-reviewer",
-    "rescue-astra-medium",
-    "rescue-astra",
-    "ops",
-    "ops-probe",
-    "triager",
+    "scout",
 }
 
 FRONTMATTER_NAME = re.compile(r"^name:\s*(.+?)\s*$", re.MULTILINE)

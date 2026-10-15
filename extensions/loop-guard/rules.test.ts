@@ -10,6 +10,7 @@ import {
   evaluateWatchProcess,
   hasUnextractedSubstitution,
   isAsyncSubagentLaunch,
+  isLoopControlPath,
   parseCommand,
   type Role,
 } from "./rules.ts";
@@ -183,7 +184,6 @@ const EVERY_ROLE_DENY: { name: string; command: string; roles: Role[] }[] = [
 ];
 
 const EVERY_ROLE_ALLOW: { name: string; command: string }[] = [
-  { name: "plain non-force push", command: "git push origin main" },
   { name: "git add explicit pathspec", command: "git add foo.ts bar.ts" },
   { name: "git commit with explicit pathspec", command: "git commit -m msg -- foo.ts" },
   { name: "redirect both streams is not backgrounding", command: "some-cmd &> out.log" },
@@ -211,10 +211,13 @@ const EVERY_ROLE_ALLOW: { name: string; command: string }[] = [
     name: "a `!`-shell git alias's trailing argument is quoted, not re-split on embedded shell metacharacters",
     command: 'git -c "alias.wtf=!echo hi" wtf "a;git push --force origin main"',
   },
-  {
-    name: "plain non-force push with an unrelated combined short flag cluster",
-    command: "git push -qu origin main",
-  },
+];
+
+// Push authority (SEAMS S6): only the root pushes. Every plain, non-force push below is allowed for
+// the root and refused for a lane; before v3 a lane without a push grant was the only refusal.
+const ROOT_ONLY_PUSH: { name: string; command: string }[] = [
+  { name: "plain non-force push", command: "git push origin main" },
+  { name: "plain non-force push with an unrelated combined short flag cluster", command: "git push -qu origin main" },
   {
     // CodeRabbit finding: after `--`, git push treats every remaining token
     // as a refspec, never as an option (verified live: `git push origin --
@@ -222,7 +225,22 @@ const EVERY_ROLE_ALLOW: { name: string; command: string }[] = [
     name: "git push -- <refspec> : a refspec literally named -f after -- is not the force flag",
     command: "git push origin -- -f",
   },
+  { name: "unterminated quote with a plain push", command: "git push origin main 'x" },
+  { name: "a git alias body that cannot be lexed", command: `git -c "alias.up=push '" up origin main` },
 ];
+
+for (const c of ROOT_ONLY_PUSH) {
+  test(`root-only push: ${c.name} [root allowed]`, () => {
+    const decision = evaluateBashCommand(c.command, "root");
+    assert.equal(decision.block, false, c.command);
+    assert.equal(decision.warning, undefined, c.command);
+  });
+  test(`root-only push: ${c.name} [lane refused]`, () => {
+    const decision = evaluateBashCommand(c.command, "lane");
+    assert.equal(decision.block, true, c.command);
+    assert.match(decision.reason ?? "", /lanes never push/, c.command);
+  });
+}
 
 for (const c of EVERY_ROLE_DENY) {
   for (const role of c.roles) {
@@ -296,6 +314,9 @@ const LANE_ONLY_DENY: { name: string; command: string }[] = [
   { name: "write into codex/ops-*", command: "echo '{}' > codex/ops-c-loop1.json" },
   { name: "append into codex/state-*", command: "echo x 2>/dev/null >> repo/codex/state-c-loop1.jsonl" },
   { name: "tee into codex/goal-*", command: "tee codex/goal-c-loop1.md < /dev/null" },
+  { name: "write into codex/charter-* (v3 run file)", command: "echo x > codex/charter-2026-10-04-loop1.md" },
+  { name: "write into codex/launch-* (v3 run file)", command: "cp /tmp/l.txt codex/launch-2026-10-04-loop1.txt" },
+  { name: "write into codex/closeout-* (v3 run file)", command: "printf done >> repo/codex/closeout-2026-10-04-loop1.md" },
 ];
 
 for (const c of LANE_ONLY_DENY) {
@@ -426,7 +447,6 @@ const UNPARSEABLE_ALLOW: { name: string; command: string }[] = [
   { name: "unterminated quote, harmless", command: "echo 'unterminated" },
   { name: "unterminated heredoc, harmless", command: "cat <<EOF\nhello" },
   { name: "unterminated quote mentioning ssh as data", command: "grep ssh ~/.ssh/config 'x" },
-  { name: "unterminated quote with a plain push", command: "git push origin main 'x" },
   { name: "unterminated quote with R&D in prose", command: "echo 'R&D notes and more" },
 ];
 
@@ -678,13 +698,12 @@ test("git alias body that cannot be lexed: fallback scan blocks a force push ins
   assert.equal(evaluateBashCommand(command, "lane").block, true);
   assert.equal(evaluateBashCommand(command, "root").block, true);
 });
-test("git alias body that cannot be lexed: harmless body is allowed without a warning", () => {
+test("git alias body that cannot be lexed: a plain push body is allowed for the root without a warning, refused for a lane", () => {
   const command = `git -c "alias.up=push '" up origin main`;
-  for (const role of ["root", "lane"] as Role[]) {
-    const decision = evaluateBashCommand(command, role);
-    assert.equal(decision.block, false, role);
-    assert.equal(decision.warning, undefined, role);
-  }
+  const root = evaluateBashCommand(command, "root");
+  assert.equal(root.block, false);
+  assert.equal(root.warning, undefined);
+  assert.equal(evaluateBashCommand(command, "lane").block, true);
 });
 
 // Brace groups, subshells and process substitution are parsed (owner
@@ -788,78 +807,63 @@ test("hasUnextractedSubstitution: true for a raw backtick", () => {
 // workflow fields, watch_process while active, bg_wait.
 // ---------------------------------------------------------------------------
 
-test("C3_AGENTS matches SEAMS.md exactly", () => {
-  assert.deepEqual(
-    [...C3_AGENTS].sort(),
-    [
-      "complex-worker",
-      "complex-worker-push",
-      "super-worker",
-      "super-worker-push",
-      "megasuper-worker",
-      "megasuper-worker-push",
-      "gate-runner",
-      "lane-worker",
-      "lane-worker-push",
-      "lane-worker-retry",
-      "lane-worker-retry-push",
-      "mapper",
-      "mapper-deep",
-      "rescue-astra",
-      "rescue-astra-medium",
-      "reviewer",
-      "reviewer-high",
-      "security-reviewer",
-      "lane-worker-low",
-      "lane-worker-low-push",
-      "triager",
-      "ops",
-      "ops-probe",
-    ].sort(),
-  );
+test("C3_AGENTS is the v3 roster exactly", () => {
+  assert.deepEqual([...C3_AGENTS].sort(), ["reviewer", "scout", "senior", "senior-escalation", "worker"]);
 });
 
 for (const agent of C3_AGENTS) {
-  test(`subagent allow: launching in-C3 agent '${agent}'`, () => {
+  test(`subagent allow: launching in-set agent '${agent}'`, () => {
     const decision = evaluateSubagentCall({ agent, task: "do the thing" });
     assert.equal(decision.block, false);
   });
 }
 
-test("subagent deny: agent outside C3 set", () => {
-  const decision = evaluateSubagentCall({ agent: "scout", task: "recon" });
+test("subagent deny: agent outside the set", () => {
+  const decision = evaluateSubagentCall({ agent: "mapper", task: "recon" });
   assert.equal(decision.block, true);
-  assert.match(decision.reason ?? "", /scout/);
+  assert.match(decision.reason ?? "", /mapper/);
 });
 
-test("subagent deny: builtin worker/oracle also outside C3", () => {
-  for (const agent of ["worker", "oracle", "reviewer-general", "delegate"]) {
+test("subagent deny: every v2 agent, the push twins included, is outside the set", () => {
+  for (const agent of [
+    "lane-worker", "lane-worker-push", "lane-worker-low", "lane-worker-low-push", "lane-worker-retry", "lane-worker-retry-push",
+    "complex-worker", "complex-worker-push", "super-worker", "super-worker-push", "megasuper-worker", "megasuper-worker-push",
+    "rescue-astra", "rescue-astra-medium", "gate-runner", "mapper", "mapper-deep", "reviewer-high", "security-reviewer",
+    "triager", "ops", "ops-probe", "poller", "poller-high",
+  ]) {
+    const decision = evaluateSubagentCall({ agent, task: "do it" });
+    assert.equal(decision.block, true, `expected block for agent '${agent}'`);
+  }
+});
+
+test("subagent deny: builtin oracle and delegate are outside the set", () => {
+  for (const agent of ["oracle", "reviewer-general", "delegate"]) {
     const decision = evaluateSubagentCall({ agent, task: "do it" });
     assert.equal(decision.block, true, `expected block for agent '${agent}'`);
   }
 });
 
 test("subagent deny: machine field set", () => {
-  const decision = evaluateSubagentCall({ agent: "lane-worker", task: "x", machine: "workmac" });
+  const decision = evaluateSubagentCall({ agent: "worker", task: "x", machine: "workmac" });
   assert.equal(decision.block, true);
 });
 
 test("subagent deny: acceptance field set", () => {
-  const decision = evaluateSubagentCall({ agent: "lane-worker", task: "x", acceptance: { level: "checked" } });
+  const decision = evaluateSubagentCall({ agent: "worker", task: "x", acceptance: { level: "checked" } });
   assert.equal(decision.block, true);
 });
 
 test("subagent deny: gate field set", () => {
-  const decision = evaluateSubagentCall({ agent: "lane-worker", task: "x", gate: "npm test" });
+  const decision = evaluateSubagentCall({ agent: "worker", task: "x", gate: "npm test" });
   assert.equal(decision.block, true);
 });
 
 test("subagent deny: pi-subagents 0.77.0 `options` carrying acceptance, gate or machine", () => {
   // The package flattens `options` only inside execute; the guard must see through it.
   const shapes: Record<string, unknown>[] = [
-    { agent: "lane-worker", task: "x", options: { acceptance: { verify: [{ command: "true" }] } } },
-    { agent: "lane-worker", task: "x", options: { gate: "npm test" } },
-    { agent: "lane-worker", task: "x", options: { machine: "workmac" } },
+    { agent: "worker", task: "x", options: { acceptance: { verify: [{ command: "true" }] } } },
+    { agent: "worker", task: "x", options: { gate: "npm test" } },
+    { agent: "worker", task: "x", options: { machine: "workmac" } },
   ];
   for (const input of shapes) {
     assert.equal(evaluateSubagentCall(input).block, true, JSON.stringify(input));
@@ -868,16 +872,16 @@ test("subagent deny: pi-subagents 0.77.0 `options` carrying acceptance, gate or 
 
 test("subagent deny: a present `options` that is not a plain object", () => {
   for (const options of [null, [], "acceptance", 1]) {
-    const decision = evaluateSubagentCall({ agent: "lane-worker", task: "x", options });
+    const decision = evaluateSubagentCall({ agent: "worker", task: "x", options });
     assert.equal(decision.block, true, JSON.stringify(options));
     assert.match(decision.reason ?? "", /options must be a plain object/);
   }
-  assert.equal(evaluateSubagentCall({ agent: "lane-worker", task: "x", options: { context: "fresh" } }).block, false);
+  assert.equal(evaluateSubagentCall({ agent: "worker", task: "x", options: { context: "fresh" } }).block, false);
 });
 
 test("subagent deny: a call whose input is not a plain object fails closed", () => {
-  class Shaped { agent = "lane-worker"; task = "x"; acceptance = { verify: [{ command: "true" }] }; }
-  for (const input of [null, [], "lane-worker", 1, new Shaped()]) {
+  class Shaped { agent = "worker"; task = "x"; acceptance = { verify: [{ command: "true" }] }; }
+  for (const input of [null, [], "worker", 1, new Shaped()]) {
     const decision = evaluateSubagentCall(input as never);
     assert.equal(decision.block, true, String(input));
   }
@@ -897,7 +901,7 @@ test("subagent allow: management get on a name outside C3 (inspection, not launc
   // Documented known-allowed bypass: `agent` without `task` is a management
   // target, not a launch, so the C3 allowlist does not apply. See rules.ts
   // isSubagentLaunch() and the final report's bypass table.
-  const decision = evaluateSubagentCall({ action: "get", agent: "scout" });
+  const decision = evaluateSubagentCall({ action: "get", agent: "mapper" });
   assert.equal(decision.block, false);
 });
 
@@ -918,7 +922,7 @@ test("subagent deny: a workflow under any action, including validate", () => {
 });
 
 test("subagent deny: workflowScript launch (Appendix C: one async call per lane, never a workflow)", () => {
-  const decision = evaluateSubagentCall({ workflowScript: 'return runs.run("main", { agent: "lane-worker", task: "x" })' });
+  const decision = evaluateSubagentCall({ workflowScript: 'return runs.run("main", { agent: "worker", task: "x" })' });
   assert.equal(decision.block, true);
   assert.match(decision.reason ?? "", /own async `subagent` call/);
 });
@@ -934,11 +938,11 @@ test("subagent allow: validating a workflow script launches nothing", () => {
 });
 
 test("isAsyncSubagentLaunch: true for default (async omitted)", () => {
-  assert.equal(isAsyncSubagentLaunch({ agent: "lane-worker", task: "x" }), true);
+  assert.equal(isAsyncSubagentLaunch({ agent: "worker", task: "x" }), true);
 });
 
 test("isAsyncSubagentLaunch: false when async:false", () => {
-  assert.equal(isAsyncSubagentLaunch({ agent: "lane-worker", task: "x", async: false }), false);
+  assert.equal(isAsyncSubagentLaunch({ agent: "worker", task: "x", async: false }), false);
 });
 
 test("isAsyncSubagentLaunch: false for a management action with no launch shape", () => {
@@ -1034,12 +1038,12 @@ const ROOT_LOOP_STATE_DENY = [
 
 for (const command of ROOT_LOOP_STATE_DENY) {
   test(`proto root: loop-state carrying a non-root --by or a stdin by field is refused: ${command.split("\n")[0]}`, () => {
-    const decision = evaluateBashCommand(command, "root", 0, true, P2);
+    const decision = evaluateBashCommand(command, "root", 0, P2);
     assert.equal(decision.block, true, command);
     assert.match(decision.reason ?? "", /loop-state/);
   });
   test(`legacy root (no marker): the same loop-state call keeps today's verdict: ${command.split("\n")[0]}`, () => {
-    assert.equal(evaluateBashCommand(command, "root", 0, true, LEGACY).block, false, command);
+    assert.equal(evaluateBashCommand(command, "root", 0, LEGACY).block, false, command);
   });
 }
 
@@ -1052,7 +1056,7 @@ test("proto root: loop-state with --by root, no --by, a by word in a k=v text, d
     "loop-state check codex/state-a-loop1.jsonl",
     "echo --by ext",
   ]) {
-    assert.equal(evaluateBashCommand(command, "root", 0, true, P2).block, false, command);
+    assert.equal(evaluateBashCommand(command, "root", 0, P2).block, false, command);
   }
 });
 
@@ -1071,12 +1075,12 @@ const RUN_DIR_BASH_WRITES = [
 for (const command of RUN_DIR_BASH_WRITES) {
   for (const role of ["root", "lane"] as Role[]) {
     test(`proto ${role}: a bash write into the run dir is refused: ${command}`, () => {
-      const decision = evaluateBashCommand(command, role, 0, true, P2);
+      const decision = evaluateBashCommand(command, role, 0, P2);
       assert.equal(decision.block, true, command);
       assert.match(decision.reason ?? "", /run dir/);
     });
     test(`legacy ${role}: a bash write into the run dir keeps today's verdict: ${command}`, () => {
-      assert.equal(evaluateBashCommand(command, role, 0, true, LEGACY).block, false, command);
+      assert.equal(evaluateBashCommand(command, role, 0, LEGACY).block, false, command);
     });
   }
 }
@@ -1088,37 +1092,37 @@ test("proto: reading the run dir (cat, cp out of it, jq) is allowed for root and
     "jq -c . /runs/loop-a/harness-facts.jsonl > /tmp/facts.json",
   ]) {
     for (const role of ["root", "lane"] as Role[]) {
-      assert.equal(evaluateBashCommand(command, role, 0, true, P2).block, false, `${role}: ${command}`);
+      assert.equal(evaluateBashCommand(command, role, 0, P2).block, false, `${role}: ${command}`);
     }
   }
 });
 
 test("proto lane: gh pr merge is a release, refused without an ops grant", () => {
   for (const command of ["gh pr merge 12 --squash", "gh -R o/r pr merge 12 --merge --delete-branch", "env GH_PROMPT_DISABLED=1 gh pr merge --auto 3"]) {
-    const decision = evaluateBashCommand(command, "lane", 0, true, P2);
+    const decision = evaluateBashCommand(command, "lane", 0, P2);
     assert.equal(decision.block, true, command);
     assert.match(decision.reason ?? "", /gh pr merge/);
-    assert.equal(evaluateBashCommand(command, "root", 0, true, P2).block, false, `root: ${command}`);
+    assert.equal(evaluateBashCommand(command, "root", 0, P2).block, false, `root: ${command}`);
   }
 });
 
 test("legacy lane (no marker): gh pr merge keeps today's verdict", () => {
-  assert.equal(evaluateBashCommand("gh pr merge 12 --squash", "lane", 0, true, LEGACY).block, false);
+  assert.equal(evaluateBashCommand("gh pr merge 12 --squash", "lane", 0, LEGACY).block, false);
 });
 
 test("proto lane: gh pr merge passes only on an ops release surface whose allow fully matches", () => {
   const release = { surface: "release:svc", kind: "release", allow: ["gh pr merge [0-9]+ --squash"] };
   const deploy = { surface: "deploy:svc", kind: "deploy", allow: ["gh pr merge [0-9]+ --squash"] };
-  assert.equal(evaluateBashCommand("gh pr merge 12 --squash", "lane", 0, true, { ...P2, ops: release }).block, false);
-  assert.equal(evaluateBashCommand("gh pr merge 12 --merge", "lane", 0, true, { ...P2, ops: release }).block, true);
-  const onDeploy = evaluateBashCommand("gh pr merge 12 --squash", "lane", 0, true, { ...P2, ops: deploy });
+  assert.equal(evaluateBashCommand("gh pr merge 12 --squash", "lane", 0, { ...P2, ops: release }).block, false);
+  assert.equal(evaluateBashCommand("gh pr merge 12 --merge", "lane", 0, { ...P2, ops: release }).block, true);
+  const onDeploy = evaluateBashCommand("gh pr merge 12 --squash", "lane", 0, { ...P2, ops: deploy });
   assert.equal(onDeploy.block, true);
   assert.match(onDeploy.reason ?? "", /release/);
 });
 
 test("proto lane: gh pr view/list/checks stay allowed", () => {
   for (const command of ["gh pr view 12 --json state", "gh pr list --state open", "gh pr checks 12"]) {
-    assert.equal(evaluateBashCommand(command, "lane", 0, true, P2).block, false, command);
+    assert.equal(evaluateBashCommand(command, "lane", 0, P2).block, false, command);
   }
 });
 
@@ -1129,22 +1133,22 @@ test("proto lane: bash writes into codex/grants-* are refused, reads are not", (
     "rm codex/grants-*.json",
     "sed -i 's/a/b/' /repo/codex/grants-2026-10-04-loop3.json",
   ]) {
-    const decision = evaluateBashCommand(command, "lane", 0, true, P2);
+    const decision = evaluateBashCommand(command, "lane", 0, P2);
     assert.equal(decision.block, true, command);
     assert.match(decision.reason ?? "", /grants/);
-    assert.equal(evaluateBashCommand(command, "lane", 0, true, LEGACY).block, false, `legacy: ${command}`);
+    assert.equal(evaluateBashCommand(command, "lane", 0, LEGACY).block, false, `legacy: ${command}`);
   }
-  assert.equal(evaluateBashCommand("cat codex/grants-2026-10-04-loop3.json", "lane", 0, true, P2).block, false);
-  assert.equal(evaluateBashCommand("echo x > LOOP.md", "lane", 0, true, P2).block, false, "LOOP.md stays writable by lanes");
+  assert.equal(evaluateBashCommand("cat codex/grants-2026-10-04-loop3.json", "lane", 0, P2).block, false);
+  assert.equal(evaluateBashCommand("echo x > LOOP.md", "lane", 0, P2).block, false, "LOOP.md stays writable by lanes");
 });
 
 test("proto: an unparseable command still gets the run-dir and loop-state refusals (fallback scan)", () => {
   const unparseable = "echo 'unterminated; echo x > $LOOP_PI_RUN_DIR/push-log.jsonl";
   assert.equal(parseCommand(unparseable, "root"), null);
-  assert.equal(evaluateBashCommand(unparseable, "root", 0, true, P2).block, true);
+  assert.equal(evaluateBashCommand(unparseable, "root", 0, P2).block, true);
   const loopState = "loop-state append codex/state-a-loop1.jsonl land task=T --by ext 'oops";
   assert.equal(parseCommand(loopState, "root"), null);
-  assert.equal(evaluateBashCommand(loopState, "root", 0, true, P2).block, true);
+  assert.equal(evaluateBashCommand(loopState, "root", 0, P2).block, true);
 });
 
 // Protocol 2 root loop-state hardening: a `by=` k=v other than root, stdin from a file (which the
@@ -1167,12 +1171,12 @@ const ROOT_LOOP_STATE_DENY_P2 = [
 
 for (const command of ROOT_LOOP_STATE_DENY_P2) {
   test(`proto root: loop-state by=, stdin from a file and --run-dir are refused: ${command}`, () => {
-    const decision = evaluateBashCommand(command, "root", 0, true, P2);
+    const decision = evaluateBashCommand(command, "root", 0, P2);
     assert.equal(decision.block, true, command);
     assert.match(decision.reason ?? "", /loop-state/);
   });
   test(`legacy root (no marker): loop-state by=, stdin file and --run-dir keep today's verdict: ${command}`, () => {
-    assert.equal(evaluateBashCommand(command, "root", 0, true, LEGACY).block, false, command);
+    assert.equal(evaluateBashCommand(command, "root", 0, LEGACY).block, false, command);
   });
 }
 
@@ -1184,7 +1188,7 @@ test("proto root: loop-state by=root, a by word inside another value, a heredoc 
     "loop-state digest codex/state-a-loop1.jsonl < /dev/null",
     "sort < /tmp/x.txt && loop-state check codex/state-a-loop1.jsonl",
   ]) {
-    const decision = evaluateBashCommand(command, "root", 0, true, P2);
+    const decision = evaluateBashCommand(command, "root", 0, P2);
     assert.equal(decision.block, false, `${command}: ${decision.reason ?? ""}`);
   }
 });
@@ -1196,11 +1200,11 @@ test("proto root: an unparseable loop-state call with by=, a stdin file or --run
     "loop-state append codex/state-a-loop1.jsonl land --run-dir /tmp/r 'oops",
   ]) {
     assert.equal(parseCommand(command, "root"), null, command);
-    assert.equal(evaluateBashCommand(command, "root", 0, true, P2).block, true, command);
+    assert.equal(evaluateBashCommand(command, "root", 0, P2).block, true, command);
   }
 });
 
-// Protocol 2 root fence: the root never writes the planner's files (ops, grants, launch, goal).
+// Protocol 2 root fence: the root never writes the planner's files (ops, grants, launch, goal, charter).
 const ROOT_CONTROL_BASH_WRITES = [
   "echo x > codex/goal-2026-10-04-loop3.md",
   "printf '%s' '{}' >> /repo/codex/ops-2026-10-04-loop3.json",
@@ -1210,16 +1214,17 @@ const ROOT_CONTROL_BASH_WRITES = [
   "sed -i '' 's/tier: routine/tier: guarded/' codex/goal-2026-10-04-loop3.md",
   "rm codex/launch-*",
   "bash -c 'echo x > codex/ops-2026-10-04-loop3.json'",
+  "cp /tmp/charter.md codex/charter-2026-10-04-loop3.md",
 ];
 
 for (const command of ROOT_CONTROL_BASH_WRITES) {
   test(`proto root: a bash write into codex/ops|grants|launch|goal-* is refused: ${command}`, () => {
-    const decision = evaluateBashCommand(command, "root", 0, true, P2);
+    const decision = evaluateBashCommand(command, "root", 0, P2);
     assert.equal(decision.block, true, command);
     assert.match(decision.reason ?? "", /root may not write/);
   });
   test(`legacy root (no marker): a bash write into a planner file keeps today's verdict: ${command}`, () => {
-    assert.equal(evaluateBashCommand(command, "root", 0, true, LEGACY).block, false, command);
+    assert.equal(evaluateBashCommand(command, "root", 0, LEGACY).block, false, command);
   });
 }
 
@@ -1229,9 +1234,24 @@ test("proto root: reading planner files and writing state and report files stay 
     "cp codex/goal-2026-10-04-loop3.md /tmp/goal.md",
     "sha256sum codex/grants-2026-10-04-loop3.json > /tmp/sum",
     "echo x >> codex/report-2026-10-04-loop3.md",
+    "echo x >> codex/closeout-2026-10-04-loop3.md",
     "loop-state append codex/state-2026-10-04-loop3.jsonl judgement text=x",
   ]) {
-    const decision = evaluateBashCommand(command, "root", 0, true, P2);
+    const decision = evaluateBashCommand(command, "root", 0, P2);
     assert.equal(decision.block, false, `${command}: ${decision.reason ?? ""}`);
   }
+});
+
+test("v3 run files are loop control files: lanes may not write charter, launch or closeout; only the planner's charter and launch are fenced from the root", () => {
+  for (const name of ["charter-2026-10-04-loop1.md", "launch-2026-10-04-loop1.txt", "closeout-2026-10-04-loop1.md"]) {
+    assert.equal(isLoopControlPath(`codex/${name}`), true, name);
+    assert.equal(isLoopControlPath(`/repo/codex/${name}`), true, name);
+  }
+  for (const name of ["charter-2026-10-04-loop1.md", "launch-2026-10-04-loop1.txt"]) {
+    assert.equal(isLoopControlPath(`codex/${name}`, undefined, { root: true }), true, name);
+  }
+  // The root writes the closeout and its run dir; neither is a root-fenced planner file.
+  assert.equal(isLoopControlPath("codex/closeout-2026-10-04-loop1.md", undefined, { root: true }), false);
+  assert.equal(isLoopControlPath("codex/loop1/LANE.md"), false);
+  assert.equal(isLoopControlPath("codex/loop1/L1/return.md"), false);
 });

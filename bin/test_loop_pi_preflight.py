@@ -17,29 +17,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(HERE, "loop-pi-preflight")
 
 C3_AGENTS = [
-    "mapper",
-    "mapper-deep",
-    "gate-runner",
-    "lane-worker",
-    "lane-worker-push",
-    "lane-worker-low",
-    "lane-worker-low-push",
-    "lane-worker-retry",
-    "lane-worker-retry-push",
-    "complex-worker",
-    "complex-worker-push",
-    "super-worker",
-    "super-worker-push",
-    "megasuper-worker",
-    "megasuper-worker-push",
+    "worker",
+    "senior",
+    "senior-escalation",
     "reviewer",
-    "reviewer-high",
-    "security-reviewer",
-    "rescue-astra-medium",
-    "rescue-astra",
-    "ops",
-    "ops-probe",
-    "triager",
+    "scout",
 ]
 
 
@@ -175,19 +157,19 @@ class LoopPiPreflightTests(unittest.TestCase):
         self.assertIn("PI_CODING_AGENT_DIR is not set", result.stderr)
 
     def test_agent_outside_c3_fails(self):
-        write_c3_agent_dir(self.agent_dir, names=C3_AGENTS + ["scout"])
+        write_c3_agent_dir(self.agent_dir, names=C3_AGENTS + ["mapper"])
         result = run_preflight(self.repo, self.agent_dir)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("outside the C3 set", result.stderr)
-        self.assertIn("scout", result.stderr)
+        self.assertIn("mapper", result.stderr)
 
     def test_missing_c3_agent_fails(self):
         shutil.rmtree(os.path.join(self.agent_dir, "agents"))
-        write_c3_agent_dir(self.agent_dir, names=[n for n in C3_AGENTS if n != "rescue-astra"])
+        write_c3_agent_dir(self.agent_dir, names=[n for n in C3_AGENTS if n != "senior-escalation"])
         result = run_preflight(self.repo, self.agent_dir)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("missing", result.stderr)
-        self.assertIn("rescue-astra", result.stderr)
+        self.assertIn("senior-escalation", result.stderr)
 
     def test_multiple_failures_are_all_reported(self):
         write(os.path.join(self.repo, ".pi", "settings.json"), "{}")

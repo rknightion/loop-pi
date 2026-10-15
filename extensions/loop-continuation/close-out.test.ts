@@ -9,11 +9,15 @@ import { afterEach, beforeEach, describe, test } from "node:test";
 import { readDigest, stateLogPath } from "./close-out.ts";
 
 describe("stateLogPath", () => {
-  test("swaps report- for state- and .md for .jsonl in the basename only", () => {
+  test("S3: swaps closeout- for state- and .md for .jsonl in the basename only", () => {
     assert.equal(
-      stateLogPath("/r/report-site/codex/report-cf2otel-loop12.md"),
-      "/r/report-site/codex/state-cf2otel-loop12.jsonl",
+      stateLogPath("/r/closeout-site/codex/closeout-cf2otel-loop12.md"),
+      "/r/closeout-site/codex/state-cf2otel-loop12.jsonl",
     );
+  });
+
+  test("a v2 report path derives no state log", () => {
+    assert.equal(stateLogPath("/r/codex/report-cf2otel-loop12.md"), null);
   });
 });
 
@@ -26,7 +30,7 @@ describe("readDigest", () => {
     agentDir = join(tmp, "home");
     mkdirSync(join(agentDir, "bin"), { recursive: true });
     mkdirSync(join(tmp, "codex"), { recursive: true });
-    reportPath = join(tmp, "codex", "report-x-loop1.md");
+    reportPath = join(tmp, "codex", "closeout-x-loop1.md");
   });
   afterEach(() => rmSync(tmp, { recursive: true, force: true }));
 
@@ -47,20 +51,20 @@ describe("readDigest", () => {
       `case "$*" in "digest ${join(tmp, "codex", "state-x-loop1.jsonl")} --json") echo '{"live_lanes":0,"open_tasks":[],"admissible":[],"parked":["P-1"]}';; *) echo bad-args >&2; exit 3;; esac`,
     );
     const digest = await readDigest({ agentDir, reportPath });
-    assert.deepEqual(digest, { live_lanes: 0, admissible: [] });
+    assert.deepEqual(digest, { live_lanes: 0 });
   });
 
   test("falls back to loop-state on PATH when the home has none", async () => {
     touchLog();
     const pathDir = join(tmp, "pathbin");
     mkdirSync(pathDir);
-    fakeLoopState(pathDir, `echo '{"live_lanes":2,"admissible":["T-1"]}'`);
+    fakeLoopState(pathDir, `echo '{"live_lanes":2,"parked":[]}'`);
     const digest = await readDigest({
       agentDir: join(tmp, "empty-home"),
       reportPath,
       env: { ...process.env, PATH: `${pathDir}:${process.env.PATH}` },
     });
-    assert.deepEqual(digest, { live_lanes: 2, admissible: ["T-1"] });
+    assert.deepEqual(digest, { live_lanes: 2 }, "admissible is not required: v3 roots write no admit events");
   });
 
   test("null when the log is missing, without running the binary", async () => {
@@ -81,7 +85,7 @@ describe("readDigest", () => {
       `echo '{"live_lanes":0,"admissible":[]}'; exit 1`,
       `echo 'not json'`,
       `echo '{"live_lanes":"0","admissible":[]}'`,
-      `echo '{"live_lanes":0}'`,
+      `echo '{"admissible":[]}'`,
     ]) {
       fakeLoopState(join(agentDir, "bin"), body);
       assert.equal(await readDigest({ agentDir, reportPath }), null, body);
