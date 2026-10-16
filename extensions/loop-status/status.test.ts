@@ -46,3 +46,10 @@ test("a known slot cap shows as lanes over cap; an unknown or invalid cap keeps 
   assert.match(formatStatus({ ...base, lanes: 1 }), /^loop: 1 lane · /);
   assert.match(formatStatus({ ...base, lanes: 1, laneCap: 0 }), /^loop: 1 lane · /);
 });
+
+test("runs below the lanes show beside the lane count only when there are any", () => {
+  const base = { lanes: 1, laneCap: 4, timers: [], watchers: [], nudges: 0, maxNudges: 3, heartbeatAt: null, now: NOW };
+  assert.match(formatStatus({ ...base, nested: 1 }), /^loop: 1\/4 lanes \(\+1 nested\) · /);
+  assert.match(formatStatus({ ...base, nested: 0 }), /^loop: 1\/4 lanes · /);
+  assert.match(formatStatus({ ...base, laneCap: null, nested: 2 }), /^loop: 1 lane \(\+2 nested\) · /);
+});

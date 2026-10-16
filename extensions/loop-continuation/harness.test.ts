@@ -2,6 +2,7 @@
 // index.ts against a fake ExtensionAPI.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmodSync, closeSync, constants, existsSync, openSync, readdirSync, readFileSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -210,6 +211,11 @@ test("/loop-closeout runs loop-pi-audit closeout with the push log and surfaces 
       f.runDir,
       "--push-log",
       join(f.runDir, "push-log.jsonl"),
+      // The charter frozen at arm, with the digest the audit must find it still hashing to.
+      "--charter",
+      f.charter,
+      "--charter-sha256",
+      createHash("sha256").update(readFileSync(f.charter)).digest("hex"),
     ]);
   } finally {
     pi.restore();

@@ -32,8 +32,19 @@ must satisfy one of:
   `<run-dir>/push-log.jsonl`, lines `{"repo", "remote", "ref", "old", "new", ...}`) for that
   repository, remote and ref;
 - it touches only paths under `backlog/`.
-Anything else is UNGRANTED and named in a `note:` line. The fast-forward check still applies. A
-derived `HEAD` move follows the default branch's verdict. Legacy snapshots without protocol
+Two more commits are accounted for: a FOREIGN one (not in the log, but its message ends with the
+`Claude-Session:` trailer of a different harness session AND a logged `actor: root` push was made on
+top of it; reported, not a violation) and, when the charter grants releases for the repository, a
+release-please merge (see below). Anything else is UNGRANTED and named in a `note:` line. The fast-forward check still
+applies. A derived `HEAD` move follows the default branch's verdict.
+
+`--charter FILE --charter-sha256 HEX` (on `closeout` and `compare`) names the charter frozen at arm. A
+charter that no longer hashes to the digest grants nothing. An `authority:` entry grants releases
+when one of its clauses names release-please without a negation; it covers the repositories it
+names (`owner/name` of a remote URL, or an absolute path), or the charter's own repository when it
+names none. There a release-please merge (subject `chore(...): release ...` changing
+`.release-please-manifest.json`), the new version tag on that commit, the release for that tag and
+the deletion of a `release-please--*` branch are GRANTED. Legacy snapshots without protocol
 evidence keep the old behaviour: no default-branch move is accounted for. Protocol evidence is
 retained in the before-snapshot once observed, and an explicit --push-log also requires it, so
 deleting the marker cannot downgrade those audits.
@@ -56,6 +67,7 @@ Stdlib only.
 """
 import argparse
 import fcntl
+import hashlib
 import json
 import re
 import os
@@ -334,13 +346,17 @@ def cmd_closeout(args: argparse.Namespace) -> int:
     run_dir = run_dir_of(args)
     with open(os.path.join(run_dir, ".audit.lock"), "w", encoding="utf-8") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        return closeout_locked(run_dir, args.push_log)
+        return closeout_locked(run_dir, args.push_log, args.charter, args.charter_sha256)
 
 
 PUSH_LOG_HELP = "Push log (default: <run-dir>/push-log.jsonl)."
+CHARTER_HELP = ("The run's charter. Its `authority:` entries that name release-please grant that repository's "
+                "release merge, version tag, release and release-branch deletion.")
+CHARTER_SHA_HELP = "sha256 of the charter as frozen at arm; a charter that no longer hashes to it grants nothing."
 
 
-def closeout_locked(run_dir: str, push_log: str | None = None) -> int:
+def closeout_locked(run_dir: str, push_log: str | None = None, charter: str | None = None,
+                    charter_sha256: str | None = None) -> int:
     before_path = os.path.join(run_dir, "audit-before.json")
     with open(before_path, "r", encoding="utf-8") as fh:
         repos = sorted(json.load(fh)["repos"])
@@ -348,7 +364,7 @@ def closeout_locked(run_dir: str, push_log: str | None = None) -> int:
     write_json(after_path, {"taken_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                             "repos": {repo: snapshot_repo(repo) for repo in repos}})
     return cmd_compare(argparse.Namespace(before=before_path, after=after_path, push_log=push_log,
-                                          run_dir=run_dir))
+                                          run_dir=run_dir, charter=charter, charter_sha256=charter_sha256))
 
 
 def diff_ref_map(before: dict, after: dict) -> list[tuple[str, str, str, str]]:
@@ -399,7 +415,8 @@ def is_fast_forward(repo: str, before_sha: str, after_sha: str) -> tuple[bool | 
     return None, f"git merge-base --is-ancestor exited {result.returncode}: {result.stderr.strip()}"
 
 
-def moved_ref_mark(repo: str, remote: str, ref: str, before_sha: str, after_sha: str, covered: bool) -> tuple[str, bool]:
+def moved_ref_mark(repo: str, remote: str, ref: str, before_sha: str, after_sha: str, covered: bool,
+                   foreign: bool = False) -> tuple[str, bool]:
     """Checks a moved remote ref for fast-forward ancestry: a non-fast-forward
     move is a violation even when every commit in it is accounted for. Fetches
     the ref fresh from the remote first so the ancestry check has the objects it
@@ -412,7 +429,7 @@ def moved_ref_mark(repo: str, remote: str, ref: str, before_sha: str, after_sha:
         return f"UNVERIFIED fast-forward: {ff_reason}", False
     if not ff:
         return ("NON-FAST-FORWARD (granted, but blocked)" if covered else "NON-FAST-FORWARD UNGRANTED"), False
-    return ("GRANTED" if covered else "UNGRANTED"), covered
+    return ("FOREIGN" if covered and foreign else "GRANTED" if covered else "UNGRANTED"), covered
 
 
 def head_target(entry: dict, other: dict) -> str | None:
@@ -490,11 +507,11 @@ def repository_identity(repo: str) -> str | None:
     return os.path.realpath(result.stdout.strip()) if result.returncode == 0 and result.stdout.strip() else None
 
 
-def logged_commits(repo: str, remote: str, ref: str, push_log: list[dict]) -> set[str]:
-    """Commits inside logged ranges for exactly this repository, named remote and ref."""
+def matching_pushes(repo: str, remote: str, ref: str, push_log: list[dict]) -> list[dict]:
+    """Push-log entries for exactly this repository, named remote and ref."""
     real = os.path.realpath(repo)
     identity = repository_identity(repo)
-    covered: set[str] = set()
+    matched: list[dict] = []
     identities: dict[str, str | None] = {}
     for entry in push_log:
         if (entry["ref"] != ref or not valid_receipt_remote(entry.get("remote"))
@@ -506,6 +523,14 @@ def logged_commits(repo: str, remote: str, ref: str, push_log: list[dict]) -> se
                 identities[logged_repo] = repository_identity(logged_repo)
             if identity is None or identities[logged_repo] != identity:
                 continue
+        matched.append(entry)
+    return matched
+
+
+def logged_commits(repo: str, remote: str, ref: str, push_log: list[dict]) -> set[str]:
+    """Commits inside logged ranges for exactly this repository, named remote and ref."""
+    covered: set[str] = set()
+    for entry in matching_pushes(repo, remote, ref, push_log):
         commits = rev_list(repo, f"{entry['old']}..{entry['new']}" if entry.get("old") else entry["new"])
         if commits:
             covered.update(commits)
@@ -521,6 +546,201 @@ def touches_only_backlog(repo: str, sha: str) -> bool:
     result = run(cmd)
     paths = [p for p in result.stdout.split("\0") if p]
     return result.returncode == 0 and bool(paths) and all(p.startswith("backlog/") for p in paths)
+
+
+# --- Charter release authority and foreign pushes -------------------------------------------------
+
+RELEASE_MANIFEST = ".release-please-manifest.json"
+RELEASE_CONFIG = "release-please-config.json"
+# Files a release-please pull request writes: the manifest, changelogs and the common version files.
+# Any other path it changes must be named under `extra-files` in the config the parent commit holds.
+RELEASE_FILE_NAMES = frozenset({
+    RELEASE_MANIFEST, RELEASE_CONFIG, "CHANGELOG.md", "version.txt", "VERSION", "package.json", "package-lock.json",
+    "npm-shrinkwrap.json", "pyproject.toml", "uv.lock", "poetry.lock", "setup.py", "setup.cfg", "__init__.py",
+    "_version.py", "version.py", "Cargo.toml", "Cargo.lock", "pom.xml", "Chart.yaml", "composer.json",
+    "gradle.properties",
+})
+RELEASE_SUBJECT = re.compile(r"^chore(?:\([^)]*\))?!?: release\b", re.IGNORECASE)
+RELEASE_BRANCH_PREFIX = "refs/heads/release-please--"
+RELEASE_TAG = re.compile(r"^refs/tags/(?:[A-Za-z0-9_.-]+[@-])?v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?$")
+NEGATION = re.compile(r"\b(?:no|not|never|without|forbid\w*|exclud\w*|except|cannot|can't|don't)\b", re.IGNORECASE)
+CLAUSE_SPLIT = re.compile(r"(?<=[.;])\s+|;")
+SLUG = re.compile(r"(?<![\w./-])([A-Za-z0-9_][A-Za-z0-9_.-]*/[A-Za-z0-9_][A-Za-z0-9_.-]*)(?![\w/-])")
+ABS_PATH = re.compile(r"(?<![\w.-])(/[^\s,;()`'\"]+)")
+
+
+def charter_authority_entries(text: str) -> list[str]:
+    """The charter's `authority:` grants, one string per entry: the key's own value, then each bullet
+    under it (the `- ` removed), with wrapped continuation lines joined to their entry. The block ends
+    at the next unindented line. Nothing outside it is authority."""
+    entries: list[str] = []
+    inside = False
+    for line in text.splitlines():
+        if inside and (not line.strip() or line[0] in " \t"):
+            if not line.strip():
+                continue
+            bullet = re.match(r"^\s*[-*]\s+(.*)$", line)
+            text = (bullet.group(1) if bullet else line).strip()
+            # A new entry starts at a bullet; any other indented line continues the entry before it.
+            if bullet or not entries:
+                entries.append(text)
+            else:
+                entries[-1] += " " + text
+            continue
+        inside = False
+        if line.startswith("## "):
+            break
+        m = re.match(r"^authority:[ \t]*(.*)$", line)
+        if m:
+            inside = True
+            if m.group(1).strip():
+                entries.append(m.group(1).strip())
+    return entries
+
+
+def release_grant_entries(text: str) -> list[dict]:
+    """Authority entries that grant release-please releases: one clause names `release-please`
+    with no negation in that clause. The entry's repositories are the `owner/name` slugs and
+    absolute paths it names; an entry naming none grants the charter's own repository only."""
+    grants = []
+    for entry in charter_authority_entries(text):
+        clauses = [c for c in CLAUSE_SPLIT.split(entry) if c and c.strip()]
+        if not any(re.search(r"release-please", c, re.IGNORECASE) and not NEGATION.search(c) for c in clauses):
+            continue
+        slugs = {m.group(1).rstrip(".,:").lower() for m in SLUG.finditer(entry)}
+        paths = {os.path.realpath(m.group(1).rstrip(".,:")) for m in ABS_PATH.finditer(entry)}
+        grants.append({"slugs": slugs, "paths": paths})
+    return grants
+
+
+def read_release_authority(path: str | None, sha256: str | None) -> tuple[dict | None, str | None]:
+    """(authority, None), or (None, why) when the charter cannot be used. The file must hash to the
+    digest frozen at arm, so editing the charter after arm cannot grant anything."""
+    if not path:
+        return None, None
+    if not sha256 or not re.fullmatch(r"[0-9a-fA-F]{64}", sha256):
+        return None, "no valid --charter-sha256"
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except OSError as exc:
+        return None, f"cannot read {path}: {exc}"
+    if hashlib.sha256(data).hexdigest() != sha256.lower():
+        return None, f"{path} no longer matches the digest frozen at arm"
+    folder = os.path.dirname(os.path.realpath(path))
+    charter_repo = os.path.dirname(folder) if os.path.basename(folder) == "codex" else None
+    return {"grants": release_grant_entries(data.decode("utf-8", "replace")), "charter_repo": charter_repo}, None
+
+
+def repo_slugs(*entries: dict) -> set[str]:
+    """`owner/name` of every remote URL in the snapshot entries, lowercased, `.git` removed."""
+    slugs = set()
+    for entry in entries:
+        for remote in entry.get("remotes", {}).values():
+            parts = [p for p in re.split(r"[:/]", remote.get("url", "")) if p]
+            if len(parts) >= 2:
+                slugs.add(f"{parts[-2]}/{re.sub(r'[.]git$', '', parts[-1])}".lower())
+    return slugs
+
+
+def authority_covers_release(authority: dict | None, repo: str, *entries: dict) -> bool:
+    if not authority:
+        return False
+    real = os.path.realpath(repo)
+    slugs = repo_slugs(*entries)
+    for grant in authority["grants"]:
+        if grant["slugs"] or grant["paths"]:
+            if real in grant["paths"] or slugs & grant["slugs"]:
+                return True
+        elif authority.get("charter_repo") and os.path.realpath(authority["charter_repo"]) == real:
+            return True
+    return False
+
+
+def commit_paths(repo: str, sha: str) -> list[str] | None:
+    parents = run(["git", "-C", repo, "rev-list", "--parents", "-n", "1", sha]).stdout.split()[1:]
+    cmd = (["git", "-C", repo, "diff-tree", "-r", "-z", "--name-only", "--no-commit-id", parents[0], sha] if parents
+           else ["git", "-C", repo, "diff-tree", "-r", "-z", "--name-only", "--no-commit-id", "--root", sha])
+    result = run(cmd)
+    return [p for p in result.stdout.split("\0") if p] if result.returncode == 0 else None
+
+
+def release_extra_files(repo: str, sha: str) -> set[str]:
+    """`extra-files` paths the release config names in the commit's parent (never in the commit itself,
+    which could widen its own allowance)."""
+    shown = run(["git", "-C", repo, "show", f"{sha}^:{RELEASE_CONFIG}"])
+    if shown.returncode != 0:
+        return set()
+    try:
+        config = json.loads(shown.stdout)
+    except ValueError:
+        return set()
+    scopes = [config] + [v for v in (config.get("packages") or {}).values() if isinstance(v, dict)] \
+        if isinstance(config, dict) else []
+    found: set[str] = set()
+    for scope in scopes:
+        for item in scope.get("extra-files") or []:
+            path = item.get("path") if isinstance(item, dict) else item
+            if isinstance(path, str) and path:
+                found.add(path.lstrip("/"))
+    return found
+
+
+def is_release_commit(repo: str, sha: str) -> bool:
+    """The shape of a release-please merge: its release subject, a change to the manifest only a
+    release-please pull request makes, and no change outside the files release-please writes (see
+    RELEASE_FILE_NAMES, plus the config's `extra-files`). Authority comes from the charter, never from
+    this shape."""
+    subject = run(["git", "-C", repo, "log", "-1", "--format=%s", sha])
+    paths = commit_paths(repo, sha) or []
+    if not (subject.returncode == 0 and RELEASE_SUBJECT.match(subject.stdout.strip()) and RELEASE_MANIFEST in paths):
+        return False
+    extra = release_extra_files(repo, sha)
+    return all(os.path.basename(p) in RELEASE_FILE_NAMES or p in extra or any(p.endswith("/" + e) for e in extra)
+               for p in paths)
+
+
+def peel_commit(repo: str, sha: str) -> str | None:
+    result = run(["git", "-C", repo, "rev-parse", "--verify", "--quiet", f"{sha}^{{commit}}"])
+    return result.stdout.strip() if result.returncode == 0 and result.stdout.strip() else None
+
+
+def release_tag_granted(repo: str, remote: str | None, ref: str, sha: str, release_shas: set[str]) -> bool:
+    """A new version tag pointing at a release-please merge this audit accounted for."""
+    if not RELEASE_TAG.match(ref.removesuffix("^{}")):
+        return False
+    if ref.endswith("^{}"):
+        return sha in release_shas
+    if remote is not None:
+        fetch_ref(repo, remote, ref)
+    commit = peel_commit(repo, sha)
+    return commit is not None and commit in release_shas
+
+
+SESSION_TRAILER = re.compile(r"^Claude-Session:[ \t]*(\S+)[ \t]*$", re.MULTILINE)
+
+
+def foreign_session(repo: str, sha: str, roots: list[dict]) -> tuple[str, dict] | None:
+    """(session, push) when `sha` is another session's commit the root integrated, else None.
+
+    Two independent facts are both required. The commit's own final paragraph carries the
+    `Claude-Session:` trailer Claude Code writes on every commit it makes (a loop-pi root writes
+    none); and `sha` is the `old` of, or an ancestor of the `old` of, a logged `actor: root` push, so
+    the root pushed on top of it and it was on the remote before that push. The trailer alone is text
+    anyone can write, and the receipt alone cannot tell a sibling from an unlogged writer of this
+    run, so neither downgrades UNGRANTED by itself. The result is FOREIGN, never a grant; Git author
+    and committer are still never read."""
+    body = run(["git", "-C", repo, "log", "-1", "--format=%B", sha])
+    if body.returncode != 0:
+        return None
+    # Only the final paragraph is a trailer block; the same text higher up is just prose.
+    match = SESSION_TRAILER.search(body.stdout.rstrip().rsplit("\n\n", 1)[-1])
+    if not match:
+        return None
+    for entry in roots:
+        if run(["git", "-C", repo, "merge-base", "--is-ancestor", sha, entry["old"]]).returncode == 0:
+            return match.group(1), entry
+    return None
 
 
 def stable_endpoint(b: dict, a: dict) -> str | None:
@@ -571,8 +791,16 @@ def endpoint_receipts(before_repos: dict, after_repos: dict, push_log: list[dict
 
 def default_move_verdict(repo: str, remote: str, ref: str, before_sha: str, after_sha: str,
                          push_log: list[dict],
-                         alias_receipts: list[dict] | None = None) -> tuple[bool, list[str]]:
-    """Is every commit in before..after accounted for? Returns (covered, notes).
+                         alias_receipts: list[dict] | None = None,
+                         release: bool = False,
+                         release_shas: set[str] | None = None) -> tuple[bool, list[str], set[str]]:
+    """Is every commit in before..after accounted for? Returns (covered, notes, kinds).
+
+    Besides a logged push and a `backlog/`-only change, a commit is accounted for when it is a
+    release-please merge and `release` is set (the charter's authority names releases for this
+    repository; `release_shas` collects those commits), or FOREIGN: it names another harness session
+    in its final `Claude-Session:` trailer AND a logged root push was made on top of it (see
+    foreign_session). `kinds` holds "foreign" when any commit was accounted for that way.
 
     Only a journaled successful push counts as a push. A push made by a watcher, subprocess or any
     other path the push log never saw is UNGRANTED here: it is never inferred from Git author or
@@ -581,17 +809,21 @@ def default_move_verdict(repo: str, remote: str, ref: str, before_sha: str, afte
     deliberately not chosen."""
     fetched, reason = fetch_ref(repo, remote, ref)
     if not fetched:
-        return False, [f"cannot verify commits: {reason}"]
+        return False, [f"cannot verify commits: {reason}"], set()
     commits = rev_list(repo, f"{before_sha}..{after_sha}")
     if commits is None:
-        return False, [f"cannot list commits {before_sha[:12]}..{after_sha[:12]}"]
+        return False, [f"cannot list commits {before_sha[:12]}..{after_sha[:12]}"], set()
     logged = logged_commits(repo, remote, ref, push_log)
+    roots = [e for e in matching_pushes(repo, remote, ref, push_log)
+             if e.get("actor") == "root" and isinstance(e.get("old"), str)]
     aliased: dict[str, str] = {}
     for entry in alias_receipts or []:
         if entry["ref"] == ref:
             for sha in rev_list(repo, f"{entry['old']}..{entry['new']}") or []:
                 aliased.setdefault(sha, f"{entry['canonical']} remote '{entry['remote']}'")
     uncovered = []
+    accounted: list[str] = []
+    kinds: set[str] = set()
     via_alias: dict[str, int] = {}
     for sha in commits:
         if sha in logged or touches_only_backlog(repo, sha):
@@ -599,10 +831,23 @@ def default_move_verdict(repo: str, remote: str, ref: str, before_sha: str, afte
         if sha in aliased:
             via_alias[aliased[sha]] = via_alias.get(aliased[sha], 0) + 1
             continue
+        if release and is_release_commit(repo, sha):
+            if release_shas is not None:
+                release_shas.add(sha)
+            accounted.append(f"commit {sha[:12]} is a release-please merge, covered by the charter's release authority")
+            continue
+        foreign = foreign_session(repo, sha, roots)
+        if foreign is not None:
+            session, basis = foreign
+            kinds.add("foreign")
+            accounted.append(f"commit {sha[:12]} is FOREIGN: not in a logged push, it names another session "
+                             f"({session}), and the root's logged push {basis['old'][:12]}..{basis['new'][:12]} "
+                             f"was made on top of it")
+            continue
         uncovered.append(f"commit {sha[:12]} is not in a logged push and is not backlog-only")
     notes = [f"{count} commit(s) covered by endpoint-equivalent root push receipts journaled for {source}"
              for source, count in sorted(via_alias.items())]
-    return not uncovered, notes + uncovered
+    return not uncovered, notes + accounted + uncovered, kinds
 
 
 def compare_repo(name: str, before: dict, after: dict, report: list[str],
@@ -611,6 +856,11 @@ def compare_repo(name: str, before: dict, after: dict, report: list[str],
     {"push_log": [...], "endpoints": {...}}: default-branch moves are then judged commit by commit;
     without it no remote change is accounted for."""
     all_covered = True
+    # Release-please merges the charter's authority covers (the commits found so far, across remotes)
+    # and the version tags those commits earned.
+    release_ok = proto is not None and authority_covers_release(proto.get("authority"), name, before, after)
+    release_shas: set[str] = set()
+    granted_tags: set[str] = set()
 
     before_remotes = before.get("remotes", {})
     after_remotes = after.get("remotes", {})
@@ -628,13 +878,13 @@ def compare_repo(name: str, before: dict, after: dict, report: list[str],
             continue
         url = b.get("url") if b.get("url") == a.get("url") else None
         defaults: set[str] = set()
-        verdicts: dict[str, tuple[bool, list[str]]] = {}
+        verdicts: dict[str, tuple[bool, list[str], set[str]]] = {}
         if proto is not None:
             defaults = {t for t in (head_target(b, a), head_target(a, b)) if t}
             if not defaults:
                 defaults = {"refs/heads/main", "refs/heads/master"}
 
-        def default_verdict(ref: str) -> tuple[bool, list[str]]:
+        def default_verdict(ref: str) -> tuple[bool, list[str], set[str]]:
             if ref not in verdicts:
                 before_sha, after_sha = b.get("refs", {}).get(ref), a.get("refs", {}).get(ref)
                 if before_sha and after_sha and before_sha != after_sha:
@@ -646,10 +896,16 @@ def compare_repo(name: str, before: dict, after: dict, report: list[str],
                     endpoint = stable_endpoint(b, a)
                     verdicts[ref] = default_move_verdict(
                         name, remote, ref, before_sha, after_sha, proto["push_log"] if endpoint else [],
-                        proto.get("endpoints", {}).get(endpoint, []) if endpoint else [])
+                        proto.get("endpoints", {}).get(endpoint, []) if endpoint else [],
+                        release_ok, release_shas)
                 else:
-                    verdicts[ref] = (False, [])
+                    verdicts[ref] = (False, [], set())
             return verdicts[ref]
+
+        def accounted_release_commits() -> set[str]:
+            for default in sorted(defaults):
+                default_verdict(default)
+            return release_shas
         changes = diff_ref_map(b.get("refs", {}), a.get("refs", {}))
         before_head = b.get("symrefs", {}).get("HEAD")
         after_head = a.get("symrefs", {}).get("HEAD")
@@ -670,19 +926,31 @@ def compare_repo(name: str, before: dict, after: dict, report: list[str],
                 else:
                     covered = all(proto is not None and t in defaults and default_verdict(t)[0]
                                   for t in targets)
-                    mark = "GRANTED derived HEAD" if covered else "UNGRANTED derived HEAD"
+                    foreign = covered and any("foreign" in default_verdict(t)[2] for t in targets)
+                    mark = ("FOREIGN derived HEAD" if foreign else "GRANTED derived HEAD") if covered else "UNGRANTED derived HEAD"
                     all_covered = all_covered and covered
             elif ref.startswith("refs/pull/"):
                 mark = "FOREIGN"
+            elif (release_ok and change == "deleted" and ref.startswith(RELEASE_BRANCH_PREFIX)
+                  and accounted_release_commits()):
+                mark = "GRANTED"
+                notes = ["release-please branch removed after its merge, covered by the charter's release authority"]
+            elif (release_ok and change == "added" and ref.startswith("refs/tags/")
+                  and release_tag_granted(name, remote, ref, after_sha, accounted_release_commits())):
+                mark = "GRANTED"
+                granted_tags.add(ref.removesuffix("^{}").removeprefix("refs/tags/"))
+                notes = ["version tag on a release-please merge, covered by the charter's release authority"]
             else:
                 # A peeled tag (refs/tags/<t>^{}) follows its tag.
                 if ref.startswith("refs/tags/") and ref.endswith("^{}"):
                     target = ref[:-3]
                 covered = False
+                foreign = False
                 if proto is not None and change == "moved" and ref in defaults:
-                    covered, notes = default_verdict(ref)
+                    covered, notes, kinds = default_verdict(ref)
+                    foreign = "foreign" in kinds
                 if change == "moved" and ref == target:
-                    mark, contributes_covered = moved_ref_mark(name, remote, ref, before_sha, after_sha, covered)
+                    mark, contributes_covered = moved_ref_mark(name, remote, ref, before_sha, after_sha, covered, foreign)
                     all_covered = all_covered and contributes_covered
                 else:
                     all_covered = all_covered and covered
@@ -710,8 +978,15 @@ def compare_repo(name: str, before: dict, after: dict, report: list[str],
         all_covered = False
     else:
         for change, ref, before_sha, after_sha in diff_ref_map(before_tags.get("tags", {}), after_tags.get("tags", {})):
+            shown = f"[{name}] tag {change}: {ref} ({before_sha[:12] or '-'} -> {after_sha[:12] or '-'})"
+            if (release_ok and change == "added"
+                    and release_tag_granted(name, None, ref, after_sha, release_shas)):
+                granted_tags.add(ref.removeprefix("refs/tags/"))
+                report.append(f"{shown} [GRANTED]")
+                report.append(f"{shown} note: version tag on a release-please merge, covered by the charter's release authority")
+                continue
             all_covered = False
-            report.append(f"[{name}] tag {change}: {ref} ({before_sha[:12] or '-'} -> {after_sha[:12] or '-'}) [UNGRANTED]")
+            report.append(f"{shown} [UNGRANTED]")
 
     before_releases = before.get("releases", {})
     after_releases = after.get("releases", {})
@@ -726,6 +1001,10 @@ def compare_repo(name: str, before: dict, after: dict, report: list[str],
         before_tags_set = {r["tagName"] for r in before_releases.get("releases", []) if "tagName" in r}
         after_tags_set = {r["tagName"] for r in after_releases.get("releases", []) if "tagName" in r}
         for tag in sorted(after_tags_set - before_tags_set):
+            if release_ok and tag in granted_tags:
+                report.append(f"[{name}] release added: {tag} [GRANTED]")
+                report.append(f"[{name}] release added: {tag} note: published for a version tag covered by the charter's release authority")
+                continue
             all_covered = False
             report.append(f"[{name}] release added: {tag} [UNGRANTED]")
         for tag in sorted(before_tags_set - after_tags_set):
@@ -751,6 +1030,12 @@ def cmd_compare(args: argparse.Namespace) -> int:
             print(f"loop-pi-audit: warning: no push log at {log_path}; default-branch moves are accounted for "
                   "only by backlog-only commits.", file=sys.stderr)
         proto = {"push_log": load_push_log(log_path)}
+        charter = getattr(args, "charter", None)
+        authority, why = read_release_authority(charter, getattr(args, "charter_sha256", None))
+        if why:
+            print(f"loop-pi-audit: warning: the charter grants nothing ({why}); release-please changes stay UNGRANTED.",
+                  file=sys.stderr)
+        proto["authority"] = authority
 
     before_repos = before.get("repos", {})
     after_repos = after.get("repos", {})
@@ -810,6 +1095,8 @@ def main() -> int:
     comp.add_argument("--push-log", help=PUSH_LOG_HELP)
     comp.add_argument("--run-dir", help="Run directory; default-branch moves are judged against the push log "
                                         "when it holds loop-pi-proto (compare never reads $LOOP_PI_RUN_DIR).")
+    comp.add_argument("--charter", help=CHARTER_HELP)
+    comp.add_argument("--charter-sha256", help=CHARTER_SHA_HELP)
     comp.set_defaults(func=cmd_compare)
 
     for name, func, text in (("begin", cmd_begin, "Start a run's before-snapshot with REPO."),
@@ -826,6 +1113,8 @@ def main() -> int:
     close = sub.add_parser("closeout", help="Snapshot the run's repos again and compare.")
     close.add_argument("--run-dir", help="Run directory (default: $LOOP_PI_RUN_DIR).")
     close.add_argument("--push-log", help=PUSH_LOG_HELP)
+    close.add_argument("--charter", help=CHARTER_HELP)
+    close.add_argument("--charter-sha256", help=CHARTER_SHA_HELP)
     close.set_defaults(func=cmd_closeout)
 
     args = parser.parse_args()

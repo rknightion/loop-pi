@@ -12,6 +12,7 @@ import { isAbsolute, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { MAX_NUDGES, STATE_CUSTOM_TYPE } from "../loop-continuation/state.ts";
 import { deriveLogPath } from "../loop-state/core.ts";
+import { asyncRunsDir, findNestedRun, formatNestedRun, formatNestedRuns, listNestedRuns } from "./descendants.ts";
 import { formatStatus } from "./status.ts";
 
 export const STATUS_KEY = "loop-status";
@@ -121,6 +122,7 @@ export default function (pi: ExtensionAPI): void {
     const text = formatStatus({
       lanes: liveRuns.size,
       laneCap,
+      nested: listNestedRuns(asyncRunsDir(), sessionKey).length,
       timers: query<{ at: string }>("loop-wait:query-timers"),
       watchers: query<{ deadline?: string }>("loop-wait:query-watchers"),
       nudges,
@@ -171,6 +173,30 @@ export default function (pi: ExtensionAPI): void {
     refresh();
   });
   pi.on("tool_execution_end", (_event, c) => refresh(c));
+  // pi-subagents' `subagent status` lists only runs this session launched. A run a lane launched
+  // (depth 2) is neither listed nor resolvable by id, so the root cannot see the capacity it holds:
+  // append those runs to the listing, and answer an id that is one of them instead of "not found".
+  pi.on("tool_result", (event) => {
+    try {
+      if (event.toolName !== "subagent") return;
+      const input = (event.input ?? {}) as { action?: unknown; id?: unknown; runId?: unknown; dir?: unknown; view?: unknown; options?: { view?: unknown } };
+      if (input.action !== "status" || input.dir !== undefined || input.view !== undefined || input.options?.view !== undefined) return;
+      const first = event.content?.[0];
+      const text = first?.type === "text" ? first.text : "";
+      const requested = typeof input.id === "string" ? input.id : typeof input.runId === "string" ? input.runId : undefined;
+      if (requested === undefined) {
+        if (event.isError || event.content?.some((part) => part.type !== "text")) return;
+        const section = formatNestedRuns(listNestedRuns(asyncRunsDir(), sessionKey));
+        if (section) return { content: [{ type: "text" as const, text: `${text}\n\n${section}` }] };
+        return;
+      }
+      if (!event.isError || !text.startsWith("Async run not found")) return;
+      const run = findNestedRun(asyncRunsDir(), sessionKey, requested);
+      if (run) return { content: [{ type: "text" as const, text: formatNestedRun(run) }], isError: false };
+    } catch {
+      // A lookup failure leaves pi-subagents' own answer untouched.
+    }
+  });
   pi.on("session_shutdown", () => {
     try {
       ctx?.ui.setStatus(STATUS_KEY, undefined);

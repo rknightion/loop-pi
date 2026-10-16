@@ -1,5 +1,6 @@
 // The closeout audit loop-continuation runs itself at `/loop-closeout` (run marker present):
 //   loop-pi-audit closeout --run-dir <run dir> --push-log <run dir>/push-log.jsonl
+//     --charter <charter> --charter-sha256 <digest frozen at arm>
 // The result goes to the root as a `loop-closeout-audit` message. A non-zero exit is never clean.
 
 import { execFile } from "node:child_process";
@@ -11,8 +12,17 @@ export const CLOSEOUT_MESSAGE_TYPE = "loop-closeout-audit";
 export const CLOSEOUT_TIMEOUT_MS = 15 * 60_000;
 const OUTPUT_TAIL_BYTES = 8_192;
 
-export function closeoutArgs(runDir: string): string[] {
-  return ["closeout", "--run-dir", runDir, "--push-log", join(runDir, "push-log.jsonl")];
+/** The charter frozen at arm: its path and the sha256 the audit must find it still hashing to. */
+export interface FrozenCharter {
+  path: string;
+  sha256: string;
+}
+
+export function closeoutArgs(runDir: string, charter?: FrozenCharter | null): string[] {
+  const args = ["closeout", "--run-dir", runDir, "--push-log", join(runDir, "push-log.jsonl")];
+  // The audit reads the charter's `authority:` for release grants and ignores a file that changed since arm.
+  if (charter?.path && charter.sha256) args.push("--charter", charter.path, "--charter-sha256", charter.sha256);
+  return args;
 }
 
 function executable(path: string): boolean {

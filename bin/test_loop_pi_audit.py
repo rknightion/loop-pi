@@ -4,6 +4,9 @@ runnable as `python3 -m unittest bin.test_loop_pi_audit -v` from `pi/`, or
 directly as a script. Builds scratch git repos with a local bare "remote"
 (file-path, no network) under a temp dir.
 """
+import hashlib
+import importlib.machinery
+import importlib.util
 import json
 import os
 import shutil
@@ -56,7 +59,7 @@ def make_bin_without_gh(tmp):
     return fake_bin
 
 
-def make_bin_with_gh_stub(tmp, releases_json="[]"):
+def make_bin_with_gh_stub(tmp, releases_json="[]", name="fake-bin-gh-ok"):
     """A PATH directory with real `git` and a stub `gh` that always succeeds
     for `gh release list --json ... --limit 1000`, returning `releases_json`.
 
@@ -70,7 +73,7 @@ def make_bin_with_gh_stub(tmp, releases_json="[]"):
     the dedicated releases-unavailable test below still uses
     make_bin_without_gh() to exercise that path directly.
     """
-    fake_bin = os.path.join(tmp, "fake-bin-gh-ok")
+    fake_bin = os.path.join(tmp, name)
     os.makedirs(fake_bin, exist_ok=True)
     real_git = GIT
     assert real_git, "git must be on PATH to build this fixture"
@@ -1143,6 +1146,399 @@ class AliasEndpointTests(unittest.TestCase):
                 if expected:
                     self.assert_alias_ungranted(result, c)
                     self.assertIn("[GRANTED]", self.lines(result, self.repo))
+
+
+def load_audit_module():
+    loader = importlib.machinery.SourceFileLoader("loop_pi_audit_under_test", SCRIPT)
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+class CharterAuthorityParsingTests(unittest.TestCase):
+    """What the charter's `authority:` block grants. Only that block counts, and only a clause that
+    names release-please without a negation."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.audit = load_audit_module()
+
+    CHARTER = (
+        "# Charter: demo loop1\n\n"
+        "aim:        ship it. Release-please is mentioned here but this is not authority.\n"
+        "authority:\n"
+        "  - Root lands every candidate on main of acme/widget and acme/gadget; lanes never push. "
+        "Release through the repository's own release-please flow (a release-please merge is a standing release).\n"
+        "  - Deploys under the standing grant.\n"
+        "  - No closing of a release-please pull request.\n"
+        "live:       release-please reads\n"
+        "\n## First wave\n\nauthority: release-please everywhere\n"
+    )
+
+    def test_the_authority_block_is_read_and_nothing_outside_it(self):
+        entries = self.audit.charter_authority_entries(self.CHARTER)
+        self.assertEqual(len(entries), 3)
+        self.assertTrue(entries[0].startswith("Root lands every candidate"))
+        self.assertEqual(entries[2], "No closing of a release-please pull request.")
+
+    def test_a_grant_needs_a_clause_naming_release_please_without_a_negation(self):
+        grants = self.audit.release_grant_entries(self.CHARTER)
+        self.assertEqual(len(grants), 1)
+        self.assertEqual(grants[0]["slugs"], {"acme/widget", "acme/gadget"})
+
+    def test_an_entry_naming_no_repository_names_none(self):
+        grants = self.audit.release_grant_entries("authority:\n  - A release-please merge is a standing release.\n")
+        self.assertEqual(grants, [{"slugs": set(), "paths": set()}])
+
+    def test_a_wrapped_entry_is_judged_whole(self):
+        wrapped = "authority:\n  - A release-please merge is a standing release,\n    except on acme/widget.\n  - Other.\n"
+        self.assertEqual(self.audit.charter_authority_entries(wrapped),
+                         ["A release-please merge is a standing release, except on acme/widget.", "Other."])
+        self.assertEqual(self.audit.release_grant_entries(wrapped), [])
+        scoped = "authority:\n  - Release through release-please\n    on acme/widget.\n"
+        self.assertEqual(self.audit.release_grant_entries(scoped), [{"slugs": {"acme/widget"}, "paths": set()}])
+
+    def test_a_negated_clause_in_the_same_entry_does_not_grant(self):
+        self.assertEqual(self.audit.release_grant_entries("authority:\n  - Never merge a release-please pull request.\n"), [])
+
+    def test_a_charter_that_no_longer_matches_its_frozen_digest_grants_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "charter.md")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(self.CHARTER)
+            digest = hashlib.sha256(self.CHARTER.encode()).hexdigest()
+            authority, why = self.audit.read_release_authority(path, digest)
+            self.assertIsNone(why)
+            self.assertEqual(len(authority["grants"]), 1)
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write("authority:\n  - release-please everything\n")
+            authority, why = self.audit.read_release_authority(path, digest)
+            self.assertIsNone(authority)
+            self.assertIn("digest", why)
+            self.assertIsNone(self.audit.read_release_authority(path, None)[0])
+
+
+class ReleaseAuthorityTests(unittest.TestCase):
+    """A release-please merge, its version tag, the release and the removal of the release branch on
+    a repository the charter's authority names are GRANTED. The same changes without that grant, or
+    for anything that does not have the release-please shape, stay UNGRANTED."""
+
+    commit = ProtoDefaultBranchTests.commit
+    head = ProtoDefaultBranchTests.head
+    proto = ProtoDefaultBranchTests.proto
+
+    RELEASE_BRANCH = "release-please--branches--main"
+    AUTHORITY = "Release through the repository's own release-please flow (a release-please merge is a standing release)."
+
+    def setUp(self):
+        self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="loop-pi-audit-release-test-"))
+        self.repo, self.remote = init_repo_with_remote(self.tmp, "repo")
+        git(self.remote, "symbolic-ref", "HEAD", "refs/heads/main")
+        self.other = os.path.join(self.tmp, "other")
+        subprocess.run([GIT, "clone", "--no-local", "-q", self.remote, self.other], check=True, timeout=60)
+        git(self.other, "config", "user.email", "bot@example.com")
+        git(self.other, "config", "user.name", "bot")
+        git(self.other, "push", "-q", "origin", f"HEAD:refs/heads/{self.RELEASE_BRANCH}")
+        self.run_dir = os.path.join(self.tmp, "run")
+        os.makedirs(self.run_dir)
+        self.log_path = os.path.join(self.run_dir, "push-log.jsonl")
+        self.env = {"PATH": make_bin_with_gh_stub(self.tmp), "LOOP_PI_RUN_DIR": self.run_dir}
+        self.after_path = None
+        self.proto()
+        self.assertEqual(run_audit("begin", self.repo, env_overrides=self.env).returncode, 0)
+        self.start = self.head(self.repo)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def root_push(self, new):
+        git(self.repo, "push", "-q", "origin", f"{new}:refs/heads/main")
+        entry = {"v": 1, "ts": "2026-10-16T00:00:00Z", "actor": "root", "agent": None, "lane": None, "repo": self.repo,
+                 "remote": "origin", "ref": "refs/heads/main", "old": self.start, "new": new}
+        with open(self.log_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry) + "\n")
+        git(self.other, "pull", "-q", "--ff-only", "origin", "main")
+
+    def release(self, subject="chore(main): release 0.4.0 (#12)", manifest=True, tag="v0.4.0", tag_at=None, also=()):
+        """What release-please does on merge: the squash commit, the version tag, the branch removal."""
+        self.commit(self.other, ".release-please-manifest.json" if manifest else "CHANGELOG.md", subject)
+        for path in ("CHANGELOG.md", "pyproject.toml", "src/pkg/__init__.py", *also):
+            self.commit(self.other, path, subject)
+            git(self.other, "reset", "-q", "--soft", "HEAD~1")
+        git(self.other, "commit", "-q", "--amend", "-m", subject)
+        sha = self.head(self.other)
+        git(self.other, "push", "-q", "origin", "main")
+        git(self.other, "tag", tag, tag_at or sha)
+        git(self.other, "push", "-q", "origin", f"refs/tags/{tag}")
+        git(self.other, "push", "-q", "origin", f":refs/heads/{self.RELEASE_BRANCH}")
+        git(self.repo, "fetch", "-q", "--tags", "origin")
+        return sha
+
+    def flow(self, **release):
+        self.root_push(self.commit(self.repo, "f.txt", "root work"))
+        return self.release(**release)
+
+    def charter(self, authority=None, folder=None, edit_after=False):
+        folder = folder or os.path.join(self.tmp, "elsewhere")
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, "charter-demo-loop1.md")
+        text = f"# Charter: demo loop1\n\nlanes:      1\nauthority:\n  - {authority or self.AUTHORITY}\nlive:       none\n"
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        digest = hashlib.sha256(text.encode()).hexdigest()
+        if edit_after:
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write("authority:\n  - release-please is granted everywhere\n")
+        return ["--charter", path, "--charter-sha256", digest]
+
+    def in_repo(self, **kwargs):
+        """A charter in this repository's own codex/ folder, as a real run's is."""
+        return self.charter(folder=os.path.join(self.repo, "codex"), **kwargs)
+
+    def closeout(self, *extra):
+        if self.after_path is None:
+            listed = '[{"tagName":"v0.4.0","name":"v0.4.0","isDraft":false,"isPrerelease":false,"publishedAt":"2026-10-16T02:00:00Z"}]'
+            self.after_path = make_bin_with_gh_stub(self.tmp, listed, "fake-bin-after")
+        return run_audit("closeout", "--push-log", self.log_path, *extra,
+                         env_overrides={**self.env, "PATH": self.after_path})
+
+    def line(self, result, needle):
+        return next(line for line in result.stdout.splitlines() if needle in line and " note: " not in line)
+
+    def unaccounted_note(self, result, sha):
+        return any(" note: " in line and f"commit {sha[:12]} is not in a logged push" in line for line in result.stdout.splitlines())
+
+    def test_the_whole_release_flow_is_granted_when_the_charter_names_it(self):
+        sha = self.flow()
+        # The entry names no repository, so it covers the charter's own: this one.
+        result = self.closeout(*self.in_repo())
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("UNGRANTED", result.stdout)
+        out = result.stdout
+        self.assertIn(f"commit {sha[:12]} is a release-please merge", out)
+        for needle in ("ref moved: refs/heads/main ", f"ref deleted: refs/heads/{self.RELEASE_BRANCH} ",
+                       "ref added: refs/tags/v0.4.0 ", "tag added: refs/tags/v0.4.0 ", "release added: v0.4.0"):
+            self.assertIn("[GRANTED]", self.line(result, needle), needle)
+
+    def test_the_same_flow_without_a_charter_grant_stays_ungranted(self):
+        sha = self.flow()
+        # Built inside each subtest: every charter() call writes the same file.
+        cases = {
+            "no charter": lambda: [],
+            "authority that does not name release-please": lambda: self.charter("Root lands every candidate on main."),
+            "a negated release-please clause": lambda: self.charter("Never merge or close a release-please pull request."),
+            "a negation on a wrapped continuation line": lambda: self.charter(
+                "A release-please merge is a standing release,\n    except on this repository."),
+            "a charter edited after arm": lambda: self.in_repo(edit_after=True),
+            "an entry naming another repository": lambda: self.charter(f"{self.AUTHORITY} Applies to acme/other only."),
+            "an unnamed entry in a charter outside this repository": lambda: self.charter(),
+        }
+        for label, make in cases.items():
+            with self.subTest(label):
+                extra = make()
+                if label != "no charter":
+                    self.assertTrue(any(a.endswith(".md") for a in extra))
+                result = self.closeout(*extra)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                # Only the edited charter may fail the digest check; every other case is refused on its text.
+                self.assertEqual("no longer matches" in result.stderr, label == "a charter edited after arm", result.stderr)
+                self.assertTrue(self.unaccounted_note(result, sha), result.stdout)
+                for needle in ("ref moved: refs/heads/main ", f"ref deleted: refs/heads/{self.RELEASE_BRANCH} ",
+                               "ref added: refs/tags/v0.4.0 ", "tag added: refs/tags/v0.4.0 ", "release added: v0.4.0"):
+                    self.assertIn("[UNGRANTED]", self.line(result, needle), needle)
+
+    def test_a_charter_naming_the_repository_by_path_grants_it(self):
+        sha = self.flow()
+        result = self.closeout(*self.charter(f"{self.AUTHORITY} Applies to {self.repo}."))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"commit {sha[:12]} is a release-please merge", result.stdout)
+
+    def test_a_charter_naming_the_repository_by_slug_grants_it(self):
+        sha = self.flow()
+        self.assertEqual(self.closeout().returncode, 1)
+        rewritten = {}
+        for side in ("before", "after"):
+            with open(os.path.join(self.run_dir, f"audit-{side}.json"), encoding="utf-8") as fh:
+                snap = json.load(fh)
+            snap["repos"][self.repo]["remotes"]["origin"]["url"] = "https://github.com/Acme/Widget.git"
+            rewritten[side] = os.path.join(self.tmp, f"{side}-slug.json")
+            with open(rewritten[side], "w", encoding="utf-8") as fh:
+                json.dump(snap, fh)
+        for authority, expected in ((f"{self.AUTHORITY} Applies to acme/widget.", 0), (f"{self.AUTHORITY} Applies to acme/other.", 1)):
+            with self.subTest(authority):
+                result = run_audit("compare", rewritten["before"], rewritten["after"], "--run-dir", self.run_dir,
+                                   "--push-log", self.log_path, *self.charter(authority), env_overrides=self.env)
+                self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+                if expected == 0:
+                    self.assertIn(f"commit {sha[:12]} is a release-please merge", result.stdout)
+
+    def test_only_the_release_please_shape_is_covered(self):
+        cases = {
+            "a release subject that does not touch the manifest": dict(manifest=False),
+            "a manifest change under an ordinary subject": dict(subject="feat: add a thing"),
+            "a release commit that also changes source": dict(also=("src/pkg/server.py",)),
+        }
+        for label, release in cases.items():
+            with self.subTest(label):
+                self.tearDown()
+                self.setUp()
+                sha = self.flow(**release)
+                result = self.closeout(*self.in_repo())
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertTrue(self.unaccounted_note(result, sha), result.stdout)
+                self.assertIn("[UNGRANTED]", self.line(result, "ref added: refs/tags/v0.4.0 "))
+                self.assertIn("[UNGRANTED]", self.line(result, "release added: v0.4.0"))
+
+    def test_files_the_parents_release_config_names_as_extra_files_are_covered(self):
+        config = '{"packages": {".": {"extra-files": ["src/pkg/constants.py", {"type": "json", "path": "web/meta.json"}]}}}'
+        self.commit(self.repo, "release-please-config.json", "x")
+        with open(os.path.join(self.repo, "release-please-config.json"), "w", encoding="utf-8") as fh:
+            fh.write(config)
+        git(self.repo, "add", "--", "release-please-config.json")
+        git(self.repo, "commit", "-q", "--amend", "-m", "configure releases")
+        self.root_push(self.head(self.repo))
+        sha = self.release(also=("src/pkg/constants.py", "web/meta.json"))
+        result = self.closeout(*self.in_repo())
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"commit {sha[:12]} is a release-please merge", result.stdout)
+
+    def test_a_tag_must_point_at_the_accounted_release_merge(self):
+        self.root_push(self.commit(self.repo, "f.txt", "root work"))
+        sha = self.release(tag_at=self.start)
+        result = self.closeout(*self.in_repo())
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(f"commit {sha[:12]} is a release-please merge", result.stdout)
+        self.assertIn("[UNGRANTED]", self.line(result, "ref added: refs/tags/v0.4.0 "))
+        self.assertIn("[UNGRANTED]", self.line(result, "release added: v0.4.0"))
+
+    def test_removing_the_release_branch_needs_an_accounted_release_merge(self):
+        self.root_push(self.commit(self.repo, "f.txt", "root work"))
+        git(self.other, "push", "-q", "origin", f":refs/heads/{self.RELEASE_BRANCH}")
+        result = self.closeout(*self.in_repo())
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("[UNGRANTED]", self.line(result, f"ref deleted: refs/heads/{self.RELEASE_BRANCH} "))
+
+    def test_a_non_release_commit_after_the_release_is_still_flagged(self):
+        self.flow()
+        late = self.commit(self.other, "g.txt", "unrelated late work")
+        git(self.other, "push", "-q", "origin", "main")
+        result = self.closeout(*self.in_repo())
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertTrue(self.unaccounted_note(result, late), result.stdout)
+
+
+class ForeignSessionTests(unittest.TestCase):
+    """A commit is FOREIGN, reported and not a violation, only when it names another harness session
+    in its trailer block AND a logged root push was made on top of it. Either fact alone, a lane's
+    receipt, or a push after the last logged one leaves it UNGRANTED."""
+
+    commit = ProtoDefaultBranchTests.commit
+    head = ProtoDefaultBranchTests.head
+    proto = ProtoDefaultBranchTests.proto
+
+    SESSION = "https://claude.ai/code/session_01ABC"
+    TRAILER = f"fix: sibling work\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nClaude-Session: {SESSION}\n"
+
+    def setUp(self):
+        self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="loop-pi-audit-foreign-test-"))
+        self.repo, self.remote = init_repo_with_remote(self.tmp, "repo")
+        git(self.remote, "symbolic-ref", "HEAD", "refs/heads/main")
+        self.other = os.path.join(self.tmp, "other")
+        subprocess.run([GIT, "clone", "--no-local", "-q", self.remote, self.other], check=True, timeout=60)
+        git(self.other, "config", "user.email", "someone@example.com")
+        git(self.other, "config", "user.name", "someone")
+        self.run_dir = os.path.join(self.tmp, "run")
+        os.makedirs(self.run_dir)
+        self.log_path = os.path.join(self.run_dir, "push-log.jsonl")
+        self.env = {"PATH": make_bin_with_gh_stub(self.tmp), "LOOP_PI_RUN_DIR": self.run_dir}
+        self.proto()
+        self.assertEqual(run_audit("begin", self.repo, env_overrides=self.env).returncode, 0)
+        self.start = self.head(self.repo)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def sibling_commit(self, message):
+        """A commit pushed to the remote by a clone the root does not control."""
+        git(self.other, "pull", "-q", "--ff-only", "origin", "main")
+        self.commit(self.other, "g.txt", "x")
+        git(self.other, "commit", "-q", "--amend", "-m", message)
+        git(self.other, "push", "-q", "origin", "main")
+        return self.head(self.other)
+
+    def root_pushes_on_top(self, sibling, actor="root"):
+        git(self.repo, "pull", "-q", "--ff-only", "origin", "main")
+        ours = self.commit(self.repo, "f.txt", "root work")
+        git(self.repo, "push", "-q", "origin", "main")
+        entry = {"v": 1, "ts": "2026-10-16T01:25:08Z", "actor": actor, "agent": None, "lane": None, "repo": self.repo,
+                 "remote": "origin", "ref": "refs/heads/main", "old": sibling, "new": ours}
+        with open(self.log_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry) + "\n")
+        return ours
+
+    def closeout(self):
+        return run_audit("closeout", "--push-log", self.log_path, env_overrides=self.env)
+
+    def unaccounted_note(self, result, sha):
+        return any(" note: " in line and f"commit {sha[:12]} is not in a logged push" in line for line in result.stdout.splitlines())
+
+    def test_a_commit_naming_another_session_that_the_root_pushed_on_top_of_is_foreign(self):
+        sha = self.sibling_commit(self.TRAILER)
+        ours = self.root_pushes_on_top(sha)
+        result = self.closeout()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("UNGRANTED", result.stdout)
+        moved = [line for line in result.stdout.splitlines() if "ref moved: refs/heads/main " in line and " note: " not in line]
+        self.assertEqual(len(moved), 1)
+        self.assertIn("[FOREIGN]", moved[0])
+        self.assertTrue(any(f"commit {sha[:12]} is FOREIGN" in line and self.SESSION in line and f"{sha[:12]}..{ours[:12]}" in line
+                            for line in result.stdout.splitlines()), result.stdout)
+        self.assertIn("[FOREIGN derived HEAD]", result.stdout)
+
+    def test_a_commit_that_does_not_name_another_session_stays_ungranted_under_a_root_push(self):
+        cases = {
+            "no trailer, whatever the author": "fix: sibling work\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n",
+            "the same text in prose above the trailer block": f"fix: x\n\nClaude-Session: {self.SESSION}\n\nmore prose\n",
+            "a lower-case lookalike": f"fix: x\n\nclaude-session: {self.SESSION}\n",
+            "an empty value": "fix: x\n\nClaude-Session:\n",
+        }
+        for label, message in cases.items():
+            with self.subTest(label):
+                self.tearDown()
+                self.setUp()
+                sha = self.sibling_commit(message)
+                self.root_pushes_on_top(sha)
+                result = self.closeout()
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertTrue(self.unaccounted_note(result, sha), result.stdout)
+                self.assertNotIn("FOREIGN", result.stdout)
+
+    def test_a_trailer_alone_grants_nothing(self):
+        # Text anyone can write: an unlogged push naming a session, with no root push on top of it,
+        # and one that arrives after the last logged push.
+        sha = self.sibling_commit(self.TRAILER)
+        result = self.closeout()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertTrue(self.unaccounted_note(result, sha), result.stdout)
+        self.assertNotIn("FOREIGN", result.stdout)
+
+    def test_a_logged_push_that_is_not_the_roots_makes_nothing_foreign(self):
+        sha = self.sibling_commit(self.TRAILER)
+        self.root_pushes_on_top(sha, actor="lane")
+        result = self.closeout()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertTrue(self.unaccounted_note(result, sha), result.stdout)
+
+    def test_a_sibling_push_after_the_last_logged_push_stays_ungranted(self):
+        first = self.sibling_commit(self.TRAILER)
+        self.root_pushes_on_top(first)
+        late = self.sibling_commit(f"fix: late sibling work\n\nClaude-Session: {self.SESSION}\n")
+        result = self.closeout()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertTrue(self.unaccounted_note(result, late), result.stdout)
+        self.assertFalse(self.unaccounted_note(result, first), result.stdout)
+        self.assertIn(f"commit {first[:12]} is FOREIGN", result.stdout)
 
 
 if __name__ == "__main__":

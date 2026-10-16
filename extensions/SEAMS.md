@@ -821,8 +821,9 @@ paths are exact, bash write detection is best-effort.
 
 - **Closeout**: `/loop-closeout` (loop-wait) emits `pi.events.emit("loop-closeout", {lines, pending})`
   after its sweep; loop-continuation runs
-  `loop-pi-audit closeout --run-dir <rd> --push-log <rd>/push-log.jsonl`,
-  lane-worktrees adds its sweep, and the root gets one `loop-closeout-audit` custom message (a push
+  `loop-pi-audit closeout --run-dir <rd> --push-log <rd>/push-log.jsonl` plus, for a root armed with a
+  charter, `--charter <path> --charter-sha256 <digest frozen at arm>` (`rootContext.goalPath` and
+  `goalSha256`); lane-worktrees adds its sweep, and the root gets one `loop-closeout-audit` custom message (a push
   that resets the nudge chain).
 - **Incidents**: `incidents/root/<sid>-<UTC>-context-overflow.json`
   `{v, session, class: loop-root-context-overflow, at, home, cwd, live_runs, detail}`, once per
@@ -918,7 +919,11 @@ paths are exact, bash write detection is best-effort.
   `compaction-failed` or `quota-exhausted` fact; judgements up to 4 KB; one `open` per log.
 - **loop-pi-audit**: under retained marker evidence a default-branch move is accounted for only when every commit in
   `before..after` lies in a push-log `old..new` range for that repo and ref or touches only
-  `backlog/`; commit metadata grants nothing. Every other added, moved or deleted ref, tag or
+  `backlog/`; commit metadata grants nothing. Two more commits are accounted for: one whose
+  final message paragraph carries a `Claude-Session:` trailer and that a logged `actor: root` push
+  was made on top of (FOREIGN: reported, not a violation, never a grant; both facts are required) and, where the charter's `authority:` names release-please for the repository, a
+  release-please merge, its version tag, its release and the deletion of its `release-please--*`
+  branch (GRANTED; a charter that no longer hashes to its arm-time digest grants nothing). Every other added, moved or deleted ref, tag or
   release fails the audit, except `refs/pull/*` (foreign). Another snapshotted remote whose
   unchanged URL is byte-identical to the canonical repository's (no scheme, user, host-case or
   path normalisation) receives only that canonical's exact `actor: root` `old..new` ranges. Only absolute
@@ -1064,3 +1069,19 @@ set with `ctx.ui.setStatus`; it sets no widget and clears the key at `session_sh
   without a UI.
 - Format: `loop: <N>/<cap> lanes (or <N> lane(s) when no cap) · <N> timers · <N> watchers · next
   HH:MM (earliest timer or watcher deadline, if any) · nudge <n>/<max> · hb <age> ago (or hb -)`.
+- **Nested runs (pi-subagents 0.78.0).** `subagent status` lists the runs whose `status.json`
+  `sessionId` is the asking session's file. A run a lane launches (depth 2) carries the lane's
+  session file, so the root's own listing omits it and `status id=<run>` answers "Async run not
+  found". Every child session sits under the launching session's directory
+  (`<sessions>/<root basename>/...`), so `loop-status/descendants.ts` treats a live run whose
+  `sessionId` is inside the root's directory as nested. It reads only
+  `$PI_SUBAGENTS_TEMP_ROOT/async-subagent-runs/.active-runs` and each run's `status.json`, writes
+  nothing, and skips anything it cannot parse. The extension then (a) appends a "Nested runs below
+  this session's lanes" section, each with its parent lane run id when a listed lane's session file
+  names it, to a no-id `subagent status` result; (b) answers `status id=<nested run or unique
+  prefix>` in any state in place of "Async run not found", leaving every other result untouched;
+  and (c) shows `(+N nested)` beside the lane count. Views (`fleet`, `transcript`) and `dir`
+  lookups are never altered. An unset `PI_SUBAGENTS_TEMP_ROOT` shows no nested runs.
+- A pi child's parent link is already recorded by pi-subagents: the child session header's
+  `parentSession` is the launching session's file path. For a lane that file is always named
+  `session.jsonl`, so a reader that wants the parent's id must resolve the path, not its basename.

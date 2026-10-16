@@ -131,7 +131,8 @@ refs, the local tags and the GitHub releases in `<run dir>/audit-before.json`; `
 <repo>` adds another repository for a cross-repo charter. `/loop-closeout` runs
 
 ```sh
-loop-pi-audit closeout --run-dir <run dir> --push-log <run dir>/push-log.jsonl
+loop-pi-audit closeout --run-dir <run dir> --push-log <run dir>/push-log.jsonl \
+  --charter <charter> --charter-sha256 <digest frozen at arm>
 ```
 
 which snapshots the same repositories again and compares. A run dir that holds a `loop-pi-proto`
@@ -142,17 +143,39 @@ evidence, judges a move of a remote's default branch commit by commit:
   per successfully updated ref with `repo`, `ref`, `old` and `new`, written by loop-guard after the
   root's own pushes.
 - The move is accounted for only when every commit in `before..after` lies in some logged
-  `old..new` range for that repository and ref, or touches only paths under `backlog/`. Anything
-  else is `UNGRANTED` and printed in a `note:` line. A foreign commit between two logged pushes is
-  therefore flagged, as is any commit after the last logged push. The fast-forward check still
-  applies, and a derived `HEAD` move follows the default branch's verdict.
+  `old..new` range for that repository and ref, touches only paths under `backlog/`, or is one of
+  the two cases below. Anything else is `UNGRANTED` and printed in a `note:` line, including any
+  commit after the last logged push. The fast-forward check still applies, and a derived `HEAD`
+  move follows the default branch's verdict.
+- **Foreign commit.** A commit that is not in a logged push is reported as `FOREIGN`, and does not
+  fail the audit, only when two independent facts hold. Its message ends with a `Claude-Session:
+  <id>` trailer in the final paragraph (Claude Code writes it on every commit it makes; a loop-pi
+  root writes none), and it is the `old`, or an ancestor of the `old`, of a logged `actor: root`
+  push, so the root pushed on top of it. The trailer alone is text anyone can write and the receipt
+  alone cannot tell a sibling session from an unlogged writer of this run, so neither downgrades
+  `UNGRANTED` by itself: an unattributed commit, a trailer with no root push over it (including a
+  sibling's push after the last logged push) and a lane receipt all stay `UNGRANTED`. It is never a
+  grant, and Git author and committer are still never read. The report names the session.
+- **Release authority.** `closeout` is given the charter frozen at arm (`--charter FILE
+  --charter-sha256 HEX`; `compare` takes the same flags). A charter that no longer hashes to the
+  digest grants nothing. An entry under the charter's `authority:` key grants releases when one of
+  its clauses (split at `.` and `;`) names `release-please` and contains no `no`, `not`, `never`,
+  `without`, `except` or similar. The entry covers the repositories it names (`owner/name` of a
+  remote URL, or an absolute path); an entry naming none covers the charter's own repository, the
+  parent of its `codex/` folder. On a covered repository these are `GRANTED`: a default-branch
+  commit whose subject is `chore(...): release ...` and that changes
+  `.release-please-manifest.json`; a new version tag (`v1.2.3`, `name-v1.2.3`, `name@1.2.3`) whose
+  commit is such a merge in this audit, as a remote ref or a local tag; the GitHub release for a
+  granted tag; and the deletion of a `release-please--*` branch once such a merge is accounted for.
+  Anything else on the repository, including a release-shaped commit that lacks the manifest change,
+  a tag on another commit and a moved or added release branch, stays `UNGRANTED`.
 - Another snapshotted remote whose unchanged URL is byte-identical to the canonical repository's
   (no scheme, user, host-case or path normalisation) receives only that canonical's exact
   `actor: root` `old..new` ranges. Only absolute URLs qualify (`scheme://`, scp-like `host:path`,
   absolute local path); a relative URL such as `../up.git` never transfers.
-- A push the log never saw (watcher, subprocess, script) is `UNGRANTED`; author, committer and
-  current SHA are never backfilled. Refusing such pushes before mutation in loop-guard was
-  deliberately not chosen.
+- A push the log never saw (watcher, subprocess, script) is `UNGRANTED` unless the foreign rule
+  above applies; author, committer and current SHA are never backfilled. Refusing such pushes
+  before mutation in loop-guard was deliberately not chosen.
 - Any other added, moved or deleted ref, tag or release is reported and fails the audit (exit 1),
   except `refs/pull/*` changes, which are reported as foreign.
 - `compare BEFORE AFTER` applies the same rules when given `--run-dir DIR` for a run dir with the

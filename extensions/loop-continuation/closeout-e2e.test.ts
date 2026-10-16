@@ -41,6 +41,7 @@ test("/loop-closeout runs the audit and the worktree sweep and reports both to t
     const content = String((message.message as { content?: unknown }).content);
     assert.match(content, /exited 0 \(clean\)/);
     assert.match(content, new RegExp(`audit ran: closeout --run-dir ${f.runDir} --push-log ${join(f.runDir, "push-log.jsonl")}`));
+    assert.match(content, /--charter \S+charter\S+\.md --charter-sha256 [0-9a-f]{64}/);
     assert.match(content, /loop-closeout: stopped 0 watcher\(s\), cancelled 0 timer\(s\)/);
     assert.match(content, /lane-worktrees: removed 0 worktree\(s\), deleted 0 merged branch\(es\); no unmerged lane branches/);
   } finally {

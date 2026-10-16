@@ -403,7 +403,8 @@ export default function (pi: ExtensionAPI) {
     if (!dir || closeoutRunning) return;
     closeoutRunning = true;
     try {
-      const args = closeoutArgs(dir);
+      const frozen = state.rootContext;
+      const args = closeoutArgs(dir, frozen ? { path: frozen.goalPath, sha256: frozen.goalSha256 } : null);
       const bin = auditBinary(getAgentDir());
       const result = await runCloseoutAudit(bin, args, launchCwd ?? process.cwd());
       await Promise.allSettled(pending);
