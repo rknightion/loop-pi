@@ -455,3 +455,53 @@ test("root: a model-supplied binding is replaced on a single launch and dropped 
   assert.equal((await launch("4", optManagement))?.block ?? false, false);
   assert.equal((optManagement.options as Record<string, unknown>).extensionBindings, undefined);
 });
+
+// ---------------------------------------------------------------------------
+// Brief header: a launch whose first line the state log cannot parse is refused.
+// ---------------------------------------------------------------------------
+
+test("root: a launch whose first line fails the brief header parse is refused with the exact form (armed runs only)", async (t) => {
+  const previousRunDir = process.env.LOOP_PI_RUN_DIR;
+  const runDir = await mkdtemp(join(tmpdir(), "loop-guard-brief-run-"));
+  t.after(async () => {
+    if (previousRunDir === undefined) delete process.env.LOOP_PI_RUN_DIR;
+    else process.env.LOOP_PI_RUN_DIR = previousRunDir;
+    await rm(runDir, { recursive: true, force: true });
+  });
+  process.env.LOOP_PI_RUN_DIR = runDir;
+  const { ctx } = fakeCtx(agentDir);
+  const make = () => {
+    const fake = fakeApi();
+    rootExtension(fake.api as any);
+    const handler = toolCallHandler(fake.handlers);
+    return (input: Record<string, unknown>) => handler({ type: "tool_call", toolCallId: "1", toolName: "subagent", input }, ctx);
+  };
+  const drifted = [
+    "Lane identity · Task T-387 · Tier: routine",
+    "Lane x · Task Y · Tier: routine",
+    "Lane: x · Tier: routine",
+    "Lane: x · Task: Y · Tier: urgent",
+    "Do the thing",
+  ];
+  const good = "Lane: w1 · Task: T-1 (add the thing) · Tier: routine\nWhy: x";
+
+  // Without the run marker nothing is a loop brief: ordinary use is untouched.
+  const unarmed = make();
+  for (const task of drifted) assert.equal((await unarmed({ agent: "worker", task }))?.block ?? false, false, task);
+
+  await writeFile(join(runDir, "loop-pi-proto"), "2\n", "utf8");
+  const armed = make();
+  for (const agent of ["worker", "senior", "senior-escalation", "reviewer", "scout"]) {
+    for (const task of drifted) {
+      const result = await armed({ agent, task });
+      assert.equal(result?.block, true, `${agent}: ${task}`);
+      assert.match(result?.reason ?? "", /Lane: <id> · Task: <ID> \(<title>\) · Tier: routine\|guarded/);
+    }
+    assert.equal((await armed({ agent, task: good }))?.block ?? false, false, agent);
+    assert.equal((await armed({ agent, task: `\n\n  ${good}` }))?.block ?? false, false, `${agent}: leading blank lines`);
+  }
+  // The merged `options` view is read; management calls are not launches.
+  assert.equal((await armed({ agent: "worker", options: { task: drifted[1] } }))?.block, true);
+  assert.equal((await armed({ action: "status", id: "run-a" }))?.block ?? false, false);
+  assert.equal((await armed({ action: "resume", id: "run-a", message: "carry on" }))?.block ?? false, false);
+});

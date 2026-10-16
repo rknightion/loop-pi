@@ -26,6 +26,7 @@
 // receives them (see parseCommand).
 
 import type { GateDeclarations } from "./gates.ts";
+import { parseBrief } from "../loop-state/core.ts";
 import { subagentCallView, subagentFields } from "./subagent-view.ts";
 
 export type Role = "root" | "lane";
@@ -2114,6 +2115,26 @@ export function evaluateSubagentCall(raw: SubagentInput, roster: ReadonlySet<str
     return block(`loop-guard: '${input.agent}' is outside the agent set the root may spawn (${[...roster].join(", ")}).`);
   }
   return allow();
+}
+
+/** The exact first line of a lane brief, as loop-state and lane-worktrees parse it. */
+export const BRIEF_HEADER_FORM = "Lane: <id> · Task: <ID> (<title>) · Tier: routine|guarded";
+
+/** Armed-run rule: a launch whose first non-empty line `parseBrief` rejects is refused. Such a lane
+ *  would be missing from the state log and from patch capture, with no signal to the root. Applies
+ *  to every roster agent: reviewer and scout lanes are recorded from the same header. */
+export function evaluateBriefHeader(raw: SubagentInput): Decision {
+  const input = subagentFields(raw);
+  if (input.action !== undefined || typeof input.agent !== "string" || typeof input.task !== "string") return allow();
+  if (parseBrief(input.task)) return allow();
+  const first = input.task.split(/\r?\n/).find((line) => line.trim() !== "")?.trim() ?? "";
+  const seen = first.length > 100 ? `${first.slice(0, 100)}...` : first;
+  return block(
+    `loop-guard: the first non-empty line of a lane brief must be exactly \`${BRIEF_HEADER_FORM}\`, ` +
+      "with a colon after Lane, Task and Tier, the middle dot as separator and no middle dot inside the title; " +
+      "a lane whose header differs is missing from the state log and from patch capture. " +
+      `Got: \`${seen}\`. Relaunch with the header corrected.`,
+  );
 }
 
 /** Shared host-execution policy only. Native child role/depth/allowlists stay native-owned. */

@@ -7,11 +7,32 @@ import type { FrozenRootContext } from "../loop-continuation/state.ts";
 export const CONTEXT_BUDGET_STATE = "loop-root-context-budget";
 export const COMPACT_PERCENT = 80;
 export const REARM_PERCENT = 70;
+/** Share of the context window past which a root compacts after a landed push. Well below the
+ *  80 percent backstop so a long loop compacts at a batch boundary, with room to grow before the next. */
+export const PUSH_COMPACT_PERCENT = 55;
+export const PUSH_COMPACT_PERCENT_ENV = "LOOP_PI_COMPACT_AFTER_PUSH_PERCENT";
 export const MAX_COMPACTIONS = 2;
 export const ROOT_SUMMARY_MAX_BYTES = 32768;
 const MAX_LOG_BYTES = 4 * 1024 * 1024;
 const INSTRUCTIONS = "loop-state: frozen-root-state/1";
 const sha256 = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
+
+/** The push share: the environment's whole-number percentage in 1..79, else the default. */
+export function pushCompactPercent(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env[PUSH_COMPACT_PERCENT_ENV];
+  if (typeof raw === "string" && /^\d{1,2}$/.test(raw.trim())) {
+    const value = Number(raw.trim());
+    if (value >= 1 && value < COMPACT_PERCENT) return value;
+  }
+  return PUSH_COMPACT_PERCENT;
+}
+
+/** Why this extension compacted the root; named in the summary the root reads afterwards. */
+export interface CompactionTrigger {
+  reason: "landed-push" | "context-backstop";
+  percent: number;
+  threshold: number;
+}
 
 export interface RootLaunchContext {
   rootContext?: FrozenRootContext;
@@ -37,7 +58,7 @@ function ledgerBytes(log: string): Buffer {
   } finally { closeSync(fd); }
 }
 
-export function stateSummary(ctx: ExtensionContext, launch: RootLaunchContext, log: string, digest: string): { summary: string; logSha256: string } {
+export function stateSummary(ctx: ExtensionContext, launch: RootLaunchContext, log: string, digest: string, trigger?: CompactionTrigger): { summary: string; logSha256: string } {
   const frozen = launch.rootContext;
   if (!frozen) throw new Error("session has no arm-time frozen charter/root snapshot; no moving-file fallback");
   if (frozen.sessionId !== ctx.sessionManager.getSessionId() || frozen.sessionFile !== (ctx.sessionManager.getSessionFile() ?? null) ||
@@ -71,7 +92,15 @@ export function stateSummary(ctx: ExtensionContext, launch: RootLaunchContext, l
       Object.fromEntries(["seq", "ev", "by", "task", "tasks", "lane", "run", "agent", "kind", "tier", "recovery_of",
         "status", "needs", "until", "accepted", "sha", "landed", "mode", "exit"].filter(key => key in row).map(key => [key, row[key]]))),
   };
+  const why = !trigger ? [] : [
+    "Compaction trigger: the loop-pi context-budget extension (loop-state) compacted this root automatically; " +
+      "it was not an operator request and not a failure, and nothing was lost that the state log does not hold. " +
+      (trigger.reason === "landed-push"
+        ? `Reason: a push landed while context use was ${Math.round(trigger.percent)} percent, past the ${trigger.threshold} percent push share.`
+        : `Reason: context use reached ${Math.round(trigger.percent)} percent, the ${trigger.threshold} percent backstop.`),
+  ];
   const summary = [
+    ...why,
     "Same root, same session. Recover from the frozen charter and append-only state, not prior conversation.",
     "Compaction grants no authority, resets no consumed attempts and sponsors no child or root restart.",
     "Dispatch counts below are recorded runs only; the frozen charter retains prior lineage, ceilings and remaining allowance.",
@@ -113,12 +142,14 @@ export function nativeChildrenQuiet(data: any): boolean {
 export function installContextBudget(pi: ExtensionAPI, services: {
   drain(): Promise<unknown>;
   quiet(): Promise<boolean>;
-  prepare(ctx: ExtensionContext): Promise<{ summary: string; log: string; logSha256: string } | null>;
+  prepare(ctx: ExtensionContext, trigger: CompactionTrigger): Promise<{ summary: string; log: string; logSha256: string } | null>;
   warn(message: string): void;
 }) {
   let latched = false;
   let revision = 0;
   let attempts = 0;
+  // A push landed since the last settled boundary. Spent at the next evaluated boundary.
+  let pushLanded = false;
   let binding = "";
   let pending: { summary: string; log: string; logSha256: string; revision: number; anchor: string } | null = null;
   const persist = () => pi.appendEntry(CONTEXT_BUDGET_STATE, { v: 1, latched, attempts, binding });
@@ -165,18 +196,33 @@ export function installContextBudget(pi: ExtensionAPI, services: {
       return;
     }
     if (usage.percent < REARM_PERCENT && latched) { latched = false; persist(); }
-    if (usage.percent < COMPACT_PERCENT || latched || attempts >= MAX_COMPACTIONS) return;
+    // A landed push is a batch boundary: state is on disk, so the fleet need not be quiet. It is
+    // spent here whether or not it compacts; the next push is the next boundary.
+    const threshold = pushCompactPercent();
+    const viaPush = pushLanded && usage.percent >= threshold;
+    pushLanded = false;
+    const backstop = usage.percent >= COMPACT_PERCENT;
+    if (!viaPush && (!backstop || latched)) return;
+    if (attempts >= MAX_COMPACTIONS) return;
     const observed = revision;
-    try { if (!await services.quiet()) return; }
-    catch { services.warn("context budget deferred: native child activity unavailable"); return; }
-    if (revision !== observed || !ctx.isIdle() || ctx.hasPendingMessages()) return;
-    latched = true;
+    if (!viaPush) {
+      try { if (!await services.quiet()) return; }
+      catch { services.warn("context budget deferred: native child activity unavailable"); return; }
+      if (revision !== observed || !ctx.isIdle() || ctx.hasPendingMessages()) return;
+      latched = true;
+    }
+    const trigger: CompactionTrigger = viaPush
+      ? { reason: "landed-push", percent: usage.percent, threshold }
+      : { reason: "context-backstop", percent: usage.percent, threshold: COMPACT_PERCENT };
     attempts++;
     persist(); // Preparation failures consume this generation too; no repeated automatic attempts.
+    // A push compaction that completes, or is declined without an error, hands its attempt back:
+    // the allowance bounds failures, and a long loop compacts once per batch.
+    let release = false;
     try {
       await services.drain();
-      const prepared = await services.prepare(ctx);
-      if (!prepared || revision !== observed || !ctx.isIdle() || ctx.hasPendingMessages()) return;
+      const prepared = await services.prepare(ctx, trigger);
+      if (!prepared || revision !== observed || !ctx.isIdle() || ctx.hasPendingMessages()) { release = viaPush && !!prepared; return; }
       persist(); // Context-invisible native kept boundary after all queued entries.
       const anchor = ctx.sessionManager.getBranch().at(-1);
       if (anchor?.type !== "custom" || anchor.customType !== CONTEXT_BUDGET_STATE) throw new Error("native custom attempt anchor missing");
@@ -184,11 +230,18 @@ export function installContextBudget(pi: ExtensionAPI, services: {
       // Await callbacks, not an invented return promise. Native compact stays in this session.
       // Pi defers prompts received during agent_settled until this handler finishes.
       await new Promise<void>(done => ctx.compact({ customInstructions: INSTRUCTIONS,
-        onComplete: () => done(), onError: error => { services.warn(`state compaction stopped: ${error.message}`); done(); },
+        onComplete: () => { release = viaPush; done(); }, onError: error => { services.warn(`state compaction stopped: ${error.message}`); done(); },
       }));
     } catch (error) {
       services.warn(`context budget unsupported: ${error instanceof Error ? error.message : String(error)}`);
-    } finally { pending = null; }
+    } finally {
+      pending = null;
+      if (release) { attempts--; persist(); }
+    }
   });
-  return { sessionStart, sessionShutdown: changed, completed: changed, started: changed };
+  return {
+    sessionStart, sessionShutdown: changed, completed: changed, started: changed,
+    /** The root's push to the remote was recorded: the next settled boundary may compact. */
+    landed: () => { pushLanded = true; },
+  };
 }

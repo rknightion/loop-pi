@@ -535,6 +535,10 @@ before any `await`. A missing reply means the provider extension is not loaded; 
     positive integer (digits only), frozen at arm and restored with the continuation state on a
     resumed session. The key is absent, not null, when no launch is armed or the value is missing or
     malformed. Consumers treat it as optional.
+- `loop-guard:push-recorded` `{ count: number }`: loop-guard's root entry, after a root `git push` or
+  `gh pr merge` appended `count > 0` lines to the push log (the remote move was verified; a failed,
+  rejected or up-to-date push emits nothing). loop-state listens (see "State-aware root context
+  budget"). Lanes never emit it. Fire and forget: no reply.
 - `loop-recovery:request-timeout` `{ limitType: "inactivity" | "absolute" }`: the request ceiling,
   synchronously before its `ctx.abort()`. `limitType` is additive; older readers ignore it.
 - `loop-recovery:resume` `{}`: loop-continuation, synchronously before it sends an automatic root
@@ -629,6 +633,14 @@ before any `await`. A missing reply means the provider extension is not loaded; 
   `codex/state-<stem>-loop<N>.jsonl` (sibling of the closeout, S3) through `<agentDir>/bin/loop-state`
   for `subagent` calls whose brief starts `Lane: <id> · Task: <id> [(<title>)] · Tier: ...`, and injects the
   recovery digest (`loop-state-digest`, no turn) after compaction and at session start.
+  Because only that exact header is recorded, the root's loop-guard entry refuses, in a run with the
+  `loop-pi-proto` marker, a `subagent` launch (any roster agent: worker, senior, senior-escalation,
+  reviewer, scout) whose `task` first non-empty line fails `parseBrief`. The refusal gives the exact
+  form `Lane: <id> · Task: <ID> (<title>) · Tier: routine|guarded` and the offending line; a header
+  with a missing colon (`Lane x · Task Y · Tier: routine`) is refused, never parsed leniently, so
+  the guard, `parseBrief` and `laneIdFromBrief` keep one grammar. Resume, status and other
+  management calls, and runs without the marker, are not checked. Nested launches by `senior`
+  (lane entry) are not checked.
   Admit metadata may include resolved `tier` (`routine` or `guarded`) and `surfaces` (guarded
   owned-path matches). Dispatch metadata preserves `tier`, `surface` (a brief's `Surface:` line),
   `kind` and explicit constituent `tasks`. Native reviewer launches emit `kind: review`; a
@@ -962,6 +974,23 @@ The model root's continuation state freezes the accepted charter text, its SHA-2
 `rootContext` snapshot; old sessions without it do not acquire it by reading a moving charter.
 The native system prompt remains Pi-owned. No authority is inferred from a model summary.
 
+- **Two triggers.** The **backstop** below (80%, quiet fleet) is unchanged. The **push trigger**
+  compacts earlier, at a batch boundary: loop-guard's `loop-guard:push-recorded` marks that a root
+  push landed, and the first evaluated `agent_settled` after it compacts when usage is at or above
+  the push share, default **55%** (about 480k of an 872k window, leaving roughly the same again
+  before the backstop; lower values compact every batch and pay a cold prompt cache each time).
+  `LOOP_PI_COMPACT_AFTER_PUSH_PERCENT` sets it to a whole number from 1 to 79; anything else
+  uses the default. The push trigger does not require a quiet fleet and does not take the 80%
+  latch: state is on disk, the digest names live lanes, and the settled-boundary and
+  revision checks below still decline when input or a child completion arrives during preparation.
+  With live children, pi-subagents' own post-compaction resume message may start one extra root
+  turn. A push that did not reach the share is spent at that boundary; the next push is the next
+  boundary. A push compaction that completes, or is declined for live work without an error,
+  hands its attempt back, so the two-attempt allowance bounds failures only and a long loop
+  compacts once per batch; a failed or aborted one still consumes it.
+- The summary opens with a `Compaction trigger:` line naming the loop-pi context-budget
+  extension (loop-state), that it was automatic, and the reason (a landed push at N% past the
+  push share, or the 80% backstop), so the root knows why its context changed.
 - `loop-state` checks Pi 1.3.0's public `ctx.getContextUsage()` at `agent_settled`, only when
   not aborted, `ctx.isIdle()`, no pending messages and no queued/running native async children.
   Active async work defers proactive compaction until a later settled boundary after completion;

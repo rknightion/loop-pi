@@ -164,7 +164,13 @@ evidence, judges a move of a remote's default branch commit by commit:
 The extensions write the run's events themselves: `open` at arm (`charter_sha256`, `root`,
 `root_model`, `first_wave`, and `tier` only when the charter states one), `dispatch` and `return`
 per lane, `watch` and `heartbeat` for root activity, and `judgement` for automatic recovery.
-`digest <log> --json` gives `live_lanes` after a compaction. A log takes one `open`. Only `land mode=after-green` is accepted for new appends (older logs with
+`digest <log> --json` gives `live_lanes` after a compaction.
+The state log records a lane only when its brief's first non-empty line is exactly
+`Lane: <id> · Task: <ID> (<title>) · Tier: routine|guarded`; in a marked run the root's guard
+refuses any `subagent` launch whose first line differs, and says the form to use. The root
+compacts itself, with a summary that names the context-budget extension, once a root push has
+landed and context use passes `LOOP_PI_COMPACT_AFTER_PUSH_PERCENT` (default 55), without waiting for
+a quiet fleet; the 80 percent backstop still waits for one. A log takes one `open`. Only `land mode=after-green` is accepted for new appends (older logs with
 `pre-green` still check and digest). `revert` accepts `reason=root-decision`. `park needs=budget`
 is valid; `close reason=budget` in a marked run (`--run-dir DIR` or `LOOP_PI_RUN_DIR` holding
 `loop-pi-proto`) is refused unless `harness-facts.jsonl` records a `compaction-failed` or `quota-exhausted` fact. When

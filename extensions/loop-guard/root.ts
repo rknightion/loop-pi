@@ -15,7 +15,7 @@ import { installModelFamily, subagentOverrideBlock } from "./model-family.ts";
 import { deleteSubagentField } from "./subagent-view.ts";
 import { installRequestCeiling, installRetryBackoff } from "../request-ceiling/index.ts";
 import { bindLaneIdentity } from "./push-grant.ts";
-import { evaluateBashCommand, evaluateBgWait, evaluateSubagentCall, evaluateWatchProcess, isAsyncSubagentLaunch, wrappedGateCommands, bindGateExecution } from "./rules.ts";
+import { evaluateBashCommand, evaluateBgWait, evaluateBriefHeader, evaluateSubagentCall, evaluateWatchProcess, isAsyncSubagentLaunch, wrappedGateCommands, bindGateExecution } from "./rules.ts";
 import { loadGateDeclarations } from "./gates.ts";
 import { bashProtectedPath, protoActive, runDirFromEnv, toolWriteRefusal } from "./guard-paths.ts";
 import { capturePushExecutions, planPushes, recordPushes, unloggedPushRefusal, type PlannedPush, type PushExecutionEvidence } from "./push-log.ts";
@@ -154,7 +154,8 @@ export default function (pi: ExtensionAPI) {
     try {
       if (runDir === undefined) return;
       const plans = event.isError ? pushes.plans.filter((plan) => plan.kind === "push") : pushes.plans;
-      await recordPushes(plans, { runDir, actor: "root", agent: null, lane: null }, pushes.evidence);
+      const recorded = await recordPushes(plans, { runDir, actor: "root", agent: null, lane: null }, pushes.evidence);
+      if (recorded > 0) pi.events.emit("loop-guard:push-recorded", { count: recorded });
     } catch {
       // The push log is evidence for the audit; a write failure never fails the tool call.
     } finally {
@@ -278,6 +279,10 @@ export default function (pi: ExtensionAPI) {
       const decision = evaluateSubagentCall(input);
       if (decision.block) {
         return { block: true, reason: decision.reason };
+      }
+      if (proto()) {
+        const header = evaluateBriefHeader(input);
+        if (header.block) return { block: true, reason: header.reason };
       }
       if (input.action === undefined && typeof input.agent === "string" && typeof input.task === "string") {
         // A model-supplied binding inside pi-subagents 0.77.0 `options` would conflict with the bound one.

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CONTEXT_BUDGET_STATE, installContextBudget, nativeChildrenQuiet } from "./context-budget.ts";
+import { CONTEXT_BUDGET_STATE, installContextBudget, nativeChildrenQuiet, PUSH_COMPACT_PERCENT, PUSH_COMPACT_PERCENT_ENV } from "./context-budget.ts";
 
 // Policy boundaries supplement (never replace) the native CLI proof.
 function fixture(quiet: () => Promise<boolean> = async () => true) {
@@ -8,15 +8,17 @@ function fixture(quiet: () => Promise<boolean> = async () => true) {
   const branch: any[] = [];
   const warnings: string[] = [];
   let attempts = 0;
+  const triggers: unknown[] = [];
+  let outcome: "error" | "complete" = "error";
   const pi = { on: (name: string, handler: any) => handlers.set(name, handler),
     events: { on: () => undefined }, appendEntry: (customType: string, data: any) => branch.push({ type: "custom", customType, data, id: `entry-${branch.length}` }) };
   const ctx = { isIdle: () => true, hasPendingMessages: () => false,
     getContextUsage: () => ({ percent: 80, tokens: 80, contextWindow: 100 }),
     sessionManager: { getBranch: () => branch },
-    compact: (options: any) => { attempts++; options.onError(new Error("fixture failure")); } };
-  const budget = installContextBudget(pi as never, { drain: () => Promise.resolve(), quiet, prepare: async () => ({ summary: "fixture", log: "unused", logSha256: "fixture" }), warn: message => warnings.push(message) });
+    compact: (options: any) => { attempts++; if (outcome === "complete") options.onComplete(); else options.onError(new Error("fixture failure")); } };
+  const budget = installContextBudget(pi as never, { drain: () => Promise.resolve(), quiet, prepare: async (_ctx: unknown, trigger: unknown) => { triggers.push(trigger); return { summary: "fixture", log: "unused", logSha256: "fixture" }; }, warn: message => warnings.push(message) });
   budget.sessionStart(ctx as never);
-  return { handlers, ctx, branch, warnings, start: () => budget.sessionStart(ctx as never), attempts: () => attempts, settle: () => handlers.get("agent_settled")({ aborted: false }, ctx) };
+  return { handlers, ctx, branch, warnings, budget, triggers, setOutcome: (value: "error" | "complete") => { outcome = value; }, start: () => budget.sessionStart(ctx as never), attempts: () => attempts, settle: () => handlers.get("agent_settled")({ aborted: false }, ctx) };
 }
 
 test("80 percent threshold, hysteresis, failure latch and reload: never one attempt per callback", async () => {
@@ -148,3 +150,101 @@ test("actual native status refuses a finalizing running job whose displayed step
   assert.equal(reply.data.fleet.totalActive, 0, "terminal display steps do not stand in for nested native job state");
   assert.equal(nativeChildrenQuiet(reply.data), false, "a terminal workflow cannot hide its actual running native child job");
 });
+
+
+function withPushPercent<T>(value: string | undefined, run: () => Promise<T>): Promise<T> {
+  const previous = process.env[PUSH_COMPACT_PERCENT_ENV];
+  if (value === undefined) delete process.env[PUSH_COMPACT_PERCENT_ENV]; else process.env[PUSH_COMPACT_PERCENT_ENV] = value;
+  return run().finally(() => { if (previous === undefined) delete process.env[PUSH_COMPACT_PERCENT_ENV]; else process.env[PUSH_COMPACT_PERCENT_ENV] = previous; });
+}
+
+test("a landed push compacts past the push share without a quiet fleet; the 80 percent backstop still needs quiet", () => withPushPercent(undefined, async () => {
+  assert.ok(PUSH_COMPACT_PERCENT >= 50 && PUSH_COMPACT_PERCENT <= 60);
+  const usage = (percent: number) => ({ percent, tokens: percent, contextWindow: 100 });
+  // The fleet is never quiet and its status never answers: only the push path may proceed.
+  const f = fixture(async () => { throw new Error("status must not be consulted for a landed push"); });
+  f.ctx.getContextUsage = () => usage(PUSH_COMPACT_PERCENT + 1);
+  await f.settle();
+  assert.equal(f.attempts(), 0, "high usage without a landed push waits for the backstop");
+  f.budget.landed();
+  f.ctx.getContextUsage = () => usage(PUSH_COMPACT_PERCENT - 1);
+  await f.settle();
+  assert.equal(f.attempts(), 0, "below the push share a landed push does not compact");
+  f.ctx.getContextUsage = () => usage(PUSH_COMPACT_PERCENT + 1);
+  await f.settle();
+  assert.equal(f.attempts(), 0, "a landed push is spent at the first settled boundary after it");
+  f.budget.landed();
+  await f.settle();
+  assert.equal(f.attempts(), 1);
+  assert.deepEqual(f.triggers, [{ reason: "landed-push", percent: PUSH_COMPACT_PERCENT + 1, threshold: PUSH_COMPACT_PERCENT }]);
+  assert.equal(f.branch.at(-1)?.data.latched, false, "the push path does not take the 80 percent latch");
+  // The backstop path is unchanged: it defers on an unreadable fleet.
+  const g = fixture(async () => { throw new Error("unknown"); });
+  g.ctx.getContextUsage = () => usage(80);
+  await g.settle();
+  assert.equal(g.attempts(), 0);
+}));
+
+test("a busy root keeps the landed push for its next settled boundary", () => withPushPercent(undefined, async () => {
+  const f = fixture();
+  f.ctx.getContextUsage = () => ({ percent: 70, tokens: 70, contextWindow: 100 });
+  f.budget.landed();
+  f.ctx.hasPendingMessages = () => true;
+  await f.settle();
+  assert.equal(f.attempts(), 0);
+  f.ctx.hasPendingMessages = () => false;
+  await f.settle();
+  assert.equal(f.attempts(), 1);
+}));
+
+test("successful push compactions are not capped; failed ones consume the two-attempt allowance", () => withPushPercent(undefined, async () => {
+  const f = fixture();
+  f.ctx.getContextUsage = () => ({ percent: 60, tokens: 60, contextWindow: 100 });
+  f.setOutcome("complete");
+  for (let i = 0; i < 5; i++) { f.budget.landed(); await f.settle(); }
+  assert.equal(f.attempts(), 5, "a completed compaction returns its attempt");
+  f.setOutcome("error");
+  for (let i = 0; i < 4; i++) { f.budget.landed(); await f.settle(); }
+  assert.equal(f.attempts(), 7, "two failures, then the allowance is spent");
+  f.start();
+  f.budget.landed();
+  await f.settle();
+  assert.equal(f.attempts(), 7, "reload keeps the consumed allowance");
+}));
+
+test("the push share is configurable and an invalid value falls back to the default", async () => {
+  const usage = { percent: 45, tokens: 45, contextWindow: 100 };
+  await withPushPercent("40", async () => {
+    const f = fixture();
+    f.ctx.getContextUsage = () => usage;
+    f.budget.landed();
+    await f.settle();
+    assert.equal(f.attempts(), 1);
+    assert.equal((f.triggers[0] as any).threshold, 40);
+  });
+  for (const bad of ["", "abc", "0", "-5", "80", "150", "40%"]) {
+    await withPushPercent(bad, async () => {
+      const f = fixture();
+      f.ctx.getContextUsage = () => usage;
+      f.budget.landed();
+      await f.settle();
+      assert.equal(f.attempts(), 0, `'${bad}' is ignored`);
+    });
+  }
+});
+
+test("a push compaction declined because live work arrived hands its attempt back", () => withPushPercent(undefined, async () => {
+  const f = fixture();
+  f.ctx.getContextUsage = () => ({ percent: 60, tokens: 60, contextWindow: 100 });
+  for (let i = 0; i < 4; i++) {
+    f.budget.landed();
+    // A child completion lands while the summary is being prepared.
+    const settled = f.settle();
+    f.budget.completed();
+    await settled;
+  }
+  assert.equal(f.attempts(), 0, "declined without compacting");
+  f.budget.landed();
+  await f.settle();
+  assert.equal(f.attempts(), 1, "the allowance is intact");
+}));

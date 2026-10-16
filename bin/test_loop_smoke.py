@@ -137,11 +137,11 @@ class InstalledLoopSmoke(unittest.TestCase):
                 '## Landed', '## Parked', '## For ratification', '## Notes')) + '\n'
             script.write_text(json.dumps({'rules': [
                 {'match': 'SMOKE_ROOT_GUARD', 'once': True, 'toolCalls': [tool('bash', command='git push --force origin main')]},
-                {'match': '^Task: SMOKE_DENIED_CHILD$', 'once': True, 'toolCalls': [tool('bash', command='git commit --allow-empty -m denied')]},
-                {'match': '^Task: SMOKE_LANDING_CHILD$', 'once': True, 'delayMs': 1500, 'toolCalls': [tool('bash', command='git commit --allow-empty -m landing')]},
+                {'match': '^Task: Lane: smoke[^\\n]*\\nSMOKE_DENIED_CHILD$', 'once': True, 'toolCalls': [tool('bash', command='git commit --allow-empty -m denied')]},
+                {'match': '^Task: Lane: smoke[^\\n]*\\nSMOKE_LANDING_CHILD$', 'once': True, 'delayMs': 1500, 'toolCalls': [tool('bash', command='git commit --allow-empty -m landing')]},
                 {'match': r'^\[main .*\] (denied|landing)', 'once': False, 'toolCalls': [tool('bash', command='git push origin main')]},
-                {'match': 'SMOKE_SPAWN_DENIED', 'once': True, 'toolCalls': [tool('subagent', agent='worker', task='SMOKE_DENIED_CHILD', async_=True)]},
-                {'match': 'SMOKE_SPAWN_LANDING', 'once': True, 'toolCalls': [tool('subagent', agent='worker', task='SMOKE_LANDING_CHILD', async_=True)]},
+                {'match': 'SMOKE_SPAWN_DENIED', 'once': True, 'toolCalls': [tool('subagent', agent='worker', task='Lane: smoke · Task: T-1 · Tier: routine\nSMOKE_DENIED_CHILD', async_=True)]},
+                {'match': 'SMOKE_SPAWN_LANDING', 'once': True, 'toolCalls': [tool('subagent', agent='worker', task='Lane: smoke · Task: T-1 · Tier: routine\nSMOKE_LANDING_CHILD', async_=True)]},
                 {'match': 'SMOKE_ROOT_PUSH', 'once': True, 'toolCalls': [tool('bash', command='git push origin main')]},
                 # The armed launch now opens a state log, so the one nudge is the close-out one.
                 {'match': '^## Turn endings|^## No lane is live', 'once': True, 'toolCalls': [tool('write', path=report, content=report_body)]},

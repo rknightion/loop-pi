@@ -709,6 +709,9 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
     enqueue(() => handleComplete(runId, d, scoped));
   });
 
+  // The root's pushes are recorded by loop-guard once the remote has moved (SEAMS "Root push event").
+  pi.events.on("loop-guard:push-recorded", () => contextBudget.landed());
+
   const contextBudget = installContextBudget(pi, {
     drain: () => chain,
     // One supported current-session status query at a high-usage settled boundary.
@@ -731,7 +734,7 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
       catch { finish(false); }
     }),
     warn,
-    async prepare(ctx) {
+    async prepare(ctx, trigger) {
       const log = resolveLog();
       if (!log) return null; // Unarmed sessions have no loop context budget.
       let launch: RootLaunchContext | null = null;
@@ -742,7 +745,7 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
       if (checked.code !== 0) throw new Error("state ledger validation failed");
       const digest = await runCli(cliBin(), ["digest", log]);
       if (digest.code !== 0 || !digest.stdout.trim()) throw new Error("state digest unavailable");
-      return { ...stateSummary(ctx, snapshot, log, digest.stdout), log };
+      return { ...stateSummary(ctx, snapshot, log, digest.stdout, trigger), log };
     },
   });
 }

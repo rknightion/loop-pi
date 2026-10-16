@@ -496,20 +496,22 @@ class NopushNativeCanary(unittest.TestCase):
         env["LOOP_PI_FAUX_SCRIPT"] = str(script)
         def tool(name, **args):
             return {"name": name, "args": args}
+        # An armed run only launches lanes whose first line is the brief header the state log parses.
+        HEADER = "Lane: canary · Task: T-1 · Tier: routine\n"
         def spawn(agent, task, **options):
             return tool("subagent", agent=agent, task=task, **{"async": True, "worktree": False, **options})
         script.write_text(json.dumps({"rules": [
             {"match": "^CONTROL_ROOT$", "once": True, "toolCalls": [tool("bash", command="./push.sh", timeout=15)]},
-            {"match": "^WRAPPED_ROOT$", "once": True, "toolCalls": [spawn("worker", "WRAPPED_CHILD\nLanding: returns candidate")]},
-            {"match": "^Task: WRAPPED_CHILD", "once": True, "toolCalls": [tool("bash", command="./push.sh", timeout=15)]},
-            {"match": "^LOCAL_ROOT$", "once": True, "toolCalls": [spawn("worker", "LOCAL_CHILD\nLanding: returns candidate")]},
-            {"match": "^Task: LOCAL_CHILD", "once": True, "toolCalls": [tool("bash", command="./local.sh", timeout=15)]},
-            {"match": "^GUARD_ROOT$", "once": True, "toolCalls": [spawn("worker", "GUARD_CHILD\nLanding: returns candidate")]},
-            {"match": "^Task: GUARD_CHILD", "once": True, "toolCalls": [tool("bash", command="git push local HEAD:refs/heads/forbidden", timeout=15)]},
-            {"match": "^FOREGROUND_ROOT$", "once": True, "toolCalls": [spawn("senior", "FOREGROUND_PARENT\nLanding: returns candidate\nDelegation: one local faux child")]},
-            {"match": "^Task: FOREGROUND_PARENT", "once": True, "toolCalls": [spawn("worker", "FOREGROUND_CHILD\nLanding: returns candidate", **{"async": False})]},
-            {"match": "^ASYNC_ROOT$", "once": True, "toolCalls": [spawn("senior", "ASYNC_PARENT\nLanding: returns candidate\nDelegation: one local faux child")]},
-            {"match": "^Task: ASYNC_PARENT", "once": True, "toolCalls": [spawn("worker", "NESTED_CHILD\nLanding: returns candidate")]},
+            {"match": "^WRAPPED_ROOT$", "once": True, "toolCalls": [spawn("worker", HEADER + "WRAPPED_CHILD\nLanding: returns candidate")]},
+            {"match": "^Task: Lane: canary[^\\n]*\\nWRAPPED_CHILD", "once": True, "toolCalls": [tool("bash", command="./push.sh", timeout=15)]},
+            {"match": "^LOCAL_ROOT$", "once": True, "toolCalls": [spawn("worker", HEADER + "LOCAL_CHILD\nLanding: returns candidate")]},
+            {"match": "^Task: Lane: canary[^\\n]*\\nLOCAL_CHILD", "once": True, "toolCalls": [tool("bash", command="./local.sh", timeout=15)]},
+            {"match": "^GUARD_ROOT$", "once": True, "toolCalls": [spawn("worker", HEADER + "GUARD_CHILD\nLanding: returns candidate")]},
+            {"match": "^Task: Lane: canary[^\\n]*\\nGUARD_CHILD", "once": True, "toolCalls": [tool("bash", command="git push local HEAD:refs/heads/forbidden", timeout=15)]},
+            {"match": "^FOREGROUND_ROOT$", "once": True, "toolCalls": [spawn("senior", HEADER + "FOREGROUND_PARENT\nLanding: returns candidate\nDelegation: one local faux child")]},
+            {"match": "^Task: Lane: canary[^\\n]*\\nFOREGROUND_PARENT", "once": True, "toolCalls": [spawn("worker", "FOREGROUND_CHILD\nLanding: returns candidate", **{"async": False})]},
+            {"match": "^ASYNC_ROOT$", "once": True, "toolCalls": [spawn("senior", HEADER + "ASYNC_PARENT\nLanding: returns candidate\nDelegation: one local faux child")]},
+            {"match": "^Task: Lane: canary[^\\n]*\\nASYNC_PARENT", "once": True, "toolCalls": [spawn("worker", "NESTED_CHILD\nLanding: returns candidate")]},
             {"match": "^Task: NESTED_CHILD", "once": True, "toolCalls": [tool("bash", command="./push.sh", timeout=15)]},
             {"match": "^ROOT_PUSH$", "once": True, "toolCalls": [tool("bash", command="git push local HEAD:refs/heads/rootpush", timeout=15)]},
             {"match": ".*", "text": "faux done"},

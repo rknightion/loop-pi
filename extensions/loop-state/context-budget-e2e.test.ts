@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { loopFixture, cleanupFixtures } from "../loop-continuation/test-fixture.ts";
-import { cleanupAll, FAUX_EXTENSION, freshDir, PI_SUBAGENTS_PACKAGE_DIR, startPiRpc, waitForCondition, writeFauxScript } from "../loop-guard/rpc-test-helpers.ts";
+import { cleanupAll, FAUX_EXTENSION, freshDir, PI_SUBAGENTS_PACKAGE_DIR, ROOT_EXTENSION, startPiRpc, waitForCondition, writeFauxScript } from "../loop-guard/rpc-test-helpers.ts";
 
 const STATE = fileURLToPath(new URL("./index.ts", import.meta.url));
 const CONTINUATION = fileURLToPath(new URL("../loop-continuation/index.ts", import.meta.url));
@@ -93,6 +93,7 @@ for (const outcome of ["success", "failure", "abort"] as const) {
         assert.ok(Buffer.byteLength(summary) <= 32768);
         assert.ok(summary.includes(charterBody), "the accepted charter, including consumed allowance, survives exactly");
         assert.match(summary, /implementation_dispatches.*T-1.*2/s);
+        assert.match(summary, /context-budget extension.*context use reached \d+ percent, the 80 percent backstop/s, "the summary names its trigger");
         assert.ok(summary.includes(hash(standing)), "frozen authority hash survives");
         const projection = await rpc("get_messages", "projection");
         assert.ok(Buffer.byteLength(JSON.stringify(projection.messages)) < 50_000, "real native model projection is bounded");
@@ -268,5 +269,45 @@ test("live native child defers without consumption, completion wakes, then the s
     assert.ok(session.events.some(e => (e.message as any)?.customType === "subagent-notify"), "normal completion notification remains delivered");
     const budget = (await rpc("get_entries", "after-entries")).entries.filter((e: any) => e.customType === "loop-root-context-budget").at(-1).data;
     assert.equal(budget.attempts, 1);
+  } finally { await session.close(); }
+});
+
+// A landed root push is a batch boundary: well below the 80 percent backstop the root compacts, and the
+// state summary it reads afterwards names the context-budget extension as the trigger. The faux
+// provider reports roughly half the large prompt on later turns (its first turn counts new text twice),
+// so the push share is set to 25 percent to sit under the roughly 30 percent the push turn reports.
+test("a landed root push compacts the root past the configured share and the summary names the extension", { timeout: 90_000 }, async () => {
+  const s = loopFixture({ root: "faux/faux-1" });
+  writeFileSync(join(s.agentDir, "settings.json"), JSON.stringify({ retry: { enabled: false }, packages: [PI_SUBAGENTS_PACKAGE_DIR], defaultProjectTrust: "never", subagents: { agentExcludeDirs: ["~/.agents"] } }));
+  const remote = freshDir("budget-remote-");
+  execFileSync("git", ["init", "--bare", "-q"], { cwd: remote });
+  execFileSync("git", ["remote", "add", "origin", remote], { cwd: s.repo });
+  const session = startPiRpc({
+    extensions: [FAUX_EXTENSION, ROOT_EXTENSION, CONTINUATION, STATE], agentDir: s.agentDir,
+    subagentTempRoot: freshDir(), cwd: s.repo, sessionArgs: [], env: { LOOP_PI_RUN_DIR: s.runDir, LOOP_PI_COMPACT_AFTER_PUSH_PERCENT: "25" },
+    fauxScriptPath: writeFauxScript([
+      { match: "PUSH_NOW", once: true, toolCalls: [{ name: "bash", args: { command: "git push origin HEAD:refs/heads/main" } }] },
+      { match: ".*", text: "PAUSED: fixture awaits the next explicit input." },
+    ]),
+  });
+  const settled = () => session.events.filter(e => e.type === "agent_settled").length;
+  try {
+    session.send({ type: "prompt", id: "arm", message: s.launch });
+    await session.waitFor(e => e.type === "agent_settled");
+    append(s.log, "admit", "task=T-1", "source=first-wave", "owned=a/**", "accept=fixture", "tier=routine");
+    // Past the push share on every later turn, below the backstop.
+    session.send({ type: "prompt", id: "large", message: "history ".repeat(41_250) });
+    await session.waitFor(e => e.type === "agent_settled" && settled() === 2);
+    assert.equal(session.events.filter(e => e.type === "compaction_start").length, 0, "high usage without a landed push waits for the backstop");
+    session.send({ type: "prompt", id: "push", message: "PUSH_NOW" });
+    const terminal = await session.waitFor(e => e.type === "compaction_end", 60_000) as any;
+    const bash = session.events.find(e => e.type === "tool_execution_end" && e.toolName === "bash") as any;
+    assert.equal(bash.isError, false, JSON.stringify(bash));
+    assert.equal(terminal.reason, "manual");
+    assert.ok(terminal.result, "native compaction persisted a result");
+    const summary = terminal.result.summary as string;
+    assert.match(summary, /context-budget extension/);
+    assert.match(summary, /a push landed while context use was \d+ percent, past the 25 percent push share/);
+    assert.ok(summary.includes(readFileSync(s.charter, "utf8")), "the frozen charter still survives");
   } finally { await session.close(); }
 });
