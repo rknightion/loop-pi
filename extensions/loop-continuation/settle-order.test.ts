@@ -1,4 +1,4 @@
-// pi-subagents 0.77.0 answers a silent completion turn from its own agent_before_settle handler: a
+// pi-subagents 0.78.0 answers a silent completion turn from its own agent_before_settle handler: a
 // `subagent-completion-unanswered` reminder that continues the run, then a terminal
 // `subagent-completion-unhandled` notice. loop-continuation's nudge must never stack on the reminder,
 // in either handler order. The package handler here is the installed package's real one.
@@ -24,6 +24,8 @@ function packageNotify() {
     events: { on: (name: string, handler: (data: any) => void) => { bus.set(name, handler); return () => bus.delete(name); }, emit() {} },
     sendMessage: (message: { content: string }) => { notices.push(message); return true; },
     sendUserMessage() {},
+    // 0.78.0 routes completions through the parent-wake hold; this stub parent is never held.
+    isHeld: () => false,
   };
   registerSubagentNotify(pi as never, { currentSessionId: "s", completionOwnerId: "o" } as never, { sendRegistry: createCompletionSendRegistry() });
   bus.get("subagent:async-complete")!({ sessionId: "s", completionOwnerId: "o", agent: "worker", runId: "r1", success: false, exitCode: 1, summary: "lane failed" });

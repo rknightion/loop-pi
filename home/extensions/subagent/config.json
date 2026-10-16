@@ -13,7 +13,7 @@
     "preflight", "gates", "usage-budgets", "tool-budgets", "control-overrides",
     "external-machines"
   ],
-  "control": { "activeNoticeAfterMs": 3600000 },
+  "control": { "activeNoticeAfterMs": 3600000, "failedToolAttemptsBeforeAttention": 1000000 },
   "scheduledRuns": { "enabled": false },
   "missions": { "enabled": false },
   "intercomBridge": { "mode": "off" },

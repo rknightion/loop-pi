@@ -765,6 +765,36 @@ test("lanes never push: the lane reads the run dir from its binding when the env
   }
 });
 
+test("lane id: a custom-message run before the brief does not latch an empty lane id (pi 1.2.0+ before_agent_start union)", { timeout: 30_000 }, async () => {
+  const { repo, runDir } = fixture();
+  const saved = { run: process.env.LOOP_PI_RUN_DIR, bindings: process.env.PI_SUBAGENT_EXTENSION_BINDINGS };
+  delete process.env.LOOP_PI_RUN_DIR;
+  process.env.PI_SUBAGENT_EXTENSION_BINDINGS = JSON.stringify({ "loop-pi.guard/1": { agent: "worker", runDir } });
+  try {
+    const handlers = new Map<string, ((event: any, ctx: any) => any)[]>();
+    laneExtension({ events: { on() { return () => {}; }, emit() {} }, on: (event: string, h: any) => void handlers.set(event, [...(handlers.get(event) ?? []), h]) } as any);
+    const ctx = { cwd: repo, ui: { notify: () => {} }, sessionManager: { getSessionId: () => "session-fallback" } };
+    const fire = async (event: string, payload: Record<string, unknown>) => {
+      let last: any;
+      for (const h of handlers.get(event) ?? []) last = await h({ type: event, ...payload }, ctx);
+      return last;
+    };
+    // pi 1.2.0+ fires before_agent_start for sendMessage(..., { triggerTurn: true }) runs too: a custom event with no prompt.
+    await fire("before_agent_start", { messageType: "custom", message: { role: "custom", customType: "loop-wake", content: "x" }, systemPrompt: "" });
+    await fire("before_agent_start", { messageType: "user", prompt: "Lane: C7 · Task: T-1 · Tier: routine\nObjective: x", systemPrompt: "" });
+    const long = "y".repeat(80_000);
+    await fire("message_end", { message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: long }] } });
+    const files = readdirSync(join(runDir, "returns"));
+    assert.equal(files.length, 1);
+    assert.match(files[0], /^lane-C7-/, `the full copy is keyed by the brief's lane id, not the session: ${files[0]}`);
+  } finally {
+    if (saved.run === undefined) delete process.env.LOOP_PI_RUN_DIR;
+    else process.env.LOOP_PI_RUN_DIR = saved.run;
+    if (saved.bindings === undefined) delete process.env.PI_SUBAGENT_EXTENSION_BINDINGS;
+    else process.env.PI_SUBAGENT_EXTENSION_BINDINGS = saved.bindings;
+  }
+});
+
 // ---------------------------------------------------------------------------------------------
 // The logged range is the root's or lane's own push: `new` is the local commit the push sent, and
 // a line is written only when the remote ref equals it afterwards (SEAMS S1, security review M1).

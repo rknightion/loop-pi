@@ -21,7 +21,8 @@ export type RetryErrorClass = "rate-limit" | "server" | "other";
 // A provider error reads "<Provider> API error (<status>): <body>" or "<status>: <body>" (pi-ai
 // formatProviderError); mid-stream failures carry only text. A 429 is checked first.
 const RATE_LIMIT_PATTERN = /\b429\b|rate.?limit|too many requests/i;
-const SERVER_PATTERN = /\b5\d\d\b|overloaded|service.?unavailable|server.?error|internal.?error|bad.?gateway/i;
+// The last three mirror the upstream failures pi-ai 1.3.0's isRetryableAssistantError retries natively.
+const SERVER_PATTERN = /\b5\d\d\b|overloaded|service.?unavailable|server.?error|internal.?error|bad.?gateway|temporarily unavailable|unable to forward upstream|upstream provider returned an error/i;
 
 export function classifyRetryError(errorMessage: string | undefined): RetryErrorClass {
   const text = errorMessage ?? "";

@@ -30,6 +30,10 @@ test("retryable errors are classified by status: 429 first, then 5xx, else other
     ["OpenAI API error (503): Service Unavailable", "server"],
     ["502: bad gateway", "server"],
     ["The model is overloaded", "server"],
+    // pi-ai 1.2.0/1.3.0 retry these natively (utils/retry.js); they are upstream server failures.
+    ["The service is temporarily unavailable", "server"],
+    ["Unable to forward upstream stream", "server"],
+    ["The upstream provider returned an error", "server"],
     ["fetch failed", "other"],
     ["Request timed out after 300000ms", "other"],
     ["socket hang up", "other"],

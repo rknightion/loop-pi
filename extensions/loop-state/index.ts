@@ -22,6 +22,7 @@ import { allocateRepair, type ArtifactIdentity, artifactIdentity, identityOf, re
 import { capNotifyMessage, type CompletionInfo, completionInfo, contentText, NOTIFY_CUSTOM_TYPE, RETURN_CAP_BYTES } from "./return-cap.ts";
 import { subagentFields } from "../loop-guard/subagent-view.ts";
 import { installContextBudget, type RootLaunchContext, stateSummary, nativeChildrenQuiet } from "./context-budget.ts";
+import { registerHarnessHold } from "./harness-hold.ts";
 
 export const DIGEST_CUSTOM_TYPE = "loop-state-digest";
 const CLI_TIMEOUT_MS = 10_000;
@@ -70,6 +71,7 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
   let shuttingDown = false;
   let cwd = process.cwd();
   let lastCtx: ExtensionContext | null = null;
+  const harnessHold = registerHarnessHold(pi);
   let logPath: string | null = null;
   let chain: Promise<unknown> = Promise.resolve();
   let lastHeartbeatRecordedAt: number | null = null;
@@ -253,10 +255,11 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
     return r.code === 0 && sha ? sha : "unknown";
   }
 
-  // pi-subagents 0.77.0 docs/extension-api.md and src/extension/rpc.js:
+  // pi-subagents 0.78.0 docs/extension-api.md and src/extension/rpc.js:
   // resume uses the persisted child and returns data.details with a NEW async run id.
-  // `output` names the separate repair file (file-only mode): without it the package resumes with
-  // the original run's output binding and overwrites the lane's report with the block.
+  // `output` names the separate repair file (file-only mode). Since 0.78.0 a resume without it writes
+  // `<name>.<runId8>.md` beside the original instead of overwriting it; the explicit binding keeps the
+  // repair file where loop-state reads it.
   async function resumeForBlock(runId: string, lane: string, binding: RepairBinding): Promise<{ id: string; asyncDir?: string } | null> {
     const requestId = randomUUID();
     return new Promise((done) => {
@@ -628,6 +631,9 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
         changed = true;
         return replacement as typeof message;
       });
+      // A completion held by pi-subagents after loop-pi's own abort must not read as an owner stop.
+      const unheld = harnessHold.rewrite(messages);
+      if (unheld) return { messages: unheld };
       if (changed) return { messages };
     } catch (error) {
       warn(`return cap: ${String(error)}`);

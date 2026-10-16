@@ -75,9 +75,11 @@ export default function (pi: ExtensionAPI) {
     return;
   };
 
-  // The lane id for the push log, from the brief's `Lane:` header (the first prompt).
+  // The lane id for the push log, from the brief's `Lane:` header (the first user prompt). pi 1.2.0+
+  // also fires this for extension-started runs (messageType "custom", no prompt); those must not latch it.
   pi.on("before_agent_start", (event) => {
-    if (laneId === undefined) laneId = laneIdFromBrief(typeof event.prompt === "string" ? event.prompt : "");
+    if (laneId !== undefined || event.messageType === "custom") return;
+    laneId = laneIdFromBrief(typeof event.prompt === "string" ? event.prompt : "");
   });
 
   // Lane return cap (SEAMS S6): the root cannot cap an idle-wake notify, so the lane caps its own

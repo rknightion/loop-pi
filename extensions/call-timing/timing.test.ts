@@ -135,7 +135,7 @@ test("empty stream has null first token and absent/invalid metadata is not inven
       const terminalPath = join(launched.asyncDir, "process-terminal.json");
       const runId = launched.runId ?? launched.asyncId;
       assert.equal(typeof runId, "string", "spawn reply must identify the exact child run");
-      // The result/status is published before run-history and session disposal. The package's
+      // The result/status is published before session disposal. The package's
       // process-terminal sidecar is published only after the matching runner actually closes.
       const completed = await waitForCondition(() => {
         if (!existsSync(terminalPath)) return undefined;
@@ -160,19 +160,15 @@ test("empty stream has null first token and absent/invalid metadata is not inven
       assert.equal(runner.signal, null);
       assert.ok(Number.isFinite(runner.closeObservedAt));
       assert.ok(runner.closeObservedAt <= Date.now(), "runner close must be observed before parent teardown");
+      // pi-subagents 0.78.0 no longer writes run-history.jsonl; status.json above is the run record.
       const historyPath = join(f.home, "run-history.jsonl");
-      const historyBeforeClose = readFileSync(historyPath, "utf8");
-      const history = historyBeforeClose.split("\n").filter(Boolean).map((line) => JSON.parse(line));
-      assert.equal(history.length, 1);
-      assert.equal(history[0].agent, "worker");
-      assert.equal(history[0].outcome, "completed");
-      assert.equal(history[0].status, "ok");
+      assert.equal(existsSync(historyPath), false, "pi-subagents 0.78.0 writes no run-history.jsonl");
       await session.close();
-      assert.equal(readFileSync(historyPath, "utf8"), historyBeforeClose, "parent teardown must not introduce a late child history write");
+      assert.equal(existsSync(historyPath), false, "parent teardown must not introduce a late child history write");
       t.diagnostic(JSON.stringify({ host: "root", runId,
         runnerProcessInstanceId: runner.processInstanceId, exitCode: runner.exitCode, signal: runner.signal,
         closeObservedAt: runner.closeObservedAt, state: completed.status.state, acceptance: acceptance.status,
-        historyRows: history.length, historyOutcome: history[0].outcome, noLateHistoryWrite: true }));
+        noRunHistory: true }));
     } finally {
       await session.close();
     }
