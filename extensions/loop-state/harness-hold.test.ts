@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import registerSubagentNotify, { createCompletionSendRegistry } from "../../node_modules/pi-subagents/src/runs/background/notify.js";
 import loopState from "./index.ts";
-import { HARNESS_HELD_ACTION, HARNESS_HOLD_STATE, HELD_COMPLETION_ACTION } from "./harness-hold.ts";
+import { HARNESS_HELD_ACTION, HARNESS_HOLD_STATE, HELD_COMPLETION_ACTION, registerHarnessHold } from "./harness-hold.ts";
 
 type Handler = (event: any, ctx: any) => any;
 
@@ -28,7 +28,6 @@ function root(branch: unknown[] = []) {
   const handlers = new Map<string, Handler[]>();
   const listeners = new Map<string, ((data: unknown) => void)[]>();
   const entries: { customType: string; data: unknown }[] = [];
-  let clock = 1_000;
   const pi = {
     on: (name: string, h: Handler) => void handlers.set(name, [...(handlers.get(name) ?? []), h]),
     events: {
@@ -45,7 +44,7 @@ function root(branch: unknown[] = []) {
     for (const h of handlers.get(name) ?? []) { try { last = h({ type: name, ...event }, ctx) ?? last; } catch { /* other loop-state handlers need a real run dir */ } }
     return last;
   };
-  return { pi, fire, entries, tick: (ms: number) => (clock += ms), at: () => clock };
+  return { pi, fire, entries };
 }
 
 test("the pinned package still sends the held text this rewrite matches", () => {
@@ -107,4 +106,45 @@ test("a resumed root rebuilds its windows from the session branch", () => {
   assert.ok(result?.messages);
   assert.ok(result.messages[0].content.includes(HARNESS_HELD_ACTION));
   assert.ok(result.messages[1].content.includes(HELD_COMPLETION_ACTION));
+});
+
+/** One root process over a session branch that persists across processes, on an injected clock. */
+function process(branch: { type: string; customType: string; data: unknown }[], clock: { now: number }) {
+  const handlers = new Map<string, Handler[]>();
+  const listeners = new Map<string, ((data: unknown) => void)[]>();
+  const pi = {
+    on: (name: string, h: Handler) => void handlers.set(name, [...(handlers.get(name) ?? []), h]),
+    events: { on: (name: string, h: (data: unknown) => void) => { listeners.set(name, [...(listeners.get(name) ?? []), h]); return () => undefined; } },
+    appendEntry: (customType: string, data: unknown) => void branch.push({ type: "custom", customType, data }),
+  };
+  const hold = registerHarnessHold(pi as any, () => clock.now);
+  const ctx = { sessionManager: { getBranch: () => branch } };
+  const fire = (name: string) => { for (const h of handlers.get(name) ?? []) h({ type: name }, ctx); };
+  const emit = (name: string) => { for (const h of listeners.get(name) ?? []) h({}); };
+  return { hold, fire, emit };
+}
+
+test("a window open at exit is closed for good at the next resume: a later owner Esc is never rewritten", () => {
+  const branch: { type: string; customType: string; data: unknown }[] = [];
+  const clock = { now: 1_000 };
+  // Process A: a recovery stop with no follow-up run, then the root exits mid-window.
+  const a = process(branch, clock);
+  a.fire("session_start");
+  a.emit("loop-recovery:abort");
+  // Process B: resumed later; the owner runs a turn and presses Esc; a held notice lands at 3000.
+  clock.now = 2_000;
+  const b = process(branch, clock);
+  b.fire("session_start");
+  clock.now = 2_500;
+  b.fire("agent_start");
+  const ownerStop = heldNotice(3_000);
+  assert.equal(b.hold.rewrite([ownerStop]), undefined, "process B leaves the owner's stop alone");
+  // Process C: resumed again. The owner's stop in B must still read as the owner's.
+  clock.now = 4_000;
+  const c = process(branch, clock);
+  c.fire("session_start");
+  assert.equal(c.hold.rewrite([ownerStop]), undefined, "process C must not widen A's window over B");
+  // A's own held notice (inside A's window) is still rewritten after any number of resumes.
+  const harnessHeld = c.hold.rewrite([heldNotice(1_500)]);
+  assert.ok(harnessHeld && String((harnessHeld[0] as any).content).includes(HARNESS_HELD_ACTION));
 });

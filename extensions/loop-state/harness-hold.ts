@@ -80,8 +80,13 @@ export function registerHarnessHold(pi: ExtensionAPI, now: () => number = Date.n
     }
     windows = [...byStart.values()];
     // A window still open at restart closed when that process ended: no later run of it can be held.
+    // Persist the close, or each later resume would stretch it over every process in between.
     open = undefined;
-    for (const w of windows) w.end ??= now();
+    for (const w of windows) {
+      if (w.end !== undefined) continue;
+      w.end = now();
+      pi.appendEntry(HARNESS_HOLD_STATE, { start: w.start, end: w.end });
+    }
   });
   return { rewrite: <M>(messages: readonly M[]) => rewriteHeldNotices(messages, windows) };
 }

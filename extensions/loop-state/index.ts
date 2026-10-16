@@ -632,7 +632,12 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
         return replacement as typeof message;
       });
       // A completion held by pi-subagents after loop-pi's own abort must not read as an owner stop.
-      const unheld = harnessHold.rewrite(messages);
+      let unheld: typeof messages | undefined;
+      try {
+        unheld = harnessHold.rewrite(messages);
+      } catch (error) {
+        warn(`harness hold: ${String(error)}`);
+      }
       if (unheld) return { messages: unheld };
       if (changed) return { messages };
     } catch (error) {
