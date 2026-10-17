@@ -83,7 +83,13 @@ public statement of those contracts.
   proves both shapes on the wire against the pinned CLI.
 - **Declaration pinning (pi-subagents 0.78.0):** `pinToolDeclarations` defaults to true, so a resumed
   root keeps the `subagent` tool definition it recorded. 0.78.0 also declares a `contact_supervisor`
-  stub at the root whenever `subagent` is active; it only errors there.
+  stub at the root whenever `subagent` is registered (`extension/index.js`
+  `registerPinnedTool(pi, topLevelSupervisorTool())`); it only errors there. The launcher passes
+  `--exclude-tools subagents_enable,bg_wait,contact_supervisor`, and pi drops excluded names from the
+  registry. Children are separate processes that build their own argument list and register the
+  working tool only when the intercom bridge is active, so the exclusion changes no child's tools;
+  the shipped `intercomBridge.mode` is `off`, which gives lanes no `contact_supervisor` at all.
+  `extensions/subagent-tools.test.ts` reads the wire `tools` array for a root and a real child.
 - Non-TTY stdin: pi in `--mode json`/`--print` waits on stdin. Tests close it (`stdio: ["ignore", ...]`
   or `</dev/null`). RPC mode keeps stdin open by design.
 - **Push authority:** lanes never push. The lane guard refuses `git push` for every lane agent
@@ -195,6 +201,14 @@ Fields. Times are local `Date.now()` epoch ms at the moment the extension observ
   retry that reaches headers again increments it; it is an observation, not an attempt count);
   `firstResponseAt` is the first of them; `providerRequestId` is the latest response's
   `x-request-id`, or null.
+- Writer and loaded policy (additive, `extensions/call-timing/writer.ts`; a reader treats an absent
+  or null value as unknown, never as a default): `pidStartedAt` is the writing process's start
+  (`performance.timeOrigin`, floored epoch ms), so a reader can tell the writer from a later process
+  that reused `pid` by comparing the live pid's kernel start time. `policy` is
+  `{inactivityMs, absoluteMs, checkpointIntervalMs}`: the request ceiling's limits as installed in
+  this process (null when no ceiling is installed, or two installs disagree) and the interval this
+  session's ticker uses. Neither is re-read from settings, so a live upgrade that rewrites the home
+  settings does not change what a running writer reports.
 - Lifecycle: `state` is `active` while the request runs, `ended` at the assistant `message_end`
   (`stopReason` is then pi's stop reason, e.g. `stop`, `toolUse`, `length`, `error`, `aborted`),
   or `abandoned` when a turn or session boundary arrives first (`stopReason` null). `startedAt`
@@ -418,6 +432,11 @@ The pi 1.3.0 retry API accepts text only: allowlisted server failures are normal
 standard `server error` wording at message_end; denied failures use a nonretryable explanation.
 This is an adapter to pi's classifier, not a new retry loop. Header ids describe provider
 invocations, not hidden SDK retries; use provider maxRetries zero for attempt-level proof.
+The `server` class in `backoff.ts` (`SERVER_PATTERN`) mirrors the upstream-failure wordings that
+pi-ai 1.3.0's `isRetryableAssistantError` (`utils/retry.js`) retries natively. Of the three newest,
+pi-ai 1.2.0 already retries "The upstream provider returned an error"; "The service is temporarily
+unavailable" and "Unable to forward upstream" are retried from pi-ai 1.3.0. A pi-ai bump re-reads that
+list: a wording pi retries natively but this pattern misses is classed `other`, not `server`.
 
 ## Automatic root recovery
 
@@ -476,7 +495,8 @@ from an extension, so the extension adds a wait in front of it.
   error, reset on any non-error assistant `message_end` and at `agent_settled`, when pi's is zero).
 - Totals: a 429 (`429`, `rate limit`, `too many requests` in the error text) waits at least
   `loopPi.retryBackoff.rateLimitDelayMs` (default 60000) including pi's delay, plus up to 50% jitter. A 5xx (a `5xx`
-  status, `overloaded`, `service unavailable`, `server error`, `internal error`, `bad gateway`)
+  status, `overloaded`, `service unavailable`, `server error`, `internal error`, `bad gateway`,
+  `temporarily unavailable`, `unable to forward upstream`, `upstream provider returned an error`)
   waits pi's delay plus a random extra in `[0, 0.5 * pi's delay)`. Every other retryable error also adds up to 50% jitter to
   pi's delay. Errors pi does not retry get no wait. `settings.retry` and `httpIdleTimeoutMs` stay
   pi's own; without the extension pi's backoff is unchanged.
@@ -748,6 +768,20 @@ paths are exact, bash write detection is best-effort.
   with a neutral loop-pi line. An operator Esc keeps the package's text. No wake is restored: after a
   continuing incident the incident's own turn clears the hold, and after a recovery stop the root
   waits for the owner, as the recovery notice already says.
+  - **No window for an owner abort.** The ceiling timer and the recovery episode timer emit their
+    abort marker only while `ctx.signal` is not already aborted. An owner Esc in the same run (a race
+    of milliseconds) is the owner's stop: it opens no window and its held notices keep the package's text.
+  - **Compaction.** pi 1.3.0 runs the `context` hook only on the agent loop's request path
+    (`core/sdk.js` `transformContext` is the single caller of `emitContext`). Native compaction, manual
+    and automatic, summarises the stored messages from `prepareCompaction` and never passes through it.
+    loop-state therefore rewrites the same held notices in the `session_before_compact` preparation
+    (`messagesToSummarize`, `turnPrefixMessages`), replacing the lists in place with rewritten copies;
+    the stored messages are untouched. `harness-hold.test.ts` pins pi's callers of `emitContext`.
+    A summary written before this rewrite existed keeps whatever it already said.
+  - **`/reload` in an aborted run.** A `/reload` while an aborted run is still finishing closes the
+    window (the `session_start` replay closes any open window) before `agent_end` re-sets
+    pi-subagents' hold. That abort's held notices then keep the package's owner-stop text. This is the
+    safe direction: the root reads a stop that may not have been the owner's, never the reverse.
 - **Completion reminders (pi-subagents 0.78.0):** when a completion-woken turn ends with no tool call
   and no text, pi-subagents' own `agent_before_settle` handler appends a
   `subagent-completion-unanswered` reminder and continues the run once; if that turn is silent too it

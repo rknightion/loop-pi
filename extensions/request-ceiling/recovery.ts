@@ -130,12 +130,14 @@ export function installRecovery(pi: ExtensionAPI, loadSettings: (ctx?: Extension
   const upstream = (): Upstream => ({ code: error?.code ?? null, type: error?.type ?? null, status: error?.status ?? responseStatus ?? null, requestId, clientRequestId: attemptId ?? null });
   const clearTimer = () => { if (timer) clearTimeout(timer); timer = undefined; };
   const reset = () => { clearTimer(); deadline = undefined; expired = false; notified = false; halted = false; active = false; stopReason = undefined; stopNotified = false; attempts = 0; exhaustionCause = undefined; ceilingAllowed = false; admissionReason = undefined; stoppedUpstream = undefined; failedUpstream = undefined; lastRequestUpstream = undefined; compactionAllowed = false; summaryScope = false; summaryInvocations = 0; summaryClientId = null; };
-  const abortRecovery = (ctx: { abort(): void }) => {
+  const abortRecovery = (ctx: { abort(): void; signal?: AbortSignal }) => {
     // Synchronous attribution before abort: loop-wait must not mistake this for operator Esc.
-    pi.events.emit("loop-recovery:abort", {});
+    // Not when the owner already aborted this run: that stop is theirs, and announcing it as the
+    // harness's would rewrite the owner's held notices (SEAMS.md "Run-dir files and return caps").
+    if (!ctx.signal?.aborted) pi.events.emit("loop-recovery:abort", {});
     ctx.abort();
   };
-  const arm = (ctx: { abort(): void }) => {
+  const arm = (ctx: { abort(): void; signal?: AbortSignal }) => {
     clearTimer();
     if (deadline === undefined || (!active && !summaryScope)) return;
     const expire = () => {

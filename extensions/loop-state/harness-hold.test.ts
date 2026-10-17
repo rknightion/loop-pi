@@ -69,6 +69,50 @@ test("a held notice after a loop-pi abort reaches the model without the owner-st
   assert.deepEqual(r.entries.map((e) => e.customType), [HARNESS_HOLD_STATE], "the window is persisted for a resumed root");
 });
 
+/** pi 1.3.0 runs the `context` hook only on the agent loop's request path, never on compaction input. */
+test("pinned pi: the context hook is not on the compaction path, so compaction needs its own rewrite", () => {
+  const dist = (file: string) => readFileSync(new URL(`../../node_modules/@earendil-works/pi-coding-agent/dist/${file}`, import.meta.url), "utf8");
+  const callers = ["core/sdk.js", "core/agent-session.js", "core/compaction/compaction.js", "core/compaction/branch-summarization.js", "core/compaction/utils.js"]
+    .filter((file) => dist(file).includes("emitContext("));
+  assert.deepEqual(callers, ["core/sdk.js"], "emitContext (the `context` hook) changed callers: re-establish the compaction path");
+  const compaction = dist("core/compaction/compaction.js");
+  assert.ok(compaction.includes("convertToLlm(currentMessages)") && compaction.includes("serializeConversation(llmMessages)"), "summary input is the stored messages");
+  const session = dist("core/agent-session.js");
+  assert.ok(session.includes('type: "session_before_compact"') && session.includes("_runDefaultCompaction(preparation"), "the same preparation object reaches the summariser after the hook");
+});
+
+test("compaction input: a held notice inside a loop-pi abort window is neutralised, others are untouched", () => {
+  const r = root();
+  r.fire("session_start");
+  const outsideBefore = heldNotice(Date.now() - 60_000);
+  r.pi.events.emit("loop-recovery:abort", {});
+  const user = { role: "user", content: "go", timestamp: Date.now() - 10 };
+  const inside = heldNotice(Date.now() + 1);
+  const prefix = heldNotice(Date.now() + 2);
+  const preparation = { messagesToSummarize: [user, outsideBefore, inside], turnPrefixMessages: [prefix], tokensBefore: 1 };
+  const original = preparation.messagesToSummarize;
+  assert.equal(r.fire("session_before_compact", { preparation, reason: "manual" }), undefined, "the hook returns no cancel or custom compaction");
+  assert.notEqual(preparation.messagesToSummarize, original, "a new list: the stored messages are not edited");
+  assert.equal(preparation.messagesToSummarize[0], user);
+  assert.ok(preparation.messagesToSummarize[1].content.includes(HELD_COMPLETION_ACTION), "before the window: the owner's stop keeps its text");
+  assert.ok(preparation.messagesToSummarize[2].content.includes(HARNESS_HELD_ACTION));
+  assert.ok(!preparation.messagesToSummarize[2].content.includes(HELD_COMPLETION_ACTION));
+  assert.ok(preparation.messagesToSummarize[2].content.includes("lane done"));
+  assert.ok(preparation.turnPrefixMessages[0].content.includes(HARNESS_HELD_ACTION), "a split turn's prefix is rewritten too");
+  assert.ok(inside.content.includes(HELD_COMPLETION_ACTION), "the session's own message object is not mutated");
+});
+
+test("compaction input: an operator Esc keeps the package's held text", () => {
+  const r = root();
+  r.fire("session_start");
+  const notice = heldNotice(Date.now());
+  const list = [notice];
+  const preparation = { messagesToSummarize: list, turnPrefixMessages: [] as unknown[] };
+  r.fire("session_before_compact", { preparation, reason: "auto" });
+  assert.equal(preparation.messagesToSummarize, list);
+  assert.ok(list[0].content.includes(HELD_COMPLETION_ACTION));
+});
+
 test("an operator Esc keeps the package's held text verbatim", () => {
   const r = root();
   r.fire("session_start");
@@ -109,7 +153,7 @@ test("a resumed root rebuilds its windows from the session branch", () => {
 });
 
 /** One root process over a session branch that persists across processes, on an injected clock. */
-function process(branch: { type: string; customType: string; data: unknown }[], clock: { now: number }) {
+function rootProcess(branch: { type: string; customType: string; data: unknown }[], clock: { now: number }) {
   const handlers = new Map<string, Handler[]>();
   const listeners = new Map<string, ((data: unknown) => void)[]>();
   const pi = {
@@ -128,12 +172,12 @@ test("a window open at exit is closed for good at the next resume: a later owner
   const branch: { type: string; customType: string; data: unknown }[] = [];
   const clock = { now: 1_000 };
   // Process A: a recovery stop with no follow-up run, then the root exits mid-window.
-  const a = process(branch, clock);
+  const a = rootProcess(branch, clock);
   a.fire("session_start");
   a.emit("loop-recovery:abort");
   // Process B: resumed later; the owner runs a turn and presses Esc; a held notice lands at 3000.
   clock.now = 2_000;
-  const b = process(branch, clock);
+  const b = rootProcess(branch, clock);
   b.fire("session_start");
   clock.now = 2_500;
   b.fire("agent_start");
@@ -141,7 +185,7 @@ test("a window open at exit is closed for good at the next resume: a later owner
   assert.equal(b.hold.rewrite([ownerStop]), undefined, "process B leaves the owner's stop alone");
   // Process C: resumed again. The owner's stop in B must still read as the owner's.
   clock.now = 4_000;
-  const c = process(branch, clock);
+  const c = rootProcess(branch, clock);
   c.fire("session_start");
   assert.equal(c.hold.rewrite([ownerStop]), undefined, "process C must not widen A's window over B");
   // A's own held notice (inside A's window) is still rewritten after any number of resumes.

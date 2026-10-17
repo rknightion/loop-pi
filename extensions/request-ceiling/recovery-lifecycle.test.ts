@@ -46,6 +46,19 @@ test("recovery abort attribution precedes timer, expired-turn, request-check and
   h.emit("session_shutdown");
 });
 
+test("recovery announces no harness abort when the owner already aborted the run", (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
+  const h = harness();
+  h.emit("turn_start");
+  h.emit("before_provider_request", { payload: { input: [] } });
+  h.emit("message_end", failure);
+  // The owner pressed Esc in this same run before the episode timer fired.
+  (h.ctx as { signal?: AbortSignal }).signal = AbortSignal.abort();
+  t.mock.timers.tick(30);
+  assert.deepEqual(h.sequence, ["abort"], "no loop-recovery:abort for an owner-aborted run; the idempotent abort still runs");
+  h.emit("session_shutdown");
+});
+
 const failure = { message: { role: "assistant", stopReason: "error", content: [], errorMessage: "fetch failed" } };
 
 test("five-attempt configuration is bounded and reconciled with the native retry cap", () => {

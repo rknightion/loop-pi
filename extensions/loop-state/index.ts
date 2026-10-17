@@ -646,6 +646,17 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
     return undefined;
   });
 
+  // Native compaction summarises the stored messages and never runs the `context` hook: neutralise the
+  // same held notices there, or the summary could carry the owner-stop text forward.
+  pi.on("session_before_compact", (event) => {
+    try {
+      harnessHold.rewriteCompaction(event.preparation);
+    } catch (error) {
+      warn(`harness hold (compaction): ${String(error)}`);
+    }
+    return undefined;
+  });
+
   pi.on("session_compact", (_event, ctx) => {
     lastCtx = ctx;
     enqueue(injectDigest);

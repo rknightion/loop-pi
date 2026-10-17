@@ -6,7 +6,10 @@
 // aborts synchronously on the event bus first (`loop-recovery:request-timeout`, `loop-recovery:abort`);
 // each opens a window that the next agent_start closes. Held notices timestamped inside a window are
 // rewritten for the model only; the session keeps the package's text, and an operator Esc (no window)
-// keeps it verbatim.
+// keeps it verbatim. Native compaction never runs the `context` hook (pi 1.3.0 `emitContext` has the
+// single caller `transformContext` in core/sdk.js, the agent loop's request path; compaction builds its
+// input from `prepareCompaction`), so `session_before_compact` rewrites the same notices in the
+// summariser's input too.
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { NOTIFY_CUSTOM_TYPE } from "./return-cap.ts";
 
@@ -88,5 +91,20 @@ export function registerHarnessHold(pi: ExtensionAPI, now: () => number = Date.n
       pi.appendEntry(HARNESS_HOLD_STATE, { start: w.start, end: w.end });
     }
   });
-  return { rewrite: <M>(messages: readonly M[]) => rewriteHeldNotices(messages, windows) };
+  return {
+    rewrite: <M>(messages: readonly M[]) => rewriteHeldNotices(messages, windows),
+    /**
+     * Compaction summarises the session's stored messages, not the `context` hook's output. Replaces the
+     * preparation's message lists in place (pi hands the same object on to its summariser); the session
+     * keeps the package's text.
+     */
+    rewriteCompaction: (preparation: { messagesToSummarize?: unknown; turnPrefixMessages?: unknown }) => {
+      for (const key of ["messagesToSummarize", "turnPrefixMessages"] as const) {
+        const list = preparation?.[key];
+        if (!Array.isArray(list)) continue;
+        const rewritten = rewriteHeldNotices(list, windows);
+        if (rewritten) preparation[key] = rewritten;
+      }
+    },
+  };
 }
