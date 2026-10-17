@@ -8,6 +8,7 @@ import {
   type RequestProgress, DEFAULT_CHECKPOINT_INTERVAL_MS, checkpointIntervalMs, checkpointPath, endProgress,
   newProgress, observeAssistantEvent, observeProviderEvent, observeResponse, removeOrphanTemps, snapshot, writeCheckpoint,
 } from "./progress.ts";
+import { processStartedAt, requestPolicy } from "./writer.ts";
 
 const RETAINED_HEADERS = new Set([
   "x-request-id", "x-ratelimit-remaining-requests", "x-ratelimit-reset-requests", "service-tier",
@@ -104,10 +105,13 @@ export default function (pi: ExtensionAPI) {
     closeProgress("abandoned", null);
     session = sessionOf(ctx) ?? session;
     const model = ctx?.model;
-    progress = newProgress({
-      session, request: randomUUID(), turn: ++turns,
-      provider: model?.provider ?? null, model: model?.id ?? null, api: model?.api ?? null,
-    }, Date.now());
+    progress = {
+      ...newProgress({
+        session, request: randomUUID(), turn: ++turns,
+        provider: model?.provider ?? null, model: model?.id ?? null, api: model?.api ?? null,
+      }, Date.now()),
+      pidStartedAt: processStartedAt(), policy: requestPolicy(intervalMs),
+    };
     checkpoint = ctx ? checkpointPath(getAgentDir(), session) : null;
     if (checkpoint) {
       if (cleanedFor !== checkpoint) removeOrphanTemps(checkpoint);

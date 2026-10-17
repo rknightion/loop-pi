@@ -8,6 +8,7 @@ import {
   unlinkSync, writeFileSync,
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import type { RequestPolicy } from "./writer.ts";
 
 export const PROGRESS_VERSION = 1;
 export const DEFAULT_CHECKPOINT_INTERVAL_MS = 5_000;
@@ -73,6 +74,10 @@ export interface RequestProgress {
   lastProviderEventAt: number | null;
   keepalives: number | null;
   lastKeepaliveAt: number | null;
+  /** Additive: epoch ms the writing process began (writer.ts). Absent or null is unknown. */
+  pidStartedAt?: number | null;
+  /** Additive: the limits this process loaded (writer.ts). Absent, or a null limit, is unknown. */
+  policy?: RequestPolicy | null;
 }
 
 export interface RequestIdentity {

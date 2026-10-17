@@ -21,6 +21,7 @@ import { isContextOverflow, isRetryableAssistantError, retryDelayMs } from "@ear
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { newProgress, observeAssistantEvent, type RequestProgress } from "../call-timing/progress.ts";
+import { publishCeilingPolicy } from "../call-timing/writer.ts";
 import { installRecovery } from "./recovery.ts";
 import { backoffConfig, classifyRetryError, extraRetryDelayMs, retryPolicy } from "./backoff.ts";
 import {
@@ -54,6 +55,7 @@ function loadConfig(): CeilingConfig {
 
 export function installRequestCeiling(pi: ExtensionAPI, supplied: CeilingConfig = loadConfig()): void {
   const config = ceilingConfig({loopPi: {requestCeiling: supplied}});
+  publishCeilingPolicy(config);
   let generation = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let startedAt = 0;
@@ -90,7 +92,9 @@ export function installRequestCeiling(pi: ExtensionAPI, supplied: CeilingConfig 
       wallClockMs: kind === "absolute" ? config.absoluteMs : config.inactivityMs,
       limitType: kind, absoluteMs: config.absoluteMs, inactivityMs: config.inactivityMs,
       idleMs: now - (progress?.lastModelEventAt ?? startedAt), lastModelEventAt: progress?.lastModelEventAt ?? null};
-    pi.events.emit("loop-recovery:request-timeout", { limitType: kind });
+    // An owner Esc already aborted this run: the stop is theirs, so announce no harness abort
+    // (loop-state would rewrite the owner's held notices). abort() on an aborted run is a no-op.
+    if (!ctx.signal?.aborted) pi.events.emit("loop-recovery:request-timeout", { limitType: kind });
     ctx.abort();
   };
   const arm = (ctx: ExtensionContext) => {
