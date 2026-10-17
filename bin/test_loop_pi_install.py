@@ -519,7 +519,7 @@ class NopushNativeCanary(unittest.TestCase):
         node = m.node_binary()
         rpc = Rpc([node, str(prefix / m.PI_CLI), "--mode", "rpc", "--provider", "faux", "--model", "faux-1",
                    "--extension", str(faux), "--extension", str(prefix / "extensions/loop-guard/root.ts"),
-                   "--exclude-tools", "subagents_enable,bg_wait"], repo, env)
+                   "--exclude-tools", "subagents_enable,bg_wait,contact_supervisor"], repo, env)
         def prompt(marker):
             start = len(rpc.events)
             rpc.send(type="prompt", message=marker)
@@ -938,7 +938,7 @@ class InstallerTests(unittest.TestCase):
         self.assertTrue("only --version runs" not in complete and "PI_SUBAGENT_WAIT_TOOL_ENABLED=false" in complete)
         self.assertIn("--provider openai --model gpt-6.1-sol --thinking high", complete)
         # Some OpenAI-compatible proxies never acknowledge a request whose tool list changed mid-conversation.
-        self.assertIn("--exclude-tools subagents_enable,bg_wait ", complete)
+        self.assertIn("--exclude-tools subagents_enable,bg_wait,contact_supervisor ", complete)
 
     def test_lane_worktrees_is_a_root_extension_and_its_absence_is_reported_not_fatal(self):
         entry = "lane-worktrees/index.ts"

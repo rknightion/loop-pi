@@ -422,7 +422,9 @@ def launcher_text(prefix: Path, home: Path, node: str, manifest: dict, name: str
         # subagent is loaded up front and bg_wait is never declared: some OpenAI-compatible proxies
         # never acknowledge a request whose tool list grew mid-conversation (subagents_enable does
         # that), and `waitTool: false` leaves bg_wait declared although the root waits by push.
-        lines.append(f"exec '{node}' '{pi}' {flags} --exclude-tools subagents_enable,bg_wait "
+        # contact_supervisor is a stub at the top level (it only returns an error); a child registers
+        # the working tool itself, and children do not inherit this flag.
+        lines.append(f"exec '{node}' '{pi}' {flags} --exclude-tools subagents_enable,bg_wait,contact_supervisor "
                      f"--provider {provider} --model {model} "
                      f'--thinking {thinking} "$@"')
     return "\n".join(lines) + "\n"
