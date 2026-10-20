@@ -1,5 +1,5 @@
-// loop-pi runs one model family only: by default the gpt-6 family (gpt-6.1-sol, gpt-6-luna,
-// gpt-6-astra) on the `openai` provider, or whatever settings.json `loopPi.modelFamily` names. Loaded by both loop-guard entries, so the
+// loop-pi runs one model family only: by default exactly gpt-6.1-sol and gpt-6-astra on the
+// `openai` provider, or whatever settings.json `loopPi.modelFamily` names. Loaded by both loop-guard entries, so the
 // root and every lane refuse a model outside the family three ways: a `subagent` call carrying a
 // model (or run-deadline) override is blocked by subagentOverrideBlock in each entry's tool_call
 // handler, selecting another model switches straight back, and a request for one is sent under a
@@ -17,7 +17,7 @@ type ModelRef = { provider: string; id: string };
 
 /** The allowed family and the route to fall back to, from the home's settings.json `loopPi` block:
  *  `modelFamily: {provider, pattern, name, members}` and `rootRoute: {provider, model, thinking}`.
- *  Every field defaults to the gpt-6 family on the `openai` provider. */
+ *  Every field defaults to gpt-6.1-sol and gpt-6-astra on the `openai` provider. */
 export interface ModelFamilyConfig {
   provider: string;
   pattern: RegExp;
@@ -28,9 +28,9 @@ export interface ModelFamilyConfig {
 
 const DEFAULT_FAMILY = {
   provider: "openai",
-  pattern: "^gpt-6(\\.[0-9]+)?(-[a-z0-9]+)+$",
+  pattern: "^(gpt-6\\.1-sol|gpt-6-astra)$",
   name: "gpt-6",
-  members: ["gpt-6.1-sol", "gpt-6-luna", "gpt-6-astra"],
+  members: ["gpt-6.1-sol", "gpt-6-astra"],
 };
 const DEFAULT_ROOT_ROUTE = { provider: "openai", model: "gpt-6.1-sol" };
 

@@ -1012,7 +1012,7 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("scout", str(ctx.exception))
 
     def agent_file(self, front_extra: str, body: str = "body\n") -> str:
-        return f"---\nname: a\nmodel: openai/gpt-6-luna\n{front_extra}---\n{body}"
+        return f"---\nname: a\nmodel: openai/gpt-6-astra\n{front_extra}---\n{body}"
 
     def test_lane_policy_is_appended_once_to_agents_without_global_context(self):
         prefix = fake_prefix(self.tmp)
@@ -1238,12 +1238,16 @@ class InstallerTests(unittest.TestCase):
         prefix = fake_prefix(self.tmp)
         (prefix / "home/agents").mkdir()
         for name in m.AGENT_SET:
-            (prefix / "home/agents" / f"{name}.md").write_text("---\nname: x\nmodel: openai/gpt-6-luna\n---\n")
+            (prefix / "home/agents" / f"{name}.md").write_text("---\nname: x\nmodel: openai/gpt-6-astra\n---\n")
         m.check_model_family(prefix)
         (prefix / "home/agents/scout.md").write_text("---\nname: scout\nmodel: openai/gpt-5.6-luna\n---\n")
         with self.assertRaisesRegex(m.InstallError, "scout"):
             m.check_model_family(prefix)
-        (prefix / "home/agents/scout.md").write_text("---\nname: scout\n---\nmodel: openai/gpt-6-luna\n")
+        for refused in ("gpt-6-luna", "gpt-6-sol"):
+            (prefix / "home/agents/scout.md").write_text(f"---\nname: scout\nmodel: openai/{refused}\n---\n")
+            with self.assertRaisesRegex(m.InstallError, "scout", msg=refused):
+                m.check_model_family(prefix)
+        (prefix / "home/agents/scout.md").write_text("---\nname: scout\n---\nmodel: openai/gpt-6-astra\n")
         with self.assertRaisesRegex(m.InstallError, "scout"):
             m.check_model_family(prefix)
 
