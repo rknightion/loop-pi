@@ -14,6 +14,7 @@ import { MAX_NUDGES, STATE_CUSTOM_TYPE } from "../loop-continuation/state.ts";
 import { deriveLogPath } from "../loop-state/core.ts";
 import { asyncRunsDir, findNestedRun, formatNestedRun, formatNestedRuns, listNestedRuns } from "./descendants.ts";
 import { formatStatus } from "./status.ts";
+import { installObservability } from "./observability.ts";
 
 export const STATUS_KEY = "loop-status";
 const TAIL_BYTES = 64 * 1024;
@@ -49,6 +50,7 @@ export function lastHeartbeatMs(path: string): number | null {
 }
 
 export default function (pi: ExtensionAPI): void {
+  installObservability(pi);
   let ctx: Ctx | null = null;
   let sessionKey: string | null = null;
   const liveRuns = new Set<string>();

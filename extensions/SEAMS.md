@@ -1126,3 +1126,29 @@ set with `ctx.ui.setStatus`; it sets no widget and clears the key at `session_sh
 - A pi child's parent link is already recorded by pi-subagents: the child session header's
   `parentSession` is the launching session's file path. For a lane that file is always named
   `session.jsonl`, so a reader that wants the parent's id must resolve the path, not its basename.
+
+### Child metadata observation
+
+The root-only loop-status entry registers `/loop-children` and `/loop-inspect <asyncId> [childId]`.
+Both produce a displayed custom message with `triggerTurn: false`; neither dispatches a model,
+changes capacity/liveness, nor adds a tool. `/loop-children` queries the correlated version-1
+native status RPC once (3 s bound) and displays `asyncSnapshot` step `agent`, `model`, `thinking`.
+Unknown/old fields stay unknown; omission markers are shown as partial. Snapshot model metadata
+can change after a reply and is not evidence of an answering provider.
+
+`/loop-inspect` reads bounded (256 KiB), no-follow regular canonical status metadata for an
+exact async ID. It validates the run ID and current-session ownership (including native session
+succession) before selecting a child. It never invokes native stale reconciliation, opens a
+transcript/output artifact or alters lifecycle state. Only the selected step's native
+`resolvedModel.provider/model` supplies answering identity, matching the own-reply rule of
+`/subagents-inspect-rpc`. Missing fields never fall back to history, labels or configured routes.
+A multi-step run has no single answering child; select its native `step:0` or other child ID.
+Workflow linked-child fallback and in-memory/nested aliases are unsupported and remain unknown.
+The requested route comes from explicit `launchModel`, or a single-run recovery descriptor with
+matching version/source-run ID. An old run without that evidence shows unknown; the current
+status `model` is never mislabeled as the original request. Both commands reject observations
+if the current session changes while awaiting their native dependencies. Native status RPC may
+perform its ordinary status reconciliation; this view adds no lifecycle control. Metadata fields
+are bounded and stripped of terminal controls. These fields describe Pi's recorded reply, not
+an undisclosed backend behind a provider route. Package-internal import paths are version-pinned
+compatibility seams; native reply-to-view parity and real root/child tests cover them.

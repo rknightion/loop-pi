@@ -101,7 +101,9 @@ type Handler = (event: any, ctx: any) => any;
 
 function startRoot(f: Fixture) {
   const handlers = new Map<string, Handler>();
+  const commands = new Map<string, unknown>();
   const api = {
+    registerCommand: (name: string, command: unknown) => void commands.set(name, command),
     on: (event: string, handler: Handler) => void handlers.set(event, handler),
     events: { on: () => () => undefined, emit: () => undefined },
   };

@@ -53,3 +53,10 @@ responses and native retry preserving earlier completed history. Exercise the re
 stream and a side-effecting local tool when changing this boundary; helper-only classification
 checks do not establish it. Hosted tools, protected history and operator cancellation remain
 separate boundaries. Automatic wakes must preserve notices without resetting the outage budget.
+
+## Child metadata observation
+
+`/loop-inspect` must remain a bounded metadata-only reader. The pinned native inspection builder
+can reconcile stale runs before checking ownership, so do not call it from this view. Preserve
+own-step `resolvedModel` attribution and explicit launch-route evidence; native status `model`
+can change after a reply. Native reply parity and real root/child command tests cover this seam.

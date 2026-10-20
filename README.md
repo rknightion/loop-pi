@@ -221,6 +221,16 @@ bytes, and an unknown field's error lists the event's allowed fields.
 `just setup` installs dependencies and the git hooks; `just check` is the gate (formatting, type
 check, the extension and Python tests, and the leak scan). See `AGENTS.md`.
 
+## Child model observations
+
+Use `/loop-children` in a root to see native background child agent, model and thinking metadata,
+and `/loop-inspect <asyncId> [childId]` to compare its recorded launch route with the answering
+provider/model on its latest own reply. These commands use no model turn. Missing metadata stays
+unknown; multi-step runs require a child ID such as `step:0` for a specific answer. The views
+show metadata only, without task text or conversation output. Native status model metadata may
+change after a reply; only inspection's answering model is reply evidence, and neither reveals
+a backend hidden behind a provider route.
+
 ## Licence
 
 MIT. See `LICENSE`.
