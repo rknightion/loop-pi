@@ -614,11 +614,24 @@ class NopushNativeCanary(unittest.TestCase):
             self.assertEqual(parent_recovery["maxSubagentDepth"], 2)
             nested_status_path, nested_status = run_for_session(nested_session)
             self.assertEqual(nested_status_path.parent.parent.parent.name, "nested-subagent-runs")
-            # Native 0.77 creates the route and sessionRoot from the launch runId;
-            # executeAsyncSingle uses a separate ID for the outer async status.
-            # Read the scope from the parent's recovery producer, never the child path.
+            # 0.79 keys retained session storage by the async status id so completed
+            # children can be resumed. The nested event route still uses the launch id.
+            # Read that identity from its native started event and route receipt, never
+            # from the session directory or the nested child's output path.
             parent_session_root = Path(parent_recovery["sessionDir"]).parent
-            parent_route_id = parent_session_root.name
+            self.assertEqual(parent_session_root.name, parent_status["runId"])
+            started = []
+            for event_path in (home / "tmp/nested-subagent-events").glob("*/events/*.json"):
+                event = json.loads(event_path.read_text())
+                if (event.get("type") == "subagent.nested.started"
+                        and event.get("parentRunId") == parent_status["runId"]
+                        and event.get("child", {}).get("id") == nested_status["runId"]):
+                    route = json.loads((event_path.parent.parent / "route.json").read_text())
+                    self.assertEqual(route["rootRunId"], event["rootRunId"])
+                    self.assertEqual(route["capabilityToken"], event["capabilityToken"])
+                    started.append(event)
+            self.assertEqual(len(started), 1, "one native launch event binds the parent and nested child")
+            parent_route_id = started[0]["rootRunId"]
             self.assertEqual(Path(parent_recovery["sessionFile"]), parent_session)
             self.assertEqual(parent_session.parent.parent, parent_session_root)
             def assert_nested_scope(route_id):

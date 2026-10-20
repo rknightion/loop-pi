@@ -42,7 +42,7 @@ export function resumeDelayMs(attempt: number, config: RootRecoveryConfig): numb
   return Math.min(config.maxDelayMs, config.baseDelayMs * 2 ** exponent);
 }
 
-export type ResumeCause = "provider-error" | "stalled-request" | "request-ceiling";
+export type ResumeCause = "provider-error" | "stalled-request" | "request-ceiling" | "quota";
 export type StopCause = "authentication" | "quota" | "policy" | "context-length" | "configuration";
 
 export type RootRecoveryDecision =
@@ -127,6 +127,27 @@ export function classifyRootStop(message: SettledMessage | null, evidence: Settl
   }
   if (text === EMPTY_LENGTH_ERROR) return { action: "resume", cause: "request-ceiling", detail: detail === "error" ? "empty-output-budget" : detail };
   return { action: "resume", cause: "provider-error", detail };
+}
+
+export const QUOTA_RETRY_ENTRY = "loop-root-quota-recovery";
+export const QUOTA_RETRY_LIMIT = 2;
+
+/** Quota retries survive reload/compaction. Invalid persisted state fails closed. */
+export function quotaRetriesFromBranch(branch: readonly unknown[]): number {
+  let attempts = 0;
+  for (const raw of branch) {
+    const entry = raw as { type?: unknown; customType?: unknown; data?: { v?: unknown; attempts?: unknown } } | null;
+    if (entry?.type !== "custom" || entry.customType !== QUOTA_RETRY_ENTRY) continue;
+    const n = entry.data?.attempts;
+    attempts = entry.data?.v === 1 && typeof n === "number" && Number.isInteger(n) && n >= 0 && n <= QUOTA_RETRY_LIMIT ? n : QUOTA_RETRY_LIMIT;
+  }
+  return attempts;
+}
+
+export function boundedQuotaRecovery(decision: RootRecoveryDecision, attempts: number): RootRecoveryDecision {
+  return decision.action === "stop" && decision.cause === "quota" && attempts < QUOTA_RETRY_LIMIT
+    ? { action: "resume", cause: "quota", detail: decision.detail }
+    : decision;
 }
 
 /** The last assistant message on a session branch (`{type: "message", message}` entries), or null. */

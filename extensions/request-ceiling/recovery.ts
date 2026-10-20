@@ -316,11 +316,17 @@ export function installRecovery(pi: ExtensionAPI, loadSettings: (ctx?: Extension
     }
     if (!opted) return;
     error ??= httpProxyError(message.errorMessage);
-    if (!error && failed) {
+    if ((!error || error.code === "unrecognized") && failed) {
       // Some transports expose only error text. A known refusal token may deny
       // replay, never authorize it; retain the allowlisted classification only.
-      const refusal = [...POLICY_CODES, ...AUTH_CODES].find((code) => new RegExp(`\\b${code}\\b`).test(message.errorMessage ?? ""));
-      if (refusal) error = { code: refusal };
+      const text = error?.message ?? message.errorMessage ?? "";
+      const refusal = [...POLICY_CODES, ...AUTH_CODES, "insufficient_quota"].find((code) => new RegExp(`\\b${code}\\b`).test(text));
+      if (refusal) error = { ...error, code: refusal };
+      // A transport can discard the structured envelope. Preserve only a refusal
+      // category before replacing its text; these matches deny replay, never enable it.
+      else if (/\b(?:401|403)\b|unauthori[sz]ed|forbidden|invalid[_ ]api[_ ]key|authentication[ _](?:failed|failure|required|error)|permission[_ ]denied|insufficient_permissions/i.test(text)) error = { ...error, code: "authentication_error" };
+      else if (/cyber_policy|content_policy|content_filter|policy_violation|safety_violation|\bpolicy[ _](?:refusal|violation|denied|error)|\b(?:content|safety|inference)\s+refus/i.test(text)) error = { ...error, code: "policy_violation" };
+      else if (/insufficient_quota|\byou (?:have )?exceeded your (?:current )?quota\b|\bquota[ _](?:exceeded|exhausted|limit)|usage.?limit|out of budget|insufficient[ _](?:balance|credits)|billing[ _](?:limit|error|hard_limit)|UsageLimitError/i.test(text)) error = { ...error, code: "insufficient_quota" };
     }
     output ||= message.content.some((block) => block.type === "toolCall" || (block.type === "text" && block.text.length > 0) || (block.type === "thinking" && block.thinking.length > 0));
     // The pinned Responses agent loop never executes local tool calls from an errored

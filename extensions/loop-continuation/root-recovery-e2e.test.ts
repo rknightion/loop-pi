@@ -29,7 +29,7 @@ type Step =
 
 interface Captured { body: any; at: number }
 
-async function rootCase(steps: (n: number) => Step, opts: { abortAfterMs?: number; until: (events: RpcEvent[], requests: Captured[]) => boolean; settleMs?: number }) {
+async function rootCase(steps: (n: number) => Step, opts: { recoverPlainTransport?: boolean; ownerFollowUp?: boolean; plainProviderError?: string; abortAfterMs?: number; until: (events: RpcEvent[], requests: Captured[]) => boolean; settleMs?: number }) {
   const f = loopFixture();
   const requests: Captured[] = [];
   const open: ServerResponse[] = [];
@@ -41,7 +41,7 @@ async function rootCase(steps: (n: number) => Step, opts: { abortAfterMs?: numbe
     const step = steps(n);
     if (step.kind === "http") {
       res.writeHead(step.status, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: { code: step.code, type: step.type, message: "fixture upstream body, never retained" } }));
+      res.end(JSON.stringify({ error: { code: step.code, type: step.type, message: opts.plainProviderError ?? "fixture upstream body, never retained" } }));
       return;
     }
     res.writeHead(200, { "content-type": "text/event-stream" });
@@ -49,6 +49,11 @@ async function rootCase(steps: (n: number) => Step, opts: { abortAfterMs?: numbe
     send({ type: "response.created", response: { id: `resp_${n}`, status: "in_progress", output: [] } });
     if (step.kind === "hang") {
       open.push(res);
+      return;
+    }
+    if (opts.plainProviderError && (n === 1 || !opts.recoverPlainTransport)) {
+      send({ type: "error", message: opts.plainProviderError });
+      res.end();
       return;
     }
     if (step.kind === "fail") {
@@ -94,13 +99,23 @@ async function rootCase(steps: (n: number) => Step, opts: { abortAfterMs?: numbe
     await session.waitFor((e) => e.type === "agent_settled" && opts.until(session.events, requests), 30_000);
     // Long enough for any further automatic resume to have fired (three backoffs at the cap).
     if (opts.settleMs) await new Promise((resolve) => setTimeout(resolve, opts.settleMs));
+    const requestsBeforeOwner = requests.length;
+    if (opts.ownerFollowUp) {
+      session.send({ type: "prompt", id: "fresh-owner-input", message: "Continue the same authorised scratch task after checking quota." });
+      await session.waitFor((event) => event.type === "agent_settled" && requests.length >= requestsBeforeOwner + 3, 30_000);
+      await new Promise((resolve) => setTimeout(resolve, 3 * MAX_MS + 500));
+    }
+    session.send({ type: "get_entries", id: "quota-budget-entries" });
+    const entriesReply = await session.waitFor((event) => event.type === "response" && event.id === "quota-budget-entries", 10_000);
+    assert.equal(entriesReply.success, true);
+    const quotaEntries = ((entriesReply.data as any)?.entries ?? []).filter((entry: any) => entry.customType === "loop-root-quota-recovery");
     const log = existsSync(f.log) ? readFileSync(f.log, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line)) : [];
     const incidentDir = join(f.agentDir, "incidents", "root");
     const incidents = existsSync(incidentDir)
       ? readdirSync(incidentDir).map((name) => ({ name, body: JSON.parse(readFileSync(join(incidentDir, name), "utf8")) }))
       : [];
     const executions = existsSync(join(f.repo, "executions.log")) ? readFileSync(join(f.repo, "executions.log"), "utf8") : "";
-    return { requests, events: session.events, log, incidents, executions, stderr: session.stderr };
+    return { requests, requestsBeforeOwner, quotaEntries, events: session.events, log, incidents, executions, stderr: session.stderr };
   } finally {
     for (const res of open) res.destroy();
     await session.close();
@@ -155,8 +170,7 @@ test("provider errors that exhaust the recovery budget resume the root with expo
 
 for (const c of [
   { name: "authentication", status: 401, code: "invalid_api_key", type: "authentication_error" },
-  { name: "quota", status: 429, code: "insufficient_quota", type: "rate_limit_error" },
-  { name: "policy", status: 400, code: "cyber_policy", type: "invalid_request_error" },
+    { name: "policy", status: 400, code: "cyber_policy", type: "invalid_request_error" },
 ] as const) {
   test(`a ${c.name} refusal stops the root with an incident and is never resumed`, { timeout: 30_000 }, async () => {
     const run = await rootCase(() => ({ kind: "http", status: c.status, code: c.code, type: c.type }), {
@@ -194,4 +208,59 @@ test("an operator abort is never resumed automatically", { timeout: 30_000 }, as
   assert.equal(resumes(run.events).length, 0);
   assert.equal(judgements(run.log).length, 0);
   assert.equal(run.incidents.filter((i) => i.body.class === "loop-root-recovery-stopped").length, 0);
+});
+
+for (const [cause, errorMessage] of [
+  ["authentication", "invalid_api_key"],
+  ["authentication", "401 Unauthorized"],
+  ["policy", "cyber_policy"],
+  ["quota", "You have hit your usage limit for this period"],
+  ["quota", "You exceeded your current quota"],
+] as const) {
+  test(`plain stream refusal ${errorMessage} stops without another root turn`, { timeout: 30_000 }, async () => {
+    const run = await rootCase(() => ({ kind: "text", text: "PAUSED: unexpected request" }), {
+      plainProviderError: errorMessage,
+      until: (events, requests) => requests.length >= (cause === "quota" ? 3 : 1) && events.some((event) => event.type === "message_end" && (event.message as any)?.stopReason === "error"),
+      settleMs: 3 * MAX_MS + 500,
+    });
+    assert.equal(run.requests.length, cause === "quota" ? 3 : 1, "quota permits only two additional attempts");
+    assert.equal(resumes(run.events).length, cause === "quota" ? 2 : 0, "quota recovery is bounded and auth/policy never resume");
+    const stopped = run.incidents.filter((incident) => incident.body.class === "loop-root-recovery-stopped");
+    assert.equal(stopped.length, 1, JSON.stringify(run.incidents));
+    assert.equal(stopped[0].body.cause, cause);
+  });
+}
+
+test("a plain connection refusal still permits automatic root recovery", { timeout: 30_000 }, async () => {
+  const run = await rootCase(() => ({ kind: "text", text: "PAUSED: transport recovered" }), {
+    plainProviderError: "Connection refused", recoverPlainTransport: true,
+    until: (_events, requests) => requests.length >= 2,
+  });
+  assert.equal(run.requests.length, 2);
+  assert.equal(resumes(run.events).length, 1);
+  assert.equal(lastAssistantText(run.events), "PAUSED: transport recovered");
+  assert.equal(run.incidents.filter((incident) => incident.body.class === "loop-root-recovery-stopped").length, 0);
+});
+
+test("structured quota failures retry twice and then stop without an endless recovery loop", { timeout: 30_000 }, async () => {
+  const run = await rootCase(() => ({ kind: "http", status: 429, code: "insufficient_quota", type: "rate_limit_error" }), {
+    until: (_events, requests) => requests.length >= 3, settleMs: 3 * MAX_MS + 500,
+  });
+  assert.equal(run.requests.length, 3);
+  assert.deepEqual(resumes(run.events).map((m) => [m.details.cause, m.details.delayMs]), [["quota", BASE_MS], ["quota", MAX_MS]]);
+  const stopped = run.incidents.filter((i) => i.body.class === "loop-root-recovery-stopped");
+  assert.equal(stopped.length, 1);
+  assert.equal(stopped[0].body.cause, "quota");
+  assert.deepEqual(run.quotaEntries.map((entry: any) => entry.data.attempts), [1, 2]);
+});
+
+test("only fresh owner input grants another pair of quota retries", { timeout: 30_000 }, async () => {
+  const run = await rootCase(() => ({ kind: "http", status: 429, code: "insufficient_quota", type: "rate_limit_error" }), {
+    until: (_events, requests) => requests.length >= 3, settleMs: 3 * MAX_MS + 500, ownerFollowUp: true,
+  });
+  assert.equal(run.requestsBeforeOwner, 3);
+  assert.equal(run.requests.length, 6);
+  assert.deepEqual(run.quotaEntries.map((entry: any) => entry.data.attempts), [1, 2, 0, 1, 2]);
+  assert.equal(resumes(run.events).length, 4);
+  assert.equal(run.incidents.filter((i) => i.body.cause === "quota").length, 2);
 });

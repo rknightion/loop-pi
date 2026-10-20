@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { installRecovery, portableRequest, safeProxyRetry, recoveryConfig } from "./recovery.ts";
+import { classifyRootStop } from "../loop-continuation/root-recovery.ts";
 
 function harness(settings: unknown = { loopPi: { retryRecovery: { episodeMs: 30, providerIds: ["fixture"] } } }) {
   const handlers = new Map<string, Function[]>();
@@ -314,3 +315,46 @@ test("late successful recovery completion cannot erase an expired episode before
   h.emit("agent_settled");assert.deepEqual(h.emit("input",{source:"extension"}),{action:"handled"});
   h.emit("session_shutdown");
 });
+
+for (const [cause, errorMessage] of [
+  ["authentication", "invalid_api_key"],
+  ["authentication", "401 Unauthorized"],
+  ["policy", "cyber_policy"],
+  ["quota", "You have hit your usage limit for this period"],
+  ["quota", "You exceeded your current quota"],
+] as const) {
+  test(`managed rewriting preserves ${cause} refusal classification: ${errorMessage}`, () => {
+    const h = harness();
+    h.emit("turn_start");
+    h.emit("before_provider_request", { payload: { input: [] } });
+    const result = h.emit("message_end", { message: { role: "assistant", stopReason: "error", content: [], errorMessage } });
+    h.emit("session_shutdown");
+    assert.equal(result.message.loopPiRecovery.disposition, "stop");
+    const decision = classifyRootStop(result.message, { harnessAbort: null });
+    assert.equal(decision.action, "stop", "an owner-actionable refusal must not schedule another root call");
+    assert.equal(decision.action === "stop" && decision.cause, cause);
+  });
+}
+
+test("managed transport refusal remains eligible for provider recovery", () => {
+  const h = harness();
+  h.emit("turn_start");
+  h.emit("before_provider_request", { payload: { input: [] } });
+  const result = h.emit("message_end", { message: { role: "assistant", stopReason: "error", content: [], errorMessage: "Request failed: connection refused" } });
+  h.emit("session_shutdown");
+  const decision = classifyRootStop(result.message, { harnessAbort: null });
+  assert.equal(decision.action, "resume");
+});
+
+for (const errorMessage of [
+  "Network timeout during authentication",
+  "Connection failed while loading policy",
+  "Transport failed reading quota status",
+]) {
+  test(`unrelated transport diagnostic does not become refusal: ${errorMessage}`, () => {
+    const h = harness(); h.emit("turn_start"); h.emit("before_provider_request", { payload: { input: [] } });
+    const result = h.emit("message_end", { message: { role: "assistant", stopReason: "error", content: [], errorMessage } });
+    h.emit("session_shutdown");
+    assert.equal(classifyRootStop(result.message, { harnessAbort: null }).action, "resume");
+  });
+}

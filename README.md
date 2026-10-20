@@ -33,9 +33,11 @@ Three pi extensions, a home template and an installer:
 - Recovery is automatic for an armed root: when a provider error, a stalled request or a
   request-ceiling abort leaves it stopped, loop-continuation resumes it after a backoff that starts
   at 1 minute and doubles to a 15-minute cap (`loopPi.rootRecovery`), with no attempt limit, and
-  records each resume as a `judgement` in the state log. Authentication, quota, policy and
+  records each resume as a `judgement` in the state log. Authentication, policy and
   context-length failures still stop the root and write an incident; an operator's abort is never
-  resumed. Lanes are not auto-resumed.
+  resumed. Quota failures get at most two automatic retries, persisted across reloads, then stop
+  until fresh owner input; child notifications and healthy automatic turns do not reset that budget.
+  Lanes are not auto-resumed.
 - `extensions/request-ceiling` bounds each model request in the root and every lane by 15 minutes
   without observed model progress and 75 minutes absolute elapsed time (both configurable), and
   turns an output-budget stop with no output into an incident. Transport keepalives cannot extend
@@ -204,7 +206,7 @@ bytes, and an unknown field's error lists the event's allowed fields.
 ## Limits, stated plainly
 
 - **Pinned pi.** The runtime is pinned to `@earendil-works/pi-coding-agent` 1.3.0 and
-  pi-subagents 0.78.0. The extensions use pi's extension API, which still changes between minor
+  pi-subagents 0.79.1. The extensions use pi's extension API, which still changes between minor
   releases; a bump means re-running the tests and a real loop, not just the installer.
 - **Not a sandbox.** loop-guard is a fence against honest mistakes, parsed from the command text.
   A determined model can get round it (an interpreter, an encoded string, a file it writes and then

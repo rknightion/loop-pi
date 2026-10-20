@@ -23,6 +23,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { isContextOverflow } from "@earendil-works/pi-ai";
+import { QUOTA_RETRY_ENTRY, QUOTA_RETRY_LIMIT, quotaRetriesFromBranch, boundedQuotaRecovery } from "./root-recovery.ts";
 import { type ParsedLaunch, parseLaunch } from "./launch-detect.ts";
 import {
   ARM_REFUSED_CLASS,
@@ -117,6 +118,7 @@ export default function (pi: ExtensionAPI) {
   let ceilingLimit: SettleEvidence["ceilingLimit"] = null;
   /** Resumes sent since the root last completed a healthy model request. */
   let resumeAttempt = 0;
+  let quotaResumeAttempts = 0;
   /** When the pending resume is due (epoch ms); kept across runs that start before it fires. */
   let resumeDueAt: number | null = null;
   let resumeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -362,6 +364,12 @@ export default function (pi: ExtensionAPI) {
     // Recorded before it is sent, so every resume the root receives is in the state log.
     await recordJudgement(ctx, judgementText("resume", attempt, cause.cause, cause.detail, delay));
     if (epoch !== resumeEpoch || !stillStopped()) return; // The owner or a run took over meanwhile.
+    if (cause.cause === "quota") {
+      if (quotaResumeAttempts >= QUOTA_RETRY_LIMIT) return;
+      // Persist before sending: reload and incidental extension wakes cannot renew the budget.
+      quotaResumeAttempts++;
+      pi.appendEntry(QUOTA_RETRY_ENTRY, { v: 1, attempts: quotaResumeAttempts });
+    }
     resumeAttempt = attempt;
     // Reset the recovery episode as an owner's idle input would; only this event does so.
     pi.events.emit(RESUME_EVENT, {});
@@ -389,7 +397,7 @@ export default function (pi: ExtensionAPI) {
     } catch {
       return;
     }
-    const decision = classifyRootStop(last, evidence);
+    const decision = boundedQuotaRecovery(classifyRootStop(last, evidence), quotaResumeAttempts);
     if (decision.action === "none") {
       if (decision.why === "operator-cancelled") cancelResume();
       return;
@@ -490,6 +498,7 @@ export default function (pi: ExtensionAPI) {
     protocolSeen = false;
     cancelResume();
     resumeAttempt = 0;
+    quotaResumeAttempts = quotaRetriesFromBranch(ctx.sessionManager.getBranch());
     harnessAbort = null;
     ceilingLimit = null;
     stoppedFor = null;
@@ -610,7 +619,13 @@ export default function (pi: ExtensionAPI) {
   pi.on("input", async (event, ctx) => {
     triggerSync(false);
     // The owner's own input takes over from any pending automatic resume.
-    if (event.source !== "extension") cancelResume();
+    if (event.source !== "extension") {
+      cancelResume();
+      if (quotaResumeAttempts > 0) {
+        quotaResumeAttempts = 0;
+        pi.appendEntry(QUOTA_RETRY_ENTRY, { v: 1, attempts: 0 });
+      }
+    }
     // The notice before an idle-parent wake reached no message_start, so the wake is the push.
     if (isParentWake(event)) {
       pushDetected = true;

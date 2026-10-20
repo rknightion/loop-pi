@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { EMPTY_LENGTH_ERROR } from "../request-ceiling/core.ts";
-import { classifyRootStop, lastAssistantMessage, resumeDelayMs, rootRecoveryConfig, type SettleEvidence } from "./root-recovery.ts";
+import { classifyRootStop, lastAssistantMessage, resumeDelayMs, rootRecoveryConfig, type SettleEvidence, boundedQuotaRecovery, quotaRetriesFromBranch, QUOTA_RETRY_ENTRY } from "./root-recovery.ts";
 
 const none: SettleEvidence = { harnessAbort: null };
 const managed = (reason: string, code: string | null = null, status: number | null = null) => ({
@@ -88,4 +88,20 @@ test("the last assistant message is read from the session branch", () => {
   ];
   assert.equal(lastAssistantMessage(branch)?.errorMessage, "first");
   assert.equal(lastAssistantMessage([]), null);
+});
+
+test("quota recovery is limited to two retries and persists until genuine owner input resets it", () => {
+  const decision = classifyRootStop(http(429, "insufficient_quota", "rate_limit_error"), none);
+  assert.equal(boundedQuotaRecovery(decision, 0).action, "resume");
+  assert.equal(boundedQuotaRecovery(decision, 1).action, "resume");
+  assert.deepEqual(boundedQuotaRecovery(decision, 2), decision);
+  const entry = (attempts: unknown) => ({ type: "custom", customType: QUOTA_RETRY_ENTRY, data: { v: 1, attempts } });
+  assert.equal(quotaRetriesFromBranch([entry(1), entry(2)]), 2);
+  assert.equal(quotaRetriesFromBranch([entry(2), { type: "message", message: { role: "assistant", stopReason: "stop" } }]), 2);
+  assert.equal(quotaRetriesFromBranch([entry(2), entry(0)]), 0);
+  assert.equal(quotaRetriesFromBranch([entry(-1)]), 2);
+  assert.equal(quotaRetriesFromBranch([entry("0")]), 2);
+  assert.equal(quotaRetriesFromBranch([]), 0);
+  const auth = classifyRootStop(http(401, "invalid_api_key"), none);
+  assert.deepEqual(boundedQuotaRecovery(auth, 0), auth);
 });
