@@ -50,3 +50,15 @@ export function hasSubagentField(input: unknown, key: string): boolean {
   const options = record.options;
   return !!options && typeof options === "object" && (options as Record<string, unknown>)[key] !== undefined;
 }
+
+/** A native `steer` that misses its 3 s acknowledgement makes pi-subagents interrupt the child and
+ *  wait a fixed 15 s for the pause before launching a replacement. A child that pauses later is left
+ *  paused with the message unapplied (upstream issue 2956). Steer calls therefore always carry
+ *  `steeringRecovery: false`: the message stays queued for the child's next boundary and nothing is
+ *  interrupted. pi-subagents' own RPC and slash steering force the same value. */
+export function disableSteeringRecovery(input: Record<string, unknown>): void {
+  if (typeof input.action !== "string" || input.action.trim() !== "steer") return;
+  delete input.steeringRecovery;
+  if (input.options === undefined) input.options = {};
+  if (isPlainObject(input.options)) input.options.steeringRecovery = false;
+}

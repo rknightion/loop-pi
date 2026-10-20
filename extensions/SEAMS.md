@@ -807,7 +807,12 @@ paths are exact, bash write detection is best-effort.
   `loop-guard/subagent-view.ts`; a call, or a present `options`, that is not a plain object is
   refused by the root guard. A field loop-pi rewrites (`extensionBindings`, `lane`) is removed from
   `options` and set once at the top level; lane-worktrees refuses a `lane` given in both places with
-  different values, as the package does.
+  different values, as the package does. The exception is `steeringRecovery`, an `options` key: the
+  root guard removes any top-level copy and sets `options.steeringRecovery = false` on every
+  `action: "steer"`. With recovery on, a steer that misses the package's 3 s acknowledgement
+  interrupts the child and waits a fixed 15 s for the pause; a child that pauses later is left paused
+  with the message unapplied until an explicit `resume` (upstream issue 2956, still true in 0.79.2).
+  With it off the message stays queued for the child's next boundary and nothing is interrupted.
 - **Return cap** (lane: loop-guard's lane entry at the child's assistant `message_end`; root:
   loop-state at `message_end`, plus the `context` hook for already-stored messages).
   - Lane: the last non-empty text part of an assistant message with no tool call and no error (the
