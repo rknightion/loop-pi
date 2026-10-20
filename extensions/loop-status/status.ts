@@ -17,6 +17,8 @@ export interface StatusInput {
   maxNudges: number;
   /** Epoch ms of the last recorded heartbeat, or null when none is readable. */
   heartbeatAt: number | null;
+  /** The root model-time segment (modeltime.ts `formatModelTime`), or null/absent when there is nothing to show. */
+  modelTime?: string | null;
   now: number;
 }
 
@@ -55,6 +57,7 @@ export function formatStatus(input: StatusInput): string {
   parts.push(input.watchers === null ? "watchers ?" : plural(input.watchers.length, "watcher"));
   const next = nextDeadline(input.timers, input.watchers);
   if (next !== null) parts.push(`next ${clock(next)}`);
+  if (input.modelTime) parts.push(input.modelTime);
   parts.push(`nudge ${input.nudges ?? 0}/${input.maxNudges}`);
   parts.push(input.heartbeatAt === null ? "hb -" : `hb ${formatAge(input.now - input.heartbeatAt)} ago`);
   return `loop: ${parts.join(" · ")}`;

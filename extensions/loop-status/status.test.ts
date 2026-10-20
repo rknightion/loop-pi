@@ -53,3 +53,13 @@ test("runs below the lanes show beside the lane count only when there are any", 
   assert.match(formatStatus({ ...base, nested: 0 }), /^loop: 1\/4 lanes · /);
   assert.match(formatStatus({ ...base, laneCap: null, nested: 2 }), /^loop: 1 lane \(\+2 nested\) · /);
 });
+
+test("the root model-time segment sits before the nudge count and is absent when there is nothing to show", () => {
+  const base = { lanes: 0, timers: [], watchers: [], nudges: 0, maxNudges: 3, heartbeatAt: null, now: NOW };
+  assert.equal(
+    formatStatus({ ...base, modelTime: "root model time 62% of 3h10m" }),
+    "loop: 0 lanes · 0 timers · 0 watchers · root model time 62% of 3h10m · nudge 0/3 · hb -",
+  );
+  assert.equal(formatStatus({ ...base, modelTime: null }), "loop: 0 lanes · 0 timers · 0 watchers · nudge 0/3 · hb -");
+  assert.equal(formatStatus(base), "loop: 0 lanes · 0 timers · 0 watchers · nudge 0/3 · hb -");
+});

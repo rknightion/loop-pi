@@ -4,15 +4,18 @@
 //    the way loop-continuation counts them);
 //  - timers and watchers: loop-wait's `loop-wait:query-timers` / `loop-wait:query-watchers`;
 //  - nudge chain: the latest `loop-continuation-state` session entry (`nudgeCount`);
-//  - heartbeat: the last `heartbeat` row of the loop-state log beside the launch's report.
+//  - heartbeat: the last `heartbeat` row of the loop-state log beside the launch's report;
+//  - root model time: call-timing's `loopPiProgress` on the session's own assistant messages
+//    against the wall time since the launch (modeltime.ts), also behind the wake notice below.
 // There is no timer here: the line is rebuilt on those events, at agent start and settle, and
 // after tool calls, so the heartbeat age is as of the last rebuild.
 import { closeSync, fstatSync, openSync, readSync, statSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { MAX_NUDGES, STATE_CUSTOM_TYPE } from "../loop-continuation/state.ts";
+import { MAX_NUDGES, STATE_CUSTOM_TYPE, isParentWake } from "../loop-continuation/state.ts";
 import { deriveLogPath } from "../loop-state/core.ts";
 import { asyncRunsDir, findNestedRun, formatNestedRun, formatNestedRuns, listNestedRuns } from "./descendants.ts";
+import { MODEL_TIME_NOTICE_TYPE, NOTICE_GATE_START, WAKE_CUSTOM_TYPES, formatModelTime, gateNotice, rootModelTime, wakeNotice, type ModelTime } from "./modeltime.ts";
 import { formatStatus } from "./status.ts";
 import { installObservability } from "./observability.ts";
 
@@ -57,6 +60,9 @@ export default function (pi: ExtensionAPI): void {
   let nudges: number | null = null;
   let logPath: string | null = null;
   let laneCap: number | null = null;
+  let launchedAt: number | null = null;
+  let noticeGate = NOTICE_GATE_START;
+  let parentWakeInput = false;
   let heartbeat: { stamp: string; at: number | null } | null = null;
   let lastText: string | undefined;
   let pending = false;
@@ -81,23 +87,32 @@ export default function (pi: ExtensionAPI): void {
     }
   }
 
+  /** Reads the launch answer once per launch: the log path, the slot cap and when it launched. */
+  function readLaunch(): void {
+    if (logPath) return;
+    let reportPath: unknown;
+    let concurrency: unknown;
+    let launchedAtIso: unknown;
+    pi.events.emit("loop-continuation:query-launch", {
+      cwd: ctx?.cwd,
+      reply: (r: { reportPath?: unknown; concurrency?: unknown; launchedAt?: unknown } | null | undefined) => {
+        reportPath = r?.reportPath;
+        concurrency = r?.concurrency;
+        launchedAtIso = r?.launchedAt;
+      },
+    });
+    if (typeof reportPath !== "string" || reportPath === "") return;
+    logPath = deriveLogPath(isAbsolute(reportPath) ? reportPath : resolve(ctx?.cwd ?? ".", reportPath));
+    if (!logPath) return;
+    // Frozen at arm, so they are read once with the launch, alongside the log path.
+    laneCap = typeof concurrency === "number" && Number.isInteger(concurrency) && concurrency >= 1 ? concurrency : null;
+    const launched = typeof launchedAtIso === "string" ? Date.parse(launchedAtIso) : NaN;
+    launchedAt = Number.isFinite(launched) ? launched : null;
+  }
+
   function heartbeatAt(): number | null {
-    if (!logPath) {
-      let reportPath: unknown;
-      let concurrency: unknown;
-      pi.events.emit("loop-continuation:query-launch", {
-        cwd: ctx?.cwd,
-        reply: (r: { reportPath?: unknown; concurrency?: unknown } | null | undefined) => {
-          reportPath = r?.reportPath;
-          concurrency = r?.concurrency;
-        },
-      });
-      if (typeof reportPath !== "string" || reportPath === "") return null;
-      logPath = deriveLogPath(isAbsolute(reportPath) ? reportPath : resolve(ctx?.cwd ?? ".", reportPath));
-      if (!logPath) return null;
-      // Frozen at arm, so it is read once with the launch, alongside the log path.
-      laneCap = typeof concurrency === "number" && Number.isInteger(concurrency) && concurrency >= 1 ? concurrency : null;
-    }
+    readLaunch();
+    if (!logPath) return null;
     try {
       const st = statSync(logPath);
       const stamp = `${st.size}:${st.mtimeMs}`;
@@ -105,6 +120,19 @@ export default function (pi: ExtensionAPI): void {
       return heartbeat.at;
     } catch {
       return null;
+    }
+  }
+
+  /** Root model time as of `now`: since the launch when known, else since the session began. */
+  function modelTime(now: number): ModelTime {
+    try {
+      readLaunch();
+      const header = Date.parse(ctx?.sessionManager.getHeader?.()?.timestamp ?? "");
+      const since = launchedAt ?? (Number.isFinite(header) ? header : null);
+      return rootModelTime(ctx?.sessionManager.getEntries(), since, now);
+    } catch {
+      // Unreadable session state is unknown, never a guessed number.
+      return { state: "unknown" };
     }
   }
 
@@ -120,6 +148,7 @@ export default function (pi: ExtensionAPI): void {
 
   function render(): void {
     if (!ctx?.hasUI) return;
+    const now = Date.now();
     const heartbeatMs = heartbeatAt();
     const text = formatStatus({
       lanes: liveRuns.size,
@@ -130,7 +159,8 @@ export default function (pi: ExtensionAPI): void {
       nudges,
       maxNudges: MAX_NUDGES,
       heartbeatAt: heartbeatMs,
-      now: Date.now(),
+      modelTime: formatModelTime(modelTime(now)),
+      now,
     });
     if (text === lastText) return;
     try {
@@ -159,6 +189,9 @@ export default function (pi: ExtensionAPI): void {
     liveRuns.clear();
     logPath = null;
     laneCap = null;
+    launchedAt = null;
+    noticeGate = NOTICE_GATE_START;
+    parentWakeInput = false;
     heartbeat = null;
     lastText = undefined;
     readNudges();
@@ -171,10 +204,39 @@ export default function (pi: ExtensionAPI): void {
   });
   pi.on("agent_settled", (_event, c) => {
     remember(c);
+    parentWakeInput = false;
     readNudges();
     refresh();
   });
   pi.on("tool_execution_end", (_event, c) => refresh(c));
+  // The wake notice (SEAMS.md "Loop status line"). pi-subagents wakes an idle root with an
+  // extension-sourced user message; loop-wait wakes it with a `loop-watch` / `loop-wake` custom
+  // message. Either starts a run through `before_agent_start`, which may add one message to that
+  // run: at most one notice per wake, none at or below the threshold or while the share is unknown.
+  pi.on("input", (event) => {
+    if (isParentWake(event)) parentWakeInput = true;
+  });
+  pi.on("before_agent_start", (event, c) => {
+    const fromInput = parentWakeInput;
+    parentWakeInput = false;
+    try {
+      remember(c);
+      const wake = event.messageType === "custom"
+        ? WAKE_CUSTOM_TYPES.has(event.message.customType)
+        : fromInput && isParentWake({ source: "extension", text: event.prompt });
+      if (!wake) return;
+      const time = modelTime(Date.now());
+      // Loop-specific advice: only for an armed launch, never a plain session on this home.
+      if (launchedAt === null || time.state !== "known") return;
+      const notice = wakeNotice(time);
+      if (!notice) return;
+      const gated = gateNotice(noticeGate, time.share);
+      noticeGate = gated.gate;
+      if (gated.send) return { message: { customType: MODEL_TIME_NOTICE_TYPE, content: notice, display: true } };
+    } catch {
+      // A notice failure must never hold up the wake.
+    }
+  });
   // pi-subagents' `subagent status` lists only runs this session launched. A run a lane launched
   // (depth 2) is neither listed nor resolvable by id, so the root cannot see the capacity it holds:
   // append those runs to the listing, and answer an id that is one of them instead of "not found".

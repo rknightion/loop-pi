@@ -562,6 +562,9 @@ before any `await`. A missing reply means the provider extension is not loaded; 
     positive integer (digits only), frozen at arm and restored with the continuation state on a
     resumed session. The key is absent, not null, when no launch is armed or the value is missing or
     malformed. Consumers treat it as optional.
+  - The reply may also carry `launchedAt: string`, the ISO timestamp of the recognised launch prompt
+    (`launch.launchTs`). It is absent, not null, when no launch is armed. Consumers treat it as
+    optional (loop-status measures wall time from it, else from the session header).
 - `loop-guard:push-recorded` `{ count: number }`: loop-guard's root entry, after a root `git push` or
   `gh pr merge` appended `count > 0` lines to the push log (the remote move was verified; a failed,
   rejected or up-to-date push emits nothing). loop-state listens (see "State-aware root context
@@ -888,9 +891,21 @@ paths are exact, bash write detection is best-effort.
   the recorded allocation base. After session start, earlier runs remain live
   until their async `status.json` is terminal; absent status keeps them. Merged branches may be
   removed on authorised release, unmerged branches retained. State entry: `lane-worktrees-state`.
-  While the marker exists, governed named single-agent tool launches not intercepted for root-owned
+  While the marker exists, a new governed (header-parsed) single-agent launch of `worker`, `senior` or
+  `senior-escalation` is refused unless it is retained: `worktree: true` (or `isolation: "worktree"`,
+  with no conflicting `worktree: false` or other isolation) together with a parseable `Landing:` line,
+  or an explicit `cwd` that is, or is inside, the tree retained for that lane id and task (checked first;
+  it takes the single-flight, allocation-ownership and confinement checks of a resume, is refused while
+  that lane has a live or pending run, and has `isolation` replaced by `worktree: false` so the package
+  allocates nothing; its run and relative cwd are recorded like any retained run). The refusal
+  says to add `worktree: true` and `Landing: returns candidate`, and is evaluated before the
+  conflicting-shape and shared-cwd passes below, so those shapes no longer reach native allocation
+  for implementation agents. `scout` and `reviewer` launches, briefs with no header, workflows and
+  multi-agent shapes, `action` calls (resume, status, ...) and runs with no protocol marker are not
+  subject to it.
+  Governed named single-agent tool launches not intercepted for root-owned
   retention (including omitted worktree flags resolved by package defaults and missing or
-  unsupported Landing) bind version-1 lane metadata with an opaque `r<32hex>l<32hex>` key derived
+  unsupported Landing) by the remaining agents (`scout`, `reviewer`) bind version-1 lane metadata with an opaque `r<32hex>l<32hex>` key derived
   from the canonical run directory and original lane/task pair. Explicit shared-cwd requests,
   workflows, conflicting shapes and RPC launches keep their existing handling. Existing lane
   fields are preserved; malformed lane version/key is refused before naming is changed, and
@@ -1097,7 +1112,7 @@ The optional version-1 `return.artifact` field is an absolute nonempty path with
 only; lanes never load it). It is the sole owner of the status key `loop-status`,
 set with `ctx.ui.setStatus`; it sets no widget and clears the key at `session_shutdown`.
 
-- It reads, and writes nothing to, existing seams: `loop-wait:query-timers` and
+- The status line reads, and writes nothing to, existing seams: `loop-wait:query-timers` and
   `loop-wait:query-watchers` (the optional `deadline` of each watcher; no reply shows `timers ?` or
   `watchers ?`), the latest `loop-continuation-state` entry's `nudgeCount` against `MAX_NUDGES`, this
   session's live async runs (`subagent:async-started` / `subagent:async-complete`, counted the way
@@ -1109,7 +1124,36 @@ set with `ctx.ui.setStatus`; it sets no widget and clears the key at `session_sh
   `tool_execution_end`, so heartbeat age and nudge count are as of that rebuild. Nothing is set
   without a UI.
 - Format: `loop: <N>/<cap> lanes (or <N> lane(s) when no cap) · <N> timers · <N> watchers · next
-  HH:MM (earliest timer or watcher deadline, if any) · nudge <n>/<max> · hb <age> ago (or hb -)`.
+  HH:MM (earliest timer or watcher deadline, if any) · root model time <P>% of <wall> (or ?, or
+  absent before the first root request) · nudge <n>/<max> · hb <age> ago (or hb -)`.
+- **Root model time.** `loop-status/modeltime.ts` sums the root's own model request durations and
+  divides by the wall time since the launch (`loop-continuation:query-launch` `launchedAt`), else
+  since the session header's timestamp. The only source is `loopPiProgress` (`startedAt`,
+  `endedAt`, `state: "ended"`), which call-timing already persists on every root assistant message
+  ("Request progress seam"), so nothing new is stored: the figure is rebuilt from
+  `sessionManager.getEntries()` and is the same after a reload, a resume or a compaction (compaction
+  never removes entries). A request is clipped to the window, so one that began before the launch
+  counts only from it; the share is capped at 100%. Only the root's session is read: a lane's
+  requests live in the lane's own session and are never counted, and a request pi makes outside an
+  agent turn (a compaction summary) is not observed by call-timing, so it is not counted either.
+  **Unknown fails closed:** unreadable entries or start time, a non-positive wall time, or
+  assistant messages with no finished timing record (call-timing not loaded) show `root model time ?`
+  and never produce a notice; a session with no assistant message yet shows no segment.
+- **Wake notice.** An idle root is woken by an extension-sourced user message from pi-subagents (a
+  lane return) or by a `loop-watch` / `loop-wake` custom message from loop-wait (a watch exit or
+  `wake_at`); both start a run through `before_agent_start`. loop-status returns at most one
+  message from that hook, `loop-model-time-notice`, one line:
+  `Root model time is above 60% of wall time (<P>% of <wall>): combine reviews and keep ledgers to one-line appends.`
+  It is added only when the share is strictly above `ROOT_MODEL_TIME_NOTICE_SHARE` (0.6) and the
+  wall time is at least `ROOT_MODEL_TIME_NOTICE_MIN_WALL_MS` (30 minutes); otherwise, or when the
+  share is unknown, the wake is untouched. It needs an armed launch (`launchedAt` from
+  `query-launch`), so a plain session on a loop home never gets it. After one notice it repeats
+  only when the share reaches a higher 10-point band or `ROOT_MODEL_TIME_NOTICE_EVERY_WAKES` (10)
+  wakes later; that count is in memory and resets on reload. A pi-subagents wake is recognised from its `input`
+  event (source `extension`, `isParentWake`) paired with the same prompt text, so an operator typing
+  that text gets no notice; the pairing is dropped at `agent_settled`. A wake that reaches a busy
+  root as a steer starts no run and carries no notice. The notice is advisory text only: no request
+  is blocked, wrapped or retried, and the wake text, push detection and nudge chain are unchanged.
 - **Nested runs (pi-subagents 0.79.1).** `subagent status` lists the runs whose `status.json`
   `sessionId` is the asking session's file. A run a lane launches (depth 2) carries the lane's
   session file, so the root's own listing omits it and `status id=<run>` answers "Async run not

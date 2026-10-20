@@ -764,13 +764,16 @@ test("simultaneous resumes retain single-flight ownership during asynchronous id
   } finally { s.restore(); }
 });
 
+// Native/default allocation is the package-owned path for scout and reviewer launches; a governed
+// worker, senior or senior-escalation launch that would take it is refused (see the tests below), so
+// these naming proofs drive it through a reviewer.
 test("native naming is opaque, scoped and retains exact task/run identity through reload and revival", async () => {
   const s = setup();
   const task = ["H", "R", "N"].join("") + "-" + String(902).padStart(4, "0");
   const text = `Lane: N1 · Task: ${task} (private native identity) · Tier: guarded\nObjective: x`;
   try {
     for (const extra of [{}, { worktree: true }, { isolation: "worktree", lane: { version: 1, key: task, mode: "scout", claims: ["src/**"] } }]) {
-      const a = await s.launch(text, extra);
+      const a = await s.launch(text, { agent: "reviewer", ...extra });
       const metadata = a.input.lane as Record<string, unknown>;
       assert.equal(a.result, undefined);
       assert.equal(a.input.task, text, "do not redact the governed brief or context");
@@ -799,13 +802,13 @@ test("native naming reads lane metadata from pi-subagents 0.77.0 `options` and l
   const s = setup();
   const text = "Lane: N1 · Task: T1 · Tier: guarded\nObjective: x";
   try {
-    const a = await s.launch(text, { isolation: "worktree", options: { lane: { version: 1, key: "caller", mode: "scout" }, context: "fresh" } });
+    const a = await s.launch(text, { agent: "reviewer", isolation: "worktree", options: { lane: { version: 1, key: "caller", mode: "scout" }, context: "fresh" } });
     assert.equal(a.result, undefined);
     const metadata = a.input.lane as Record<string, unknown>;
     assert.equal(metadata.key, nativeLaneKey(realpathSync(s.runDir), "N1", "T1"));
     assert.equal(metadata.mode, "scout", "the caller's other lane fields are kept");
     assert.deepEqual(a.input.options, { context: "fresh" }, "no second, conflicting lane is left in options");
-    const bad = await s.launch(text, { worktree: true, options: { lane: { version: 1, key: "bad/key" } } });
+    const bad = await s.launch(text, { agent: "reviewer", worktree: true, options: { lane: { version: 1, key: "bad/key" } } });
     assert.equal(bad.result?.block, true);
   } finally { s.restore(); }
 });
@@ -816,12 +819,12 @@ test("native naming refuses a top-level lane and a different options.lane, as pi
   try {
     const top = { version: 1, key: "one" };
     const inner = { version: 1, key: "two" };
-    const conflict = await s.launch(text, { worktree: true, lane: top, options: { lane: inner } });
+    const conflict = await s.launch(text, { agent: "reviewer", worktree: true, lane: top, options: { lane: inner } });
     assert.equal(conflict.result?.block, true);
     assert.match(String(conflict.result?.reason), /lane/);
     assert.deepEqual(conflict.input.lane, top, "a refused input must not be healed");
     assert.deepEqual(conflict.input.options, { lane: inner }, "a refused input must not be healed");
-    const same = await s.launch(text, { worktree: true, lane: { ...top }, options: { lane: { ...top } } });
+    const same = await s.launch(text, { agent: "reviewer", worktree: true, lane: { ...top }, options: { lane: { ...top } } });
     assert.equal(same.result, undefined, "equal values in both places are one lane, as the package accepts");
     assert.equal((same.input.lane as Record<string, unknown>).key, nativeLaneKey(realpathSync(s.runDir), "N1", "T1"));
   } finally { s.restore(); }
@@ -832,17 +835,170 @@ test("native naming never repairs malformed lane metadata or changes explicit sh
   const text = "Lane: N1 · Task: T1 · Tier: guarded\nObjective: x";
   try {
     for (const lane of [null, [], "bad", { version: 2, key: "valid" }, { version: 1, key: "bad/key" }, { version: 1, key: "" }]) {
-      const a = await s.launch(text, { worktree: true, lane });
+      const a = await s.launch(text, { agent: "reviewer", worktree: true, lane });
       assert.equal(a.result?.block, true);
       assert.deepEqual(a.input.lane, lane, "a refused input must not be healed");
     }
     for (const extra of [{ worktree: false }, { isolation: "none" }, { isolation: "worktree", worktree: false }, { workflow: "example" }]) {
-      const a = await s.launch(text, extra);
-      assert.deepEqual(a.input, { agent: "worker", task: text, ...extra });
+      const a = await s.launch(text, { agent: "reviewer", ...extra });
+      assert.deepEqual(a.input, { agent: "reviewer", task: text, ...extra });
     }
     const extra = { version: 1, key: "valid", unexpected: true };
-    const a = await s.launch(text, { worktree: true, lane: extra });
+    const a = await s.launch(text, { agent: "reviewer", worktree: true, lane: extra });
     assert.equal((a.input.lane as Record<string, unknown>).unexpected, true, "unknown fields remain for package rejection");
     assert.equal(existsSync(join(s.runDir, "worktrees")), false);
   } finally { s.restore(); }
+});
+
+// A governed implementation lane that is not retained runs in the shared checkout (or a package
+// worktree deleted on completion), so the root's own `cd <tree> && gate` is refused mid-lane.
+const IMPLEMENTATION_AGENTS = ["worker", "senior", "senior-escalation"] as const;
+
+test("a governed implementation lane without a retained worktree is refused with the fix spelled out", async () => {
+  const s = setup();
+  try {
+    for (const agent of IMPLEMENTATION_AGENTS) {
+      const lane = `G-${agent}`;
+      for (const extra of [
+        { agent },
+        { agent, worktree: false },
+        { agent, isolation: "none" },
+        { agent, isolation: "worktree", worktree: false },
+        { agent, options: { worktree: false } },
+      ]) {
+        const { input, result } = await s.launch(brief(lane, "T1"), extra);
+        assert.equal(result?.block, true, `${JSON.stringify(extra)} must be refused`);
+        assert.match(String(result?.reason), /worktree: true/);
+        assert.match(String(result?.reason), /Landing: returns candidate/);
+        assert.equal(input.cwd, undefined, "a refused call is not healed or rewritten");
+      }
+      // The flag without a Landing line, and a Landing line the extension does not retain for.
+      const noLanding = await s.launch(`Lane: ${lane} · Task: T1 · Tier: guarded\nObjective: x`, { agent, worktree: true });
+      assert.equal(noLanding.result?.block, true);
+      assert.match(String(noLanding.result?.reason), /Landing: returns candidate/);
+      const unsupported = await s.launch(brief(lane, "T1", "tracker-only"), { agent, isolation: "worktree" });
+      assert.equal(unsupported.result?.block, true);
+    }
+    assert.equal(existsSync(join(s.runDir, "worktrees")), false, "a refusal allocates nothing");
+  } finally {
+    s.restore();
+  }
+});
+
+test("a governed implementation lane with worktree true (or isolation worktree) and a Landing line is allowed and retained", async () => {
+  const s = setup();
+  try {
+    let n = 0;
+    for (const agent of IMPLEMENTATION_AGENTS) {
+      for (const extra of [{ worktree: true }, { isolation: "worktree" }, { options: { worktree: true } }]) {
+        const lane = `R${++n}`;
+        const { input, result } = await s.launch(brief(lane, `T${n}`), { agent, ...extra });
+        assert.equal(result, undefined, `${agent} ${JSON.stringify(extra)}`);
+        assert.equal(input.cwd, s.path(lane));
+      }
+    }
+  } finally {
+    s.restore();
+  }
+});
+
+test("a governed implementation lane may name an explicit cwd inside the tree already retained for that lane", async () => {
+  const s = setup();
+  try {
+    const first = await s.launch(brief("L1", "T1"), { worktree: true });
+    await s.end(first.id, { runId: "run-1" });
+    const other = await s.launch(brief("L2", "T2"), { worktree: true });
+    await s.end(other.id, { runId: "run-2" });
+    mkdirSync(join(s.path("L1"), "sub"));
+    // The retained tree of the same lane, and a subdirectory of it, are not refused.
+    for (const cwd of [s.path("L1"), join(s.path("L1"), "sub")]) {
+      const again = await s.launch(brief("L1", "T1"), { cwd });
+      assert.equal(again.result, undefined, cwd);
+      assert.equal(again.input.worktree, false, "the package's own worktree default is suppressed");
+      assert.equal("isolation" in again.input, false);
+      assert.equal(again.input.cwd, cwd);
+      await s.end(again.id, { runId: `again-${basename(cwd)}` });
+    }
+    const recorded = s.entries.at(-1)!.data.trees.find((t: any) => t.lane === "L1");
+    assert.equal(recorded.runCwds["again-sub"], "sub", "the run is bookkept like any retained-lane run");
+    assert.equal(existsSync(join(s.runDir, "worktrees")), true);
+    assert.deepEqual(branches(s.repo).sort(), [s.branch("L1"), s.branch("L2")].sort(), "no further allocation");
+    // A flag in the call does not reinstate a package worktree, and a conflicting shape is still refused.
+    const flagged = await s.launch(brief("L1", "T1"), { cwd: s.path("L1"), options: { worktree: true, isolation: "worktree" } });
+    assert.equal(flagged.result, undefined);
+    assert.equal(flagged.input.worktree, false);
+    assert.deepEqual(flagged.input.options, {});
+    await s.end(flagged.id, { runId: "run-flagged" });
+    const conflicting = await s.launch(brief("L1", "T1"), { cwd: s.path("L1"), isolation: "none" });
+    assert.equal(conflicting.result?.block, true);
+    // A second writer is refused while the lane's run is live, and admitted once it has finished.
+    const live = await s.launch(brief("L1", "T1"), { cwd: s.path("L1") });
+    assert.equal(live.result, undefined);
+    s.emit("subagent:async-started", { id: "run-live", sessionId: "/sessions/s.jsonl" });
+    await s.end(live.id, { runId: "run-live" });
+    const second = await s.launch(brief("L1", "T1"), { cwd: s.path("L1") });
+    assert.equal(second.result?.block, true);
+    assert.match(String(second.result?.reason), /already live/);
+    s.emit("subagent:async-complete", { runId: "run-live" });
+    const third = await s.launch(brief("L1", "T1"), { cwd: s.path("L1") });
+    assert.equal(third.result, undefined);
+    await s.end(third.id, { runId: "run-third" });
+    // The shared checkout, another lane's tree, a path that escapes the tree, a relative path, another
+    // task on the lane id and a lane the extension never retained are refused.
+    for (const [text, cwd] of [
+      [brief("L1", "T1"), s.repo],
+      [brief("L1", "T1"), s.path("L2")],
+      [brief("L1", "T1"), join(s.path("L1"), "..", "..")],
+      [brief("L1", "T1"), "relative/path"],
+      [brief("L1", "T2"), s.path("L1")],
+      [brief("L9", "T9"), s.path("L1")],
+    ] as const) {
+      const refused = await s.launch(text, { cwd });
+      assert.equal(refused.result?.block, true, `${text} in ${cwd}`);
+    }
+    // Once the lane is released its tree is no longer retained.
+    await s.loopState({ ev: "park", task: "T1", reason: "x", mode: "x" });
+    assert.equal(existsSync(s.path("L1")), false);
+    const afterRelease = await s.launch(brief("L1", "T1"), { cwd: s.path("L1") });
+    assert.equal(afterRelease.result?.block, true);
+  } finally {
+    s.restore();
+  }
+});
+
+test("scout, reviewer, ungoverned, workflow and resume calls are not subject to the retained-tree requirement", async () => {
+  const s = setup();
+  try {
+    for (const agent of ["scout", "reviewer"]) {
+      const { input, result } = await s.launch(brief(`S-${agent}`, "T1", "returns candidate"), { agent });
+      assert.equal(result, undefined, agent);
+      assert.equal(input.cwd, undefined, `${agent} is not given a retained tree`);
+      const plain = await s.launch("Lane: P1 · Task: T1 · Tier: routine\nObjective: x", { agent, worktree: false });
+      assert.equal(plain.result, undefined, agent);
+    }
+    // No header: not governed, so any agent runs as it always did.
+    for (const agent of IMPLEMENTATION_AGENTS) {
+      const ungoverned = await s.launch("Objective: no header", { agent });
+      assert.equal(ungoverned.result, undefined, agent);
+      assert.deepEqual(ungoverned.input, { agent, task: "Objective: no header" });
+    }
+    // Workflows keep their own validation.
+    const workflow = await s.launch(brief("W1", "T1"), { workflow: "example" });
+    assert.equal(workflow.result, undefined);
+    // A resume or status call names a run, not a new launch.
+    for (const action of ["resume", "status"]) {
+      const call = { type: "tool_call", toolName: "subagent", toolCallId: `${action}-1`, input: { action, id: "no-such-run", agent: "worker", task: brief("L1", "T1") } };
+      assert.equal(await s.handlers.get("tool_call")!(call, s.ctx), undefined, action);
+    }
+  } finally {
+    s.restore();
+  }
+  // Outside a protocol-2 run there is no retention to require.
+  const legacy = setup({ marker: false });
+  try {
+    const { result } = await legacy.launch(brief("L1", "T1"), { agent: "worker" });
+    assert.equal(result, undefined);
+  } finally {
+    legacy.restore();
+  }
 });

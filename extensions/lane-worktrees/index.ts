@@ -7,6 +7,8 @@
 // Retention touches `cwd`, `isolation` and `worktree`. Governed native/default allocations instead
 // bind an opaque `lane.key` through the pinned package's public naming seam, keeping the original
 // lane/task/run mapping in extension state. Brief text and guard-owned `extensionBindings` stay intact.
+// Governed `worker`, `senior` and `senior-escalation` launches never take the native path: they are
+// refused unless retained (worktree:true plus a Landing line, or a cwd inside the lane's kept tree).
 //
 // A worktree with uncommitted changes (`git status --porcelain` not empty) is never removed: it is
 // kept and named "kept dirty" in the warning and the sweep line. After a session start (reload or
@@ -18,13 +20,13 @@ import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { basename, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { CustomEntry, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { deriveLogPath, parseBrief } from "../loop-state/core.ts";
-import { landParkEvents, laneBranch, lanePath, launchedRunId, nativeLaneKey, parseLaneBrief, safeLaneId, STATE_CUSTOM_TYPE } from "./core.ts";
+import { IMPLEMENTATION_AGENTS, landParkEvents, laneBranch, lanePath, launchedRunId, nativeLaneKey, parseLaneBrief, safeLaneId, STATE_CUSTOM_TYPE, unretainedLaneReason } from "./core.ts";
 import { relativeGitdir } from "./metadata.ts";
 import { captureLanePatches, decideLanePatches, type PatchRun } from "./retention.ts";
 import { registerScratch, RECEIPT_FILE, SCRATCH_KINDS, teardown, type ReceiptEntry } from "./teardown.ts";
@@ -139,6 +141,12 @@ function real(path: string): string {
   }
 }
 
+/** True when `cwd` (resolved against `base`) is, or is inside, the worktree at `treePath`. */
+function isInside(treePath: string, cwd: string, base: string): boolean {
+  const rel = relative(real(treePath), real(resolve(base, cwd)));
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
 export default function (pi: ExtensionAPI) {
   const trees = new Map<string, Tree>();
   const retiredRuns = new Set<string>();
@@ -160,10 +168,44 @@ export default function (pi: ExtensionAPI) {
   const releasing = new Set<string>();
 
   const runDir = (): string | undefined => process.env.LOOP_PI_RUN_DIR || undefined;
+  /** The worktree this extension still retains for this lane and task when `cwd` is, or is inside, it. */
+  const retainedTreeContaining = (cwd: unknown, base: string, lane: string, task: string): Tree | undefined => {
+    const tree = trees.get(lane);
+    return typeof cwd === "string" && cwd !== "" && tree && tree.task === task && isInside(tree.path, cwd, base) ? tree : undefined;
+  };
   const markerPresent = (): boolean => {
     const dir = runDir();
     return dir !== undefined && existsSync(join(dir, PROTO_FILE));
   };
+
+  /** A fresh launch into a tree already retained for the lane: the single-flight, ownership and
+   *  confinement checks of an allocation or resume, then the package's own worktree is suppressed. */
+  async function bindRetainedCwd(callId: string, input: Record<string, unknown>, tree: Tree, requested: string) {
+    const lane = tree.lane;
+    const refuse = (why: string) => ({ block: true as const, reason: `lane-worktrees: ${why}` });
+    if (allocating.has(lane) || releasing.has(lane) || isLive(tree) || tree.release) return refuse("a lane allocation or run is already live; use disjoint lane ownership.");
+    allocating.add(lane);
+    try {
+      if (!await verifyAllocation(tree.identity, runDir()!, tree.path, tree.repo, tree.branch, git)) return refuse(`${tree.path} is not this lane's recorded allocation; refusing reuse.`);
+      const nested = relative(real(tree.path), real(requested));
+      if (!verifyRunCwd(tree.path, nested)) return refuse("the requested cwd is missing, linked or invalid inside the retained worktree.");
+      // `isLive` counts this call's own `allocating` entry, so look at the other signals directly.
+      if (releasing.has(lane) || tree.release || !trees.has(lane) || [...pending.values()].some((p) => p.lane === lane) || tree.runs.some((id) => runLive(tree, id))) {
+        return refuse("the allocation became live or was released during verification.");
+      }
+      deleteSubagentField(input, "isolation");
+      deleteSubagentField(input, "worktree");
+      deleteSubagentField(input, "cwd");
+      input.cwd = requested;
+      input.worktree = false; // Omission would re-enable the package's configured worktree default.
+      pending.set(callId, { lane, created: false, branchCreated: false, cwd: nested });
+      return undefined;
+    } catch (error) {
+      return refuse(`allocation verification failed: ${String(error)}`);
+    } finally {
+      allocating.delete(lane);
+    }
+  }
 
   function persist() {
     const data: Persisted = { trees: [...trees.values()], lastSeq, retiredRuns: [...retiredRuns], nativeNames: [...nativeNames.values()] };
@@ -591,9 +633,22 @@ export default function (pi: ExtensionAPI) {
     // Only the named single-agent surface is ours. Leave workflows and malformed/conflicting
     // public inputs to their existing validator; never turn a refused shape into a valid launch.
     if (fields.workflow !== undefined || fields.workflowScript !== undefined || fields.tasks !== undefined || fields.chain !== undefined) return;
-    if ((fields.isolation === "worktree" && fields.worktree === false) || (fields.isolation !== undefined && fields.isolation !== "worktree")) return;
+    const conflicting = (fields.isolation === "worktree" && fields.worktree === false) || (fields.isolation !== undefined && fields.isolation !== "worktree");
     const governed = parseBrief(input.task);
     if (!governed) return;
+    // A governed implementation lane that this hook will not retain runs in the shared checkout or in a
+    // package worktree removed at completion. Fail closed, conflicting shapes included: only a launch
+    // rewritten into a retained tree, or one that names a cwd inside this lane's retained tree, proceeds.
+    if (IMPLEMENTATION_AGENTS.has(input.agent)) {
+      const tree = conflicting ? undefined : retainedTreeContaining(fields.cwd, ctx.cwd, governed.lane, governed.task);
+      if (tree) {
+        patchCalls.set(event.toolCallId, { lane: governed.lane, task: governed.task });
+        return await bindRetainedCwd(event.toolCallId, input, tree, resolve(ctx.cwd, fields.cwd as string));
+      }
+      const retained = !conflicting && parseLaneBrief(input.task) !== null && (fields.isolation === "worktree" || fields.worktree === true);
+      if (!retained) return { block: true, reason: unretainedLaneReason(input.agent, governed.lane) };
+    }
+    if (conflicting) return;
     patchCalls.set(event.toolCallId, { lane: governed.lane, task: governed.task });
     const dir = runDir()!;
     const brief = parseLaneBrief(input.task);

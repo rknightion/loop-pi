@@ -442,6 +442,7 @@ export default function (pi: ExtensionAPI) {
         standingPath: string | null;
         standingSha256: string | null;
         concurrency?: number;
+        launchedAt?: string;
       }) => void;
     };
     const reportPath =
@@ -453,6 +454,8 @@ export default function (pi: ExtensionAPI) {
       standingSha256: state.standingSha256 ?? null,
       // Additive and optional: absent without a launch, or when the charter has no valid concurrency.
       ...(state.armed && typeof state.concurrency === "number" && state.concurrency >= 1 ? { concurrency: state.concurrency } : {}),
+      // Additive and optional: the launch prompt's ISO timestamp, for wall-time readers.
+      ...(state.armed && state.launch?.launchTs ? { launchedAt: state.launch.launchTs } : {}),
     });
   });
 

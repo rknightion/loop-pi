@@ -138,10 +138,10 @@ class InstalledLoopSmoke(unittest.TestCase):
             script.write_text(json.dumps({'rules': [
                 {'match': 'SMOKE_ROOT_GUARD', 'once': True, 'toolCalls': [tool('bash', command='git push --force origin main')]},
                 {'match': '^Task: Lane: smoke[^\\n]*\\nSMOKE_DENIED_CHILD$', 'once': True, 'toolCalls': [tool('bash', command='git commit --allow-empty -m denied')]},
-                {'match': '^Task: Lane: smoke[^\\n]*\\nSMOKE_LANDING_CHILD$', 'once': True, 'delayMs': 1500, 'toolCalls': [tool('bash', command='git commit --allow-empty -m landing')]},
-                {'match': r'^\[main .*\] (denied|landing)', 'once': False, 'toolCalls': [tool('bash', command='git push origin main')]},
+                {'match': '^Task: Lane: smoke[^\\n]*\\nLanding: returns candidate\\nSMOKE_LANDING_CHILD$', 'once': True, 'delayMs': 1500, 'toolCalls': [tool('bash', command='git commit --allow-empty -m landing')]},
+                {'match': r'^\[\S+ .*\] (denied|landing)', 'once': False, 'toolCalls': [tool('bash', command='git push origin main')]},
                 {'match': 'SMOKE_SPAWN_DENIED', 'once': True, 'toolCalls': [tool('subagent', agent='worker', task='Lane: smoke · Task: T-1 · Tier: routine\nSMOKE_DENIED_CHILD', async_=True)]},
-                {'match': 'SMOKE_SPAWN_LANDING', 'once': True, 'toolCalls': [tool('subagent', agent='worker', task='Lane: smoke · Task: T-1 · Tier: routine\nSMOKE_LANDING_CHILD', async_=True)]},
+                {'match': 'SMOKE_SPAWN_LANDING', 'once': True, 'toolCalls': [tool('subagent', agent='worker', task='Lane: smoke · Task: T-1 · Tier: routine\nLanding: returns candidate\nSMOKE_LANDING_CHILD', worktree=True, async_=True)]},
                 {'match': 'SMOKE_ROOT_PUSH', 'once': True, 'toolCalls': [tool('bash', command='git push origin main')]},
                 # The armed launch now opens a state log, so the one nudge is the close-out one.
                 {'match': '^## Turn endings|^## No lane is live', 'once': True, 'toolCalls': [tool('write', path=report, content=report_body)]},
@@ -207,6 +207,13 @@ class InstalledLoopSmoke(unittest.TestCase):
                 refused = child_push('SMOKE_LANDING_CHILD')
                 self.assertTrue(refused.get('isError'), 'step 4 lane pushed')
                 self.assertIn('lanes never push', json.dumps(refused))
+                # A governed implementation lane runs in a retained worktree on its own branch, so its commit is
+                # a candidate: the shared checkout stays on the step 3 commit until the root lands the branch.
+                self.assertEqual(git('log', '-1', '--format=%s'), 'denied')
+                lane_branches = git('for-each-ref', '--format=%(refname:short)', 'refs/heads/loop/').split()
+                self.assertEqual(len(lane_branches), 1, lane_branches)
+                self.assertEqual(git('log', '-1', '--format=%s', lane_branches[0]), 'landing')
+                git('merge', '--ff-only', lane_branches[0])
                 landed = git('rev-parse', 'HEAD')
                 self.assertNotEqual(landed, initial)
                 self.assertEqual(git('log', '-1', '--format=%s'), 'landing')

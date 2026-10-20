@@ -24,6 +24,18 @@ export function parseLaneBrief(task: unknown): LaneBrief | null {
   return { lane: brief.lane, task: brief.task, landing: landing[1] };
 }
 
+/** Agents whose governed launches write code and so must run in a retained lane tree. */
+export const IMPLEMENTATION_AGENTS: ReadonlySet<string> = new Set(["worker", "senior", "senior-escalation"]);
+
+/** The refusal for a governed implementation launch that would not run in a retained lane tree. */
+export function unretainedLaneReason(agent: string, lane: string): string {
+  return `lane-worktrees: governed ${agent} lane '${lane}' would not run in a retained lane worktree, so it would share the root checkout ` +
+    "(or a package worktree deleted when it finishes) and its gate cannot run from its own tree. Re-dispatch it as " +
+    "`subagent {agent, task, worktree: true}` and put a `Landing: returns candidate` line in the brief " +
+    "(`Landing: pushes branch <name>` and `Landing: lands-after-green` also qualify), or pass an explicit `cwd` inside this lane's " +
+    "retained worktree. Scout and reviewer lanes need neither.";
+}
+
 /** A lane id that is one safe path component and one git ref component. */
 export function safeLaneId(id: string): boolean {
   return LANE_ID_RE.test(id) && !id.includes("..") && !id.endsWith(".lock") && !id.endsWith(".");

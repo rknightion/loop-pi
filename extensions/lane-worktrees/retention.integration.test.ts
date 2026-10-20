@@ -32,13 +32,16 @@ test("installed lifecycle and restart capture survive pinned package pruning of 
   const subRoot = realpathSync(freshDir("patch-sub-"));
   mkdirSync(join(agentDir, "agents"));
   writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [PI_SUBAGENTS_PACKAGE_DIR], subagents: { agentExcludeDirs: ["~/.agents"] } }));
-  writeFileSync(join(agentDir, "agents", "worker.md"), [
-    "---", "name: worker", "description: Patch lifecycle fixture", "tools: bash", "extensions: []",
-    `subagentOnlyExtensions: ${FAUX_EXTENSION}`, "model: faux/faux-1", "---", "", "worker",
+  // The package-native allocation path (no Landing the extension retains for) is no longer open to
+  // worker, senior or senior-escalation launches, which lane-worktrees refuses unless retained; scout
+  // still reaches it, so this fixture drives the native patch lifecycle through a scout.
+  writeFileSync(join(agentDir, "agents", "scout.md"), [
+    "---", "name: scout", "description: Patch lifecycle fixture", "tools: bash", "extensions: []",
+    `subagentOnlyExtensions: ${FAUX_EXTENSION}`, "model: faux/faux-1", "---", "", "scout",
   ].join("\n"));
   const script = writeFauxScript([
     { match: "SPAWN_PATCH", once: true, toolCalls: [{ name: "subagent", args: {
-      agent: "worker", task: "Lane: L1 · Task: T1 · Tier: routine\nLanding: tracker-only\nObjective: WRITE_PATCH", worktree: true,
+      agent: "scout", task: "Lane: L1 · Task: T1 · Tier: routine\nLanding: tracker-only\nObjective: WRITE_PATCH", worktree: true,
     } }] },
     { match: "WRITE_PATCH", once: true, toolCalls: [{ name: "bash", args: { command: "printf 'candidate\\n' > seed && echo PATCH_WRITTEN" } }] },
     { match: "PATCH_WRITTEN", once: true, text: "PATCH_READY" },
@@ -184,7 +187,7 @@ test("session journal failure warns without preventing lifecycle byte capture", 
     const ctx = { ui: { notify: (s: string) => notes.push(s) }, sessionManager: { getSessionId: () => "session", getBranch: () => [] } };
     handlers.get("session_start")!({}, ctx);
     await handlers.get("tool_call")!({ toolName: "subagent", toolCallId: "call-one", input: {
-      agent: "worker", task: "Lane: L1 · Task: T1 · Tier: routine\nLanding: tracker-only", worktree: false,
+      agent: "scout", task: "Lane: L1 · Task: T1 · Tier: routine\nLanding: tracker-only", worktree: false,
     } }, ctx);
     await handlers.get("tool_execution_end")!({ toolName: "subagent", toolCallId: "call-one", result: {
       details: { runId: "run-one", asyncDir },

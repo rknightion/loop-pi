@@ -44,6 +44,15 @@ Three pi extensions, a home template and an installer:
   inactivity; active encrypted reasoning may continue past an hour. Either one sends the
   session a follow-up message that starts its next turn, a bounded number of times in a row.
   It also adds jitter to pi's retry wait after a 5xx and holds a 429 retry to a flat 60 s.
+- `extensions/loop-status` shows the root's live state in the status bar: lanes over the slot cap,
+  timers and watchers, the nudge chain, the heartbeat age and the root's model time as a share of
+  wall time since the launch (`root model time 62% of 3h10m`). Taken from the request timing that
+  `extensions/call-timing` records on each root message; `?` when it cannot be read. When a lane
+  return, a finished watcher or a timer wakes the root and that share is above 60% with at least
+  30 minutes of wall time elapsed since an armed launch, the wake carries one extra line telling it
+  to combine reviews and keep its ledgers to one-line appends. It repeats only when the share
+  reaches a higher 10-point band or ten wakes later. It only reads timing; no request is blocked
+  or retried.
 - `home/` holds the five agent files (`worker`, `senior`, `senior-escalation`, `reviewer`, `scout`),
   the lane policy, the pi settings and the policy header for the dedicated loop home.
 - `bin/loop-pi-install` builds a pinned runtime, validates it, installs one pi home and writes a
@@ -106,6 +115,15 @@ where they disagree.
 | `senior-escalation` | `gpt-6-astra` / high | yes | the same work after repair rounds failed, or when the owner names it |
 | `reviewer` | `gpt-6.1-sol` / high | no | reads a diff or patch and returns PASS or FAIL with findings by severity |
 | `scout` | `gpt-6.1-sol` / low | no | read-only mapping, sweeps, wave drafts, CI or log reduction |
+
+Dispatch shapes: the root launches `worker`, `senior` and `senior-escalation` lanes as
+`subagent {agent, task, worktree: true}` with a `Landing: returns candidate` line in the brief (the header
+`Lane: <id> · Task: <ID> (<title>) · Tier: ...` makes the launch governed). The lane then runs in a
+worktree the loop keeps until the root lands or parks it. A governed launch of those agents without
+both is refused with that instruction, because it would run in the shared checkout (or a package
+worktree deleted when the lane finishes). `scout` and `reviewer` lanes are launched as
+`subagent {agent, task}`; resumes, workflows and briefs with no header are not affected. To run a
+lane in a tree the loop already keeps for the same lane id, pass a `cwd` inside it instead.
 
 Each body is short and points at the run's `LANE.md`, which the brief's `Rules:` line names, for the
 working rules and the `lane-return` block. The installer appends `home/lane-policy.md`, the generic

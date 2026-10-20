@@ -41,6 +41,12 @@ function fixture() {
     "---", "name: worker", "description: Naming proof", "tools: bash", "extensions: []",
     `subagentOnlyExtensions: ${FAUX_EXTENSION}`, "model: faux/faux-1", "---", "", "worker",
   ].join("\n"));
+  // Package-native allocation is open to reviewer and scout launches only; a governed worker that
+  // would take it is refused by lane-worktrees, so the native proof below launches a reviewer.
+  writeFileSync(join(agentDir, "agents", "reviewer.md"), [
+    "---", "name: reviewer", "description: Naming proof", "tools: bash", "extensions: []",
+    `subagentOnlyExtensions: ${FAUX_EXTENSION}`, "model: faux/faux-1", "---", "", "reviewer",
+  ].join("\n"));
   return { repo, runDir, agentDir, subRoot, out };
 }
 
@@ -95,7 +101,7 @@ test("native governed default allocation keeps the full private brief out of ref
   const task = `Lane: N1 · Task: ${privateTask(901)} (native naming proof) · Tier: guarded\nObjective: NATIVE_WORK`;
   // No Landing or explicit worktree flag: native package defaults, not retained-cwd rewriting.
   const script = writeFauxScript([
-    { match: "SPAWN_NATIVE", once: true, toolCalls: [{ name: "subagent", args: { agent: "worker", task } }] },
+    { match: "SPAWN_NATIVE", once: true, toolCalls: [{ name: "subagent", args: { agent: "reviewer", task } }] },
     { match: "NATIVE_WORK", once: true, toolCalls: [{ name: "bash", args: { command: `pwd > '${f.out}/cwd' && echo NATIVE_READY` } }] },
     { match: "NATIVE_READY", once: true, delayMs: 8_000, text: "NATIVE_DONE" },
     { match: ".*", text: "ok" },
