@@ -34,7 +34,7 @@ jobs:
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           # renovate: datasource=node-version depName=node
-          node-version: "26.12.0"
+          node-version: "26.12.1"
 
       - name: Set up just
         uses: rknightion/.github/.github/actions/setup-just@0f4847f833f096c1f03284481d7e6b19c2f81c30 # v1.25.8
@@ -86,7 +86,7 @@ jobs:
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           # renovate: datasource=node-version depName=node
-          node-version: "26.12.0"
+          node-version: "26.12.1"
 
       - name: Set up just
         uses: rknightion/.github/.github/actions/setup-just@0f4847f833f096c1f03284481d7e6b19c2f81c30 # v1.25.8
