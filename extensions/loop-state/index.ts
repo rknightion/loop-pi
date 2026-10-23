@@ -19,6 +19,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { type Brief, deriveLogPath, failedRunBlock, parseBrief, parseLaneReturn, returnEvent, runFailed, runIdFromText } from "./core.ts";
 import { allocateRepair, type ArtifactIdentity, artifactIdentity, identityOf, readRepair, type RepairBinding, validBinding, validIdentity } from "./repair.ts";
+import { markNotices } from "./notice-marker.ts";
 import { capNotifyMessage, type CompletionInfo, completionInfo, contentText, NOTIFY_CUSTOM_TYPE, RETURN_CAP_BYTES } from "./return-cap.ts";
 import { subagentFields } from "../loop-guard/subagent-view.ts";
 import { installContextBudget, type RootLaunchContext, stateSummary, nativeChildrenQuiet } from "./context-budget.ts";
@@ -653,6 +654,10 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
       } catch (error) {
         warn(`harness hold: ${String(error)}`);
       }
+      const current = unheld ?? messages;
+      // Last, so the cap and the hold rewrite read the notices' own text.
+      const marked = markNotices(current);
+      if (marked) return { messages: marked };
       if (unheld) return { messages: unheld };
       if (changed) return { messages };
     } catch (error) {

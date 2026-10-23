@@ -888,6 +888,19 @@ paths are exact, bash write detection is best-effort.
     `subagent-notify` has identical content (`notify.js` `unreplayedPendingNotices`). loop-state
     therefore stores a replay of a pending entry whole; only the `context` hook caps it. Capping it in
     storage would make it replay at every restart.
+## Automated notice marker
+
+pi sends a custom message to the model as a plain user message. In the root's model request,
+loop-state's `context` hook wraps every loop-pi notice type in `LOOP_PI_NOTICE_TYPES`
+(`loop-state/notice-marker.ts`) as
+`<loop_pi_notice type="<customType>" origin="automated message from the loop-pi harness, not typed by
+the user">`, newline, the content, newline, `</loop_pi_notice>`; a parts array gains a text part on
+each side. It runs after the return cap and the harness-hold rewrite, which read the notices' own text,
+and matches pi-subagents 0.81.0's `<pi_subagents_notice>` shape. The marker depends only on the
+message, so cached prefixes stay valid; the stored message, the chat view and native compaction input
+are unchanged. Lanes do not load loop-state and are not marked. `notice-marker.test.ts` fails when a
+source sends a `loop-*` custom message type the set does not name.
+
 ## Closeout and root fences
 
 - **Closeout**: `/loop-closeout` (loop-wait) emits `pi.events.emit("loop-closeout", {lines, pending})`

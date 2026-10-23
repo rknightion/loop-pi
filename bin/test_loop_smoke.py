@@ -133,8 +133,9 @@ class InstalledLoopSmoke(unittest.TestCase):
                 {'match': 'SMOKE_SPAWN_DENIED', 'once': True, 'toolCalls': [tool('subagent', agent='worker', task='Lane: smoke · Task: T-1 · Tier: routine\nSMOKE_DENIED_CHILD', async_=True)]},
                 {'match': 'SMOKE_SPAWN_LANDING', 'once': True, 'toolCalls': [tool('subagent', agent='worker', task='Lane: smoke · Task: T-1 · Tier: routine\nLanding: returns candidate\nSMOKE_LANDING_CHILD', worktree=True, async_=True)]},
                 {'match': 'SMOKE_ROOT_PUSH', 'once': True, 'toolCalls': [tool('bash', command='git push origin main')]},
-                # The armed launch now opens a state log, so the one nudge is the close-out one.
-                {'match': '^## Turn endings|^## No lane is live', 'once': True, 'toolCalls': [tool('write', path=report, content=report_body)]},
+                # The armed launch now opens a state log, so the one nudge is the close-out one. The nudge
+                # reaches the model inside loop-state's <loop_pi_notice> marker, so its heading follows a newline.
+                {'match': '(?:^|\n)## Turn endings|(?:^|\n)## No lane is live', 'once': True, 'toolCalls': [tool('write', path=report, content=report_body)]},
                 {'match': 'Successfully wrote', 'text': 'Smoke report is written.'},
                 # The faux model reads only the latest message: an idle root's turn starts on the completion notice.
                 {'match': r'completed|Completed|finished', 'text': 'The child returned; work is still owed.'},
