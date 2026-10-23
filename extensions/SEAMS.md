@@ -439,10 +439,13 @@ standard `server error` wording at message_end; denied failures use a nonretryab
 This is an adapter to pi's classifier, not a new retry loop. Header ids describe provider
 invocations, not hidden SDK retries; use provider maxRetries zero for attempt-level proof.
 The `server` class in `backoff.ts` (`SERVER_PATTERN`) mirrors the upstream-failure wordings that
-pi-ai 1.3.0's `isRetryableAssistantError` (`utils/retry.js`) retries natively. Of the three newest,
-pi-ai 1.2.0 already retries "The upstream provider returned an error"; "The service is temporarily
-unavailable" and "Unable to forward upstream" are retried from pi-ai 1.3.0. A pi-ai bump re-reads that
-list: a wording pi retries natively but this pattern misses is classed `other`, not `server`.
+pi-ai 1.4.0's `isRetryableAssistantError` (`utils/retry.js`) retries natively. pi-ai 1.2.0 added
+"The upstream provider returned an error"; 1.3.0 "The service is temporarily unavailable" and
+"Unable to forward upstream"; 1.4.0 the gateway codes `upstream_request_failed` and
+`upstream_stream_read_error`, "stream was interrupted", "HTTP/2 stream failed" and the Codex-proxy
+"stream disconnected before completion". Its node-fetch "request to ... failed, reason:" is a
+network failure and stays `other`. A pi-ai bump re-reads that list: a wording pi retries natively but
+this pattern misses is classed `other`, not `server`. The class only chooses the extra jitter.
 
 ## Automatic root recovery
 
