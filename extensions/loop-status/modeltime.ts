@@ -5,6 +5,7 @@
 // the session file does, and there is nothing to drift. Nothing here wraps a request or changes a
 // retry; a lane's requests live in the lane's own session and are never counted.
 import { formatAge } from "./status.ts";
+import { SUBAGENT_WAKE_TYPES } from "../loop-continuation/state.ts";
 
 export type ModelTime =
   | { state: "none" }
@@ -20,7 +21,7 @@ export const ROOT_MODEL_TIME_NOTICE_EVERY_WAKES = 10;
 /** Custom message type of the one-line wake notice. */
 export const MODEL_TIME_NOTICE_TYPE = "loop-model-time-notice";
 /** Custom messages that wake an idle root (the lane return, watch exit and timer wakes). */
-export const WAKE_CUSTOM_TYPES: ReadonlySet<string> = new Set(["subagent-notify", "loop-watch", "loop-wake"]);
+export const WAKE_CUSTOM_TYPES: ReadonlySet<string> = new Set([...SUBAGENT_WAKE_TYPES, "loop-watch", "loop-wake"]);
 
 const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 

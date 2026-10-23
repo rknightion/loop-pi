@@ -17,6 +17,7 @@ import { installRequestCeiling, installRetryBackoff } from "../request-ceiling/i
 import { bindLaneIdentity } from "./push-grant.ts";
 import { evaluateBashCommand, evaluateBgWait, evaluateBriefHeader, evaluateSubagentCall, evaluateWatchProcess, isAsyncSubagentLaunch, wrappedGateCommands, bindGateExecution } from "./rules.ts";
 import { loadGateDeclarations } from "./gates.ts";
+import { isSubagentWakeRun } from "../loop-continuation/state.ts";
 import { bashProtectedPath, protoActive, runDirFromEnv, toolWriteRefusal } from "./guard-paths.ts";
 import { capturePushExecutions, planPushes, recordPushes, unloggedPushRefusal, type PlannedPush, type PushExecutionEvidence } from "./push-log.ts";
 
@@ -120,8 +121,8 @@ export default function (pi: ExtensionAPI) {
   // (SEAMS.md cross-extension contract: loop-guard owns this itself). A qualifying async launch
   // is tracked by tool call id until its tool execution ends, then by the run id it reported until
   // `subagent:async-complete` names that run. The completion event fires whether the root was busy
-  // or idle; an idle root's `subagent-notify` reaches no extension message event (pi-subagents
-  // 0.77.0 parent wake), so it cannot be the release. A launch that ends in error started no run
+  // or idle, on every pi-subagents version; a held root's `subagent-notify` reaches no extension
+  // message event, so the notice cannot be the release. A launch that ends in error started no run
   // and is dropped; one that succeeded without a run id can never be seen completing, so it stays
   // active for the session, which is the safe direction for a rule whose purpose is "don't block a
   // pushed completion".
@@ -141,6 +142,11 @@ export default function (pi: ExtensionAPI) {
   pi.on("message_end", (event) => {
     const message = event.message as { role?: string; customType?: string };
     if (message.role === "custom" && typeof message.customType === "string" && WAKE_MESSAGES.has(message.customType)) wake();
+  });
+
+  // pi-subagents 0.80+ wakes an idle root by starting a run with its notice, of any notice type.
+  pi.on("before_agent_start", (event) => {
+    if (isSubagentWakeRun(event as never)) wake();
   });
 
   // Push log (SEAMS S1): require the exact git invocation's successful porcelain update AND

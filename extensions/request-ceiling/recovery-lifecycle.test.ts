@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { installRecovery, portableRequest, safeProxyRetry, recoveryConfig } from "./recovery.ts";
+import { installRecovery, portableRequest, safeProxyRetry, recoveryConfig, WAKE_HOLD } from "./recovery.ts";
 import { classifyRootStop } from "../loop-continuation/root-recovery.ts";
 
 function harness(settings: unknown = { loopPi: { retryRecovery: { episodeMs: 30, providerIds: ["fixture"] } } }) {
@@ -10,7 +10,8 @@ function harness(settings: unknown = { loopPi: { retryRecovery: { episodeMs: 30,
   const sequence: string[] = [];
   const notices: any[] = [];
   const model = { provider: "fixture", api: "openai-responses", id: "fixture", baseUrl: "http://localhost/v1" };
-  const ctx = { model, modelRegistry: {
+  const sessionManager = { getSessionId: () => "lifecycle-session" };
+  const ctx = { model, sessionManager, modelRegistry: {
     find: () => model, getProvider: () => ({auth:{}}),
     getRegisteredProviderConfig: () => ({api:"openai-responses",baseUrl:model.baseUrl}),
     getRegisteredNativeProvider: () => undefined, isUsingOAuth: () => false,
@@ -24,7 +25,8 @@ function harness(settings: unknown = { loopPi: { retryRecovery: { episodeMs: 30,
   };
   const query = (name: string, event: unknown) => { for (const fn of bus.get(name) ?? []) fn(event); };
   const on = (name: string, fn: Function) => bus.set(name, [...(bus.get(name) ?? []), fn]);
-  return { emit, query, on, ctx, sequence, notices, get aborted() { return aborted; } };
+  const wakeReservation = () => ((globalThis as any)[Symbol.for("pi.idle-wake.v1")] as WeakMap<object, any> | undefined)?.get(sessionManager);
+  return { emit, query, on, ctx, sequence, notices, wakeReservation, get aborted() { return aborted; } };
 }
 test("recovery abort attribution precedes timer, expired-turn, request-check and halted aborts", (t) => {
   t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
@@ -206,8 +208,10 @@ test("halted recovery absorbs extension input and reports why while genuine inpu
   assert.equal(result.message.loopPiRecovery.reason, "protected-request");
   assert.match(result.message.errorMessage, /protected-request/);
   h.emit("agent_settled");
+  assert.deepEqual(h.wakeReservation(), { sessionId: "lifecycle-session", sentAt: WAKE_HOLD }, "pi-subagents idle wakes are held");
   assert.deepEqual(h.emit("input", { source: "extension", text: "Subagent updates above." }), { action: "handled" });
   h.emit("input", { source: "rpc" });
+  assert.equal(h.wakeReservation()?.sentAt, undefined, "genuine input releases the hold");
   assert.equal(h.emit("input", { source: "extension" }), undefined);
   h.emit("session_shutdown");
 });

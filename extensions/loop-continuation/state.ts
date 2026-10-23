@@ -11,11 +11,26 @@ export const NUDGE_CUSTOM_TYPE = "loop-continuation";
 export const PUSH_CUSTOM_TYPES: ReadonlySet<string> = new Set(["subagent-notify", "loop-watch", "loop-wake", "loop-closeout-audit"]);
 
 /**
- * pi-subagents' wake for an idle parent (its `src/shared/parent-wake.js`, not exported): the
- * notice is appended with no extension `message_start`/`message_end`, then this extension-sourced
- * user message starts the turn. A busy parent still gets the notice as a steer, with message events.
- * PARENT_WAKE_TEXT is pi-subagents 0.77.0's text (wake.test.ts pins it against the installed
- * package); 0.76.1's shorter text stays recognised for a root resumed across the upgrade.
+ * pi-subagents 0.80.0 and later wake an idle parent with the notice itself: `sendMessage(notice,
+ * { triggerTurn: true })` starts a custom-message run, with no `input` event and no user-role wake
+ * text. Every message type pi-subagents shows in chat (its `src/tui/subagent-messages.js`
+ * `SUBAGENT_MESSAGE_TYPES`) plus its post-compaction resume can start such a run; wake.test.ts pins
+ * this list against the installed package. A run one of them starts is a wake.
+ */
+export const SUBAGENT_WAKE_TYPES: ReadonlySet<string> = new Set([
+  "subagent_supervisor_request", "subagent-supervisor-unanswered", "subagent-supervisor-blocked",
+  "subagent-notify", "subagent-completion-unanswered", "subagent-completion-unhandled",
+  "subagent-wait-subscription", "subagent-incremental-child-notify", "subagent-workflow-result-write-failed",
+  "subagent_control_notice", "subagent_steering_notice", "subagent_watchdog_warning",
+  "subagent_watchdog_clarification", "subagent-compaction-resume",
+]);
+export const isSubagentWakeRun = (event: { messageType?: string; message?: { customType?: unknown } }): boolean =>
+  event.messageType === "custom" && typeof event.message?.customType === "string" && SUBAGENT_WAKE_TYPES.has(event.message.customType);
+
+/**
+ * pi-subagents 0.76.1 to 0.79.x woke an idle parent by appending the notice with no extension
+ * message events and then sending this extension-sourced user message. A root resumed in a home
+ * still on those versions sends it, so the texts stay recognised.
  */
 export const PARENT_WAKE_TEXT =
   "Inspect subagent updates above. Answer pending supervisor requests within your authority. For completed work, " +

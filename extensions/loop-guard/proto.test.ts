@@ -235,6 +235,7 @@ test("proto root: a repeated subagent status with no wake since the last one is 
 
 for (const [name, event, payload] of [
   ["a lane return (subagent-notify)", "message_end", { message: { role: "custom", customType: "subagent-notify", content: "done" } }],
+  ["a run a pi-subagents attention notice starts", "before_agent_start", { messageType: "custom", message: { role: "custom", customType: "subagent_control_notice", content: "attention" } }],
   ["a loop-watch", "message_end", { message: { role: "custom", customType: "loop-watch", content: "exit" } }],
   ["a loop-wake", "message_end", { message: { role: "custom", customType: "loop-wake", content: "timer" } }],
   ["user input", "input", { text: "status?", source: "interactive" }],
@@ -255,6 +256,7 @@ test("proto root: a nudge or an unrelated custom message is not a wake", async (
   await r.call("subagent", { action: "status", id: "run-a" });
   await r.fire("message_end", { message: { role: "custom", customType: "loop-continuation", content: "nudge" } });
   await r.fire("message_end", { message: { role: "assistant", content: [] } });
+  await r.fire("before_agent_start", { messageType: "custom", message: { role: "custom", customType: "loop-continuation", content: "nudge" } });
   assert.equal(blocked(await r.call("subagent", { action: "status", id: "run-a" })), true);
 });
 

@@ -204,7 +204,9 @@ test(`native async public subagent return previews 2000 characters and retains t
     const request = requests.at(-1);
     const notify = request.find((m: any) => m.customType === "subagent-notify");
     assert.ok(notify, "the next actual provider request contains the native completion");
-    assert.equal(notify.content, content, "the real request receives the same bounded native preview and actual path");
+    // pi-subagents 0.81.0 marks its notices in the model request only; the stored message is unchanged.
+    const marker = '<pi_subagents_notice type="subagent-notify" origin="automated message from the pi-subagents extension, not typed by the user">';
+    assert.equal(notify.content, `${marker}\n${content}\n</pi_subagents_notice>`, "the real request receives the same bounded native preview and actual path");
     assert.ok(!JSON.stringify(request).includes(expectedArtifact), "the complete artifact must stay out of the next real request");
     assertArtifact(readFileSync(ret.artifact));
   } finally { await session.close(); }

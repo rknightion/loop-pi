@@ -47,6 +47,7 @@ import {
   type ContinuationState,
   INITIAL_STATE,
   isParentWake,
+  isSubagentWakeRun,
   NUDGE_CUSTOM_TYPE,
   PUSH_CUSTOM_TYPES,
   STATE_CUSTOM_TYPE,
@@ -513,6 +514,11 @@ export default function (pi: ExtensionAPI) {
     protocolRequired();
   });
 
+  // pi-subagents 0.80+: a run its notice starts is the push, whatever the notice type.
+  pi.on("before_agent_start", (event) => {
+    if (isSubagentWakeRun(event as never)) pushDetected = true;
+  });
+
   pi.on("message_start", (event: MessageStartEvent) => {
     const message = event.message as { role: string; customType?: string };
     if (message.role === "custom" && message.customType && PUSH_CUSTOM_TYPES.has(message.customType)) {
@@ -629,7 +635,7 @@ export default function (pi: ExtensionAPI) {
         pi.appendEntry(QUOTA_RETRY_ENTRY, { v: 1, attempts: 0 });
       }
     }
-    // The notice before an idle-parent wake reached no message_start, so the wake is the push.
+    // pi-subagents before 0.80: the notice reached no message_start, so this wake input is the push.
     if (isParentWake(event)) {
       pushDetected = true;
       return { action: "continue" as const };

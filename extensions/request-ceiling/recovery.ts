@@ -9,6 +9,14 @@ import { classifyRetryError, retryPolicy } from "./backoff.ts";
 export const RECOVERY_STOP = "loop-pi recovery required; automatic continuation declined";
 export const EPISODE_STOP = "loop-pi recovery budget exhausted; start a new user turn to resume";
 export interface RecoveryConfig { episodeMs: number; providerIds: string[]; maxAttempts: number }
+/** pi-subagents' shared idle-wake reservation (its `src/shared/parent-wake.js`, documented in its
+ *  `docs/extension-api.md` "Host session lifetime and completion wakes"). While another
+ *  extension's reservation is current, pi-subagents appends a notice without starting a turn. */
+const WAKE_RESERVATIONS = Symbol.for("pi.idle-wake.v1");
+/** A reservation timestamp that never ages out; pi-subagents clears it at the next agent_start. */
+export const WAKE_HOLD = Number.MAX_SAFE_INTEGER;
+type WakeReservation = { sessionId: string; sentAt?: number };
+
 export function recoveryConfig(settings: unknown): RecoveryConfig {
   const raw = (settings as { loopPi?: { retryRecovery?: Partial<RecoveryConfig> } })?.loopPi?.retryRecovery;
   return {
@@ -128,8 +136,28 @@ export function installRecovery(pi: ExtensionAPI, loadSettings: (ctx?: Extension
   let failedUpstream: Upstream | undefined;
   let lastRequestUpstream: Upstream | undefined;
   const upstream = (): Upstream => ({ code: error?.code ?? null, type: error?.type ?? null, status: error?.status ?? responseStatus ?? null, requestId, clientRequestId: attemptId ?? null });
+  // pi-subagents 0.80+ wakes an idle root with a turn-starting notice that never reaches `input`, so
+  // the input fence below cannot refuse it. While this episode refuses automatic turns, hold the
+  // shared idle-wake reservation: notices are then retained without a turn, as before.
+  let wakeHold: WakeReservation | undefined;
+  const holdWakes = (ctx: ExtensionContext) => {
+    const shared = globalThis as Record<symbol, unknown>;
+    const map = (shared[WAKE_RESERVATIONS] ??= new WeakMap<object, WakeReservation>()) as WeakMap<object, WakeReservation>;
+    const manager = ctx.sessionManager as unknown as object;
+    const sessionId = ctx.sessionManager.getSessionId();
+    const current = map.get(manager);
+    const entry = current?.sessionId === sessionId ? current : { sessionId };
+    entry.sentAt = WAKE_HOLD;
+    map.set(manager, entry);
+    wakeHold = entry;
+  };
+  // Release only a hold this episode still owns; pi-subagents may already have cleared or reused it.
+  const releaseWakes = () => {
+    if (wakeHold?.sentAt === WAKE_HOLD) wakeHold.sentAt = undefined;
+    wakeHold = undefined;
+  };
   const clearTimer = () => { if (timer) clearTimeout(timer); timer = undefined; };
-  const reset = () => { clearTimer(); deadline = undefined; expired = false; notified = false; halted = false; active = false; stopReason = undefined; stopNotified = false; attempts = 0; exhaustionCause = undefined; ceilingAllowed = false; admissionReason = undefined; stoppedUpstream = undefined; failedUpstream = undefined; lastRequestUpstream = undefined; compactionAllowed = false; summaryScope = false; summaryInvocations = 0; summaryClientId = null; };
+  const reset = () => { releaseWakes(); clearTimer(); deadline = undefined; expired = false; notified = false; halted = false; active = false; stopReason = undefined; stopNotified = false; attempts = 0; exhaustionCause = undefined; ceilingAllowed = false; admissionReason = undefined; stoppedUpstream = undefined; failedUpstream = undefined; lastRequestUpstream = undefined; compactionAllowed = false; summaryScope = false; summaryInvocations = 0; summaryClientId = null; };
   const abortRecovery = (ctx: { abort(): void; signal?: AbortSignal }) => {
     // Synchronous attribution before abort: loop-wait must not mistake this for operator Esc.
     // Not when the owner already aborted this run: that stop is theirs, and announcing it as the
@@ -394,8 +422,14 @@ export function installRecovery(pi: ExtensionAPI, loadSettings: (ctx?: Extension
       },
     } };
   });
-  pi.on("agent_settled", () => {
+  pi.on("agent_settled", (_event, ctx) => {
     active = false; clearTimer();
+    if (opted && !mayContinue()) holdWakes(ctx);
+    // No timer runs while idle, so an episode that expires idle must start its own hold.
+    else if (opted && deadline !== undefined) {
+      timer = setTimeout(() => { timer = undefined; if (!mayContinue()) holdWakes(ctx); }, Math.max(0, deadline - Date.now()));
+      timer.unref?.();
+    }
     if (halted && !expired && !stopNotified) {
       stopNotified = true;
       pi.sendMessage({ customType: "loop-recovery-required",

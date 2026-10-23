@@ -216,8 +216,8 @@ test("root tool_call: watch_process blocked while an async subagent run is activ
 });
 
 test("root tool_call: watch_process allowed again once its run's async-complete arrives", async () => {
-  // pi-subagents 0.77.0 appends an idle root's subagent-notify with no extension message events,
-  // so only the completion event can release the run.
+  // A held root's subagent-notify reaches no extension message event, so only the completion
+  // event can release the run.
   const fake = fakeApi();
   rootExtension(fake.api as any);
   const toolExecStart = fake.handlers.get("tool_execution_start")![0];

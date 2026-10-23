@@ -260,6 +260,8 @@ test("a required lane guard throwing at session_start refuses the child before i
   cpSync(join(dirname(ROOT_EXTENSION), "..", "request-ceiling"), join(fixture, "extensions", "request-ceiling"), { recursive: true });
   // rules.ts reads the brief header grammar from loop-state/core.ts.
   cpSync(join(dirname(ROOT_EXTENSION), "..", "loop-state"), join(fixture, "extensions", "loop-state"), { recursive: true });
+  // root.ts reads the pi-subagents wake types from loop-continuation/state.ts.
+  cpSync(join(dirname(ROOT_EXTENSION), "..", "loop-continuation"), join(fixture, "extensions", "loop-continuation"), { recursive: true });
   // The root also registers call-timing as a required child extension.
   cpSync(join(dirname(ROOT_EXTENSION), "..", "call-timing"), join(fixture, "extensions", "call-timing"), { recursive: true });
   symlinkSync(dirname(PI_SUBAGENTS_PACKAGE_DIR), join(fixture, "node_modules"), "dir");

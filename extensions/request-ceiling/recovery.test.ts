@@ -521,7 +521,7 @@ test("opted recovery refuses unobservable provider-internal retry multiplication
   assert.equal((notice?.message as any)?.details.reason, "unobservable-provider-retries");
 });
 
-async function runScenario(kind: "anchor" | "partial" | "budget" | "active-budget" | "protected" | "http" | "synthetic" | "ceiling" | "partial-ceiling" | "tool" | "close" | "hosted" | "hosted-output" | "wakes" | "overflow" | "empty-length", withWake = false, managed = true) {
+async function runScenario(kind: "anchor" | "partial" | "budget" | "active-budget" | "protected" | "http" | "synthetic" | "ceiling" | "partial-ceiling" | "tool" | "close" | "hosted" | "hosted-output" | "wakes" | "overflow" | "empty-length" | "idle-expiry" | "raw-wake", withWake = false, managed = true) {
   const cwd = freshDir("recovery-work-");
   const seen: { headers: Record<string, unknown>; body: any }[] = [];
   const server = createServer(async (req, res) => {
@@ -570,7 +570,7 @@ async function runScenario(kind: "anchor" | "partial" | "budget" | "active-budge
       send({ type: "response.output_text.delta", item_id: "msg_test", output_index: 0, content_index: 0, delta: "partial" });
     }
     if (kind === "partial-ceiling" && seen.length === 1) { req.on("close", () => res.end()); return; }
-    if ((["anchor", "active-budget", "protected", "partial", "close", "hosted", "hosted-output", "wakes"].includes(kind) && seen.length === 1) || (kind === "tool" && seen.length === 2) || ["budget", "synthetic"].includes(kind)) {
+    if ((["anchor", "active-budget", "protected", "partial", "close", "hosted", "hosted-output", "wakes"].includes(kind) && seen.length === 1) || (kind === "tool" && seen.length === 2) || ["budget", "synthetic", "idle-expiry"].includes(kind) || (kind === "raw-wake" && seen.length === 1)) {
       send({ type: "response.failed", response: { id: "resp_test", status: "failed", ...(kind === "hosted-output" ? {output:[{id:"search_test",type:"web_search_call",status:"completed"}]} : {}), error: { code: "stream_incomplete", type: "server_error", message: ["partial", "tool", "close"].includes(kind) ? "Upstream websocket closed before response.completed (close_code=1000)" : "The previous response anchor was rejected upstream; retry the request." } } });
     } else send({ type: "response.completed", response: { id: "resp_ok", status: "completed", output: [], usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } } });
     res.end();
@@ -583,14 +583,16 @@ async function runScenario(kind: "anchor" | "partial" | "budget" | "active-budge
 export default function(pi) {
   ${kind === "tool" ? `const wake = createParentWake(pi); pi.on("session_start", (_e,ctx) => wake.bindSession(ctx)); pi.on("agent_start", () => wake.agentStarted()); pi.on("provider_stream_event", (e) => { if(e.data?.type === "response.failed") wake.sendMessage({customType:"subagent-parent-wake",content:"busy child finished",display:true},{triggerTurn:true}); });` : ""}
   ${kind === "wakes" ? `let clock = 0; const wake = createParentWake(pi, () => clock); pi.on("session_start", (_e,ctx) => wake.bindSession(ctx)); pi.on("agent_start", () => wake.agentStarted()); pi.registerCommand("wake-notices", {description:"Deliver test notices", handler:async () => { for(let i=0;i<3;i++) { clock += 11000; wake.sendMessage({customType:"subagent-parent-wake",content:"child notice " + i,display:true},{triggerTurn:true}); await new Promise(resolve => setTimeout(resolve,100)); } pi.sendMessage({customType:"wake-test-done",content:"done",display:false},{triggerTurn:false}); }});` : ""}
+  ${kind === "idle-expiry" ? `let clock = 0; const wake = createParentWake(pi, () => clock); pi.on("session_start", (_e,ctx) => wake.bindSession(ctx)); pi.on("agent_start", () => wake.agentStarted()); let sent = false; pi.on("agent_settled", () => { if (sent) return; sent = true; setTimeout(() => { clock += 11000; wake.sendMessage({customType:"subagent-notify",content:"late child notice",display:true},{triggerTurn:true}); setTimeout(() => pi.sendMessage({customType:"wake-test-done",content:"done",display:false},{triggerTurn:false}), 300); }, 500); });` : ""}
+  ${kind === "raw-wake" ? 'let sent = false; pi.on("agent_settled", () => { if (sent) return; sent = true; setTimeout(() => pi.sendMessage({customType:"third-party-wake",content:"wake",display:true},{triggerTurn:true}), 100); });' : ""}
   ${kind === "budget" ? "Math.random = () => 0;" : ""}
   ${withWake ? 'let armed = false; pi.on("turn_start", () => { if (!armed) { armed = true; pi.events.emit("loop-wait:arm-timer", { at: new Date(Date.now() + 300).toISOString(), reason: "episode-fired-wake", reply() {} }); } });' : ""}
   ${kind === "synthetic" ? 'let sent=false; pi.on("agent_settled", () => { if (!sent) { sent=true; pi.sendMessage({customType:"test-followup",content:"CONTINUE",display:false},{triggerTurn:true}); } });' : ""}
-  ${["protected", "wakes"].includes(kind) ? 'pi.on("before_provider_request", (e) => ({...e.payload, previous_response_id:"resp_bound"}));' : ""}
+  ${["protected", "wakes", "raw-wake"].includes(kind) ? 'pi.on("before_provider_request", (e) => ({...e.payload, previous_response_id:"resp_bound"}));' : ""}
   ${kind === "hosted" ? 'pi.on("before_provider_request", (e) => ({...e.payload, tools:[{type:"web_search_preview"}]}));' : ""}
   pi.registerProvider("fixture", {baseUrl:"http://127.0.0.1:${address.port}/v1",apiKey:"test",api:"openai-responses",models:[{id:"fixture",name:"Fixture",reasoning:false,input:["text"],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:100000,maxTokens:1000}]});
 }`);
-  writeFileSync(join(home, "settings.json"), JSON.stringify({ ...(kind === "overflow" ? {compaction:{enabled:true,keepRecentTokens:1,reserveTokens:2000}} : {}), retry: { maxRetries: kind === "partial" ? 3 : 60, baseDelayMs: kind === "budget" ? 5000 : 200, maxAgentDelayMs: kind === "budget" ? 5000 : 200, provider: { maxRetries: 0 } }, loopPi: { retryRecovery: { episodeMs: kind === "budget" ? 1200 : kind === "synthetic" ? 120 : kind === "active-budget" ? 700 : ["ceiling", "partial-ceiling"].includes(kind) ? 1200 : 10000, providerIds: managed ? ["fixture"] : [] }, requestCeiling: { wallClockMs: ["ceiling", "partial-ceiling"].includes(kind) ? 800 : 5000, maxFollowUps: ["ceiling", "partial-ceiling", "empty-length"].includes(kind) ? 2 : 0 } } }));
+  writeFileSync(join(home, "settings.json"), JSON.stringify({ ...(kind === "overflow" ? {compaction:{enabled:true,keepRecentTokens:1,reserveTokens:2000}} : {}), retry: { maxRetries: kind === "partial" ? 3 : 60, baseDelayMs: kind === "budget" ? 5000 : 200, maxAgentDelayMs: kind === "budget" ? 5000 : 200, provider: { maxRetries: 0 } }, loopPi: { retryRecovery: { episodeMs: kind === "budget" ? 1200 : kind === "synthetic" || kind === "idle-expiry" ? 120 : kind === "active-budget" ? 700 : ["ceiling", "partial-ceiling"].includes(kind) ? 1200 : 10000, providerIds: managed ? ["fixture"] : [] }, requestCeiling: { wallClockMs: ["ceiling", "partial-ceiling"].includes(kind) ? 800 : 5000, maxFollowUps: ["ceiling", "partial-ceiling", "empty-length"].includes(kind) ? 2 : 0 } } }));
   const session = startPiRpc({ extensions: [fixture, ...(withWake ? [join(HERE, "..", "loop-wait", "root.ts")] : []), ...(process.env.RECOVERY_BASELINE ? [] : [join(HERE, "index.ts")])], extraArgs: ["--provider", "fixture", "--model", "fixture"], agentDir: home, subagentTempRoot: freshDir(), cwd, fauxScriptPath: "" });
   try {
     session.send({ type: "prompt", id: "go", message: "GO" });
@@ -620,6 +622,16 @@ export default function(pi) {
       const settled = session.events.filter((e) => e.type === "agent_settled").length;
       session.send({ type: "prompt", id: "new", message: "NEW USER TURN" });
       await session.waitFor((e) => e.type === "agent_settled" && session.events.filter((x) => x.type === "agent_settled").length > settled, 10000);
+    }
+    if (kind === "idle-expiry") {
+      await session.waitFor((e) => e.type === "message_end" && (e.message as any)?.customType === "wake-test-done", 5000);
+      session.send({ type: "get_messages", id: "retained-notices" });
+      const retained = await session.waitFor((e) => e.type === "response" && e.id === "retained-notices", 5000);
+      return { seen, events: session.events, retained };
+    }
+    if (kind === "raw-wake") {
+      await session.waitFor((e) => e.type === "agent_settled" && session.events.filter((x) => x.type === "agent_settled").length >= 2, 5000);
+      return { seen, events: session.events };
     }
     if (kind === "wakes") {
       session.send({ type: "prompt", id: "notices", message: "/wake-notices" });
@@ -748,6 +760,30 @@ test("real parent wakes retain notices silently while halted and a genuine user 
   assert.equal((assistants.at(-1)?.message as any)?.stopReason, "stop");
 });
 
+
+// pi-subagents 0.80+ wakes an idle root with a turn-starting notice, never through `input`. An
+// episode that expires while the root is idle must still keep that wake from starting a turn.
+test("real parent wake after an idle episode expiry is retained without a model turn", { timeout: 20000 }, async () => {
+  const { seen, events, retained } = await runScenario("idle-expiry");
+  assert.equal(seen.length, 1, "the late wake reaches no provider");
+  assert.equal(events.filter((e) => e.type === "agent_start").length, 1, "the late wake starts no run");
+  const notices = (retained?.data as any)?.messages.filter((m: any) => m.customType === "subagent-notify");
+  assert.deepEqual(notices.map((m: any) => m.content), ["late child notice"], "the notice is retained");
+  assert.equal(events.filter((e) => e.type === "message_end" && (e.message as any)?.customType === "loop-recovery-exhausted").length, 1);
+});
+
+// A turn some other extension starts while the episode refuses automatic turns is aborted as the
+// same stop, never an unclassified abort that root recovery would read as a provider error.
+test("real stale run started while halted repeats the original stop", { timeout: 20000 }, async () => {
+  const { seen, events } = await runScenario("raw-wake");
+  assert.equal(seen.length, 1, "the stale run reaches no provider");
+  const assistants = events.filter((e) => e.type === "message_end" && (e.message as any)?.role === "assistant");
+  assert.equal(assistants.length, 2);
+  const stale = (assistants[1].message as any).loopPiRecovery;
+  assert.equal(stale.disposition, "stop");
+  assert.equal(stale.reason, (assistants[0].message as any).loopPiRecovery.reason);
+  assert.equal(stale.reason, "protected-request");
+});
 
 test("real pi preserves native context-overflow compaction and resumes from its summary", { timeout: 20000 }, async () => {
   const { seen, events, executions } = await runScenario("overflow");

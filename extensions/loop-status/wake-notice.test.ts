@@ -112,7 +112,7 @@ test("unreadable session state shows an unknown share and adds no notice", async
 });
 
 test("a timer, watch or lane-return wake over the threshold gets exactly one notice line", async () => {
-  for (const wake of [customWake("loop-wake"), customWake("loop-watch"), customWake("subagent-notify"), userWake]) {
+  for (const wake of [customWake("loop-wake"), customWake("loop-watch"), customWake("subagent-notify"), customWake("subagent_control_notice"), userWake]) {
     const run = await load({ entries: BUSY, launchAgo: 190 });
     try {
       if (wake === userWake) run.fire("input", { type: "input", source: "extension", text: PARENT_WAKE_TEXT });
