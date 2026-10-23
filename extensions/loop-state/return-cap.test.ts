@@ -332,6 +332,31 @@ test("a replayed pending notice is stored whole and capped only in the model req
   }
 });
 
+test("native compaction summarises a stored-whole notice capped, as the model request sees it", () => {
+  const runDir = fresh();
+  const previous = process.env.LOOP_PI_RUN_DIR;
+  process.env.LOOP_PI_RUN_DIR = runDir;
+  try {
+    // pi runs every handler for an event; loop-state registers more than one for compaction.
+    const handlers = new Map<string, ((e: any, c: any) => any)[]>();
+    loopState({ on: (n: string, h: any) => handlers.set(n, [...(handlers.get(n) ?? []), h]), events: { on: () => () => undefined, emit: () => undefined } } as any);
+    const content = `Background task completed: **worker**\n\n${"q".repeat(40_000)}`;
+    const notice = { role: "custom", customType: "subagent-notify", content, display: true };
+    const owner = { role: "user", content: "owner" };
+    const preparation = { messagesToSummarize: [owner, notice], turnPrefixMessages: [notice] };
+    for (const handler of handlers.get("session_before_compact")!) handler({ type: "session_before_compact", preparation }, {});
+    for (const list of [preparation.messagesToSummarize, preparation.turnPrefixMessages]) {
+      const capped = list.find((m: any) => m.customType === "subagent-notify") as any;
+      assert.ok(Buffer.byteLength(capped.content) < Buffer.byteLength(content), "compaction input is capped");
+    }
+    assert.equal(preparation.messagesToSummarize[0], owner);
+    assert.equal(notice.content, content, "the stored message is not changed");
+  } finally {
+    if (previous === undefined) delete process.env.LOOP_PI_RUN_DIR;
+    else process.env.LOOP_PI_RUN_DIR = previous;
+  }
+});
+
 test("a lane caps its own oversized final text with room for the notify's lines, keeping the block and the full copy", () => {
   const runDir = fresh();
   const huge = `Done.\n${BLOCK}\n${"log line\n".repeat(5_000)}END`;

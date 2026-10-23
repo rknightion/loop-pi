@@ -761,9 +761,10 @@ test("real parent wakes retain notices silently while halted and a genuine user 
 });
 
 
-// pi-subagents 0.80+ wakes an idle root with a turn-starting notice, never through `input`. An
-// episode that expires while the root is idle must still keep that wake from starting a turn.
-test("real parent wake after an idle episode expiry is retained without a model turn", { timeout: 20000 }, async () => {
+// pi-subagents 0.80+ wakes an idle root with a turn-starting notice, never through `input`. A late
+// wake after the episode expired must not start a turn. (The episode here expires during pi's retry
+// wait; recovery-lifecycle.test.ts covers expiry while the root is already idle.)
+test("real parent wake after an expired episode is retained without a model turn", { timeout: 20000 }, async () => {
   const { seen, events, retained } = await runScenario("idle-expiry");
   assert.equal(seen.length, 1, "the late wake reaches no provider");
   assert.equal(events.filter((e) => e.type === "agent_start").length, 1, "the late wake starts no run");

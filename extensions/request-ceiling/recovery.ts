@@ -177,6 +177,16 @@ export function installRecovery(pi: ExtensionAPI, loadSettings: (ctx?: Extension
     if (Date.now() >= deadline) expire();
     else { timer = setTimeout(expire, deadline - Date.now()); timer.unref?.(); }
   };
+  // While idle: hold wakes now if the episode refuses automatic turns, else at its deadline. No
+  // recovery timer runs while idle, so an episode that expires idle must start its own hold.
+  const idleHold = (ctx: ExtensionContext) => {
+    clearTimer();
+    if (!opted) return;
+    if (!mayContinue()) { holdWakes(ctx); return; }
+    if (deadline === undefined) return;
+    timer = setTimeout(() => { timer = undefined; if (!mayContinue()) holdWakes(ctx); }, Math.max(0, deadline - Date.now()));
+    timer.unref?.();
+  };
   const notifyExhausted = () => {
     if (!expired || notified) return;
     notified = true;
@@ -266,13 +276,14 @@ export function installRecovery(pi: ExtensionAPI, loadSettings: (ctx?: Extension
     summaryScope = true;
     arm(ctx);
   });
-  pi.on("session_compact", (_event, ctx) => { summaryScope = false; compactionAllowed = false; arm(ctx); });
+  pi.on("session_compact", (_event, ctx) => { summaryScope = false; compactionAllowed = false; arm(ctx); if (!active) idleHold(ctx); });
   pi.on("session_compact_failed", (event, ctx) => {
     if (summaryScope && !halted && !expired) {
       if (event.aborted) { halted = true; stopReason = "operator-cancelled"; stopNotified = true; }
       else stopSummary("opaque-summary-failure-not-replayable", ctx);
     }
     summaryScope = false; compactionAllowed = false; arm(ctx);
+    if (!active) idleHold(ctx);
   });
   pi.on("cache_warming_decision", () => {
     // Also stop idle refreshes while a retained failed episode awaits a wake.
@@ -423,13 +434,8 @@ export function installRecovery(pi: ExtensionAPI, loadSettings: (ctx?: Extension
     } };
   });
   pi.on("agent_settled", (_event, ctx) => {
-    active = false; clearTimer();
-    if (opted && !mayContinue()) holdWakes(ctx);
-    // No timer runs while idle, so an episode that expires idle must start its own hold.
-    else if (opted && deadline !== undefined) {
-      timer = setTimeout(() => { timer = undefined; if (!mayContinue()) holdWakes(ctx); }, Math.max(0, deadline - Date.now()));
-      timer.unref?.();
-    }
+    active = false;
+    idleHold(ctx);
     if (halted && !expired && !stopNotified) {
       stopNotified = true;
       pi.sendMessage({ customType: "loop-recovery-required",

@@ -669,6 +669,28 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
   // Native compaction summarises the stored messages and never runs the `context` hook: neutralise the
   // same held notices there, or the summary could carry the owner-stop text forward.
   pi.on("session_before_compact", (event) => {
+    // A notice stored whole (a pending replay, or one appended with no message_end) is capped here
+    // too, so the summary request reads what the model request reads.
+    try {
+      const preparation = event.preparation as { messagesToSummarize?: unknown; turnPrefixMessages?: unknown };
+      for (const key of ["messagesToSummarize", "turnPrefixMessages"] as const) {
+        const list = preparation?.[key];
+        if (!Array.isArray(list)) continue;
+        let changed = false;
+        const capped = list.map((message) => {
+          const m = message as { role?: string; customType?: string; content?: unknown };
+          if (m?.role !== "custom" || m.customType !== NOTIFY_CUSTOM_TYPE) return message;
+          if (Buffer.byteLength(contentText(m.content), "utf8") <= RETURN_CAP_BYTES) return message;
+          const replacement = capNotifyMessage(m, process.env.LOOP_PI_RUN_DIR, completionFor);
+          if (!replacement) return message;
+          changed = true;
+          return replacement;
+        });
+        if (changed) (preparation as Record<string, unknown>)[key] = capped;
+      }
+    } catch (error) {
+      warn(`return cap (compaction): ${String(error)}`);
+    }
     try {
       harnessHold.rewriteCompaction(event.preparation);
     } catch (error) {

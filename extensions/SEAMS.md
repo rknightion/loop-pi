@@ -886,8 +886,9 @@ paths are exact, bash write detection is best-effort.
   - Pending replay: pi-subagents (since its 0.79.2) records a wake that never started as a
     `subagent-notify-pending` entry at shutdown and replays it at the next start until a stored
     `subagent-notify` has identical content (`notify.js` `unreplayedPendingNotices`). loop-state
-    therefore stores a replay of a pending entry whole; only the `context` hook caps it. Capping it in
-    storage would make it replay at every restart.
+    therefore stores a replay of a pending entry whole; the `context` hook caps it in the model
+    request and `session_before_compact` caps it in native compaction's input (`messagesToSummarize`,
+    `turnPrefixMessages`). Capping it in storage would make it replay at every restart.
 ## Automated notice marker
 
 pi sends a custom message to the model as a plain user message. In the root's model request,

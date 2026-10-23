@@ -247,6 +247,29 @@ test("an idle episode crossing its deadline emits exhaustion once when a wake ar
   h.emit("session_shutdown");
 });
 
+// pi-subagents 0.80+ wakes an idle root without `input`, so an episode that expires while the root
+// is idle must take the shared wake hold itself, including after an idle compaction re-arms recovery.
+test("an idle episode takes the wake hold at its deadline, not before", (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
+  const h = harness(); h.emit("turn_start"); h.emit("before_provider_request", { payload: { input: [] } });
+  h.emit("message_end", failure); h.emit("agent_settled");
+  assert.equal(h.wakeReservation()?.sentAt, undefined, "a live episode leaves wakes free");
+  t.mock.timers.tick(31);
+  assert.equal(h.wakeReservation()?.sentAt, WAKE_HOLD, "the expired idle episode holds wakes");
+  h.emit("session_shutdown");
+  assert.equal(h.wakeReservation()?.sentAt, undefined, "shutdown releases the hold");
+});
+
+test("an idle compaction keeps the idle episode's wake-hold deadline", (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
+  const h = harness(); h.emit("turn_start"); h.emit("before_provider_request", { payload: { input: [] } });
+  h.emit("message_end", failure); h.emit("agent_settled");
+  h.emit("session_compact", {});
+  t.mock.timers.tick(31);
+  assert.equal(h.wakeReservation()?.sentAt, WAKE_HOLD);
+  h.emit("session_shutdown");
+});
+
 test("context overflow remains available to native compaction rather than halting recovery", () => {
   const h = harness(); h.emit("turn_start"); h.emit("before_provider_request", { payload: { input: [] } });
   const message = { role: "assistant", stopReason: "error", content: [], errorMessage: 'OpenAI API error (400): {"error":{"code":"context_length_exceeded","type":"invalid_request_error","message":"maximum context length exceeded"}}' };
