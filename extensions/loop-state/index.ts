@@ -66,6 +66,18 @@ function textOf(content: unknown): string {
     .join("\n");
 }
 
+/** pi-subagents 0.79.2+ (`src/runs/background/notify.js`): a wake that never started is recorded as
+ *  this entry at shutdown and replayed at the next start until a stored notice has the same content. */
+const PENDING_NOTICE_ENTRY = "subagent-notify-pending";
+function replaysPendingNotice(message: { role?: string; customType?: string; content?: unknown }, ctx: unknown): boolean {
+  if (message.role !== "custom" || message.customType !== NOTIFY_CUSTOM_TYPE || typeof message.content !== "string") return false;
+  const branch = (ctx as { sessionManager?: { getBranch?: () => unknown[] } } | undefined)?.sessionManager?.getBranch?.() ?? [];
+  return branch.some((entry) => {
+    const e = entry as { type?: string; customType?: string; data?: { message?: { content?: unknown } } };
+    return e.type === "custom" && e.customType === PENDING_NOTICE_ENTRY && e.data?.message?.content === message.content;
+  });
+}
+
 export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) => ReturnType<typeof setTimeout> = (job) => setTimeout(job, 60_000)) {
   let sessionId = "";
   let shuttingDown = false;
@@ -608,9 +620,12 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
     await chain;
   });
 
-  pi.on("message_end", (event) => {
+  pi.on("message_end", (event, ctx) => {
     if (event.message.role === "assistant") rootActivity();
     try {
+      // A replay of a pending notice stays whole in storage, or pi-subagents would replay it at every
+      // start; the context hook below still caps it in the model request.
+      if (replaysPendingNotice(event.message, ctx)) return undefined;
       const replacement = capNotifyMessage(event.message as { role?: string; customType?: string; content?: unknown }, process.env.LOOP_PI_RUN_DIR, completionFor);
       if (replacement) return { message: replacement as typeof event.message };
     } catch (error) {

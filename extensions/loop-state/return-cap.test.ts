@@ -300,6 +300,38 @@ test("the loop-state extension caps with the saved output recorded from the asyn
   }
 });
 
+// pi-subagents 0.79.2+ records a wake that never started as a `subagent-notify-pending` entry and
+// replays it at the next start until a stored `subagent-notify` with the same content exists. A
+// replay capped in storage would never match and would replay on every restart.
+test("installed pi-subagents clears a pending notice only on an identical stored notice", async () => {
+  const { unreplayedPendingNotices } = await import(new URL("../../node_modules/pi-subagents/src/runs/background/notify.js", import.meta.url).href);
+  const pending = { type: "custom", customType: "subagent-notify-pending", data: { message: { customType: "subagent-notify", content: "big" } } };
+  assert.equal(unreplayedPendingNotices([pending, { type: "custom_message", customType: "subagent-notify", content: "capped" }]).length, 1);
+  assert.equal(unreplayedPendingNotices([pending, { type: "custom_message", customType: "subagent-notify", content: "big" }]).length, 0);
+});
+
+test("a replayed pending notice is stored whole and capped only in the model request", () => {
+  const runDir = fresh();
+  const previous = process.env.LOOP_PI_RUN_DIR;
+  process.env.LOOP_PI_RUN_DIR = runDir;
+  try {
+    const handlers = new Map<string, (e: any, c: any) => any>();
+    loopState({ on: (n: string, h: any) => handlers.set(n, h), events: { on: () => () => undefined, emit: () => undefined } } as any);
+    const content = `Background task completed: **worker**\n\n${"q".repeat(40_000)}`;
+    const message = { role: "custom", customType: "subagent-notify", content, display: true };
+    const branch = [{ type: "custom", customType: "subagent-notify-pending", data: { message: { customType: "subagent-notify", content } } }];
+    const ctx = { sessionManager: { getBranch: () => branch } };
+    assert.equal(handlers.get("message_end")!({ type: "message_end", message }, ctx), undefined, "the replay is stored whole");
+    const fresh_ = handlers.get("message_end")!({ type: "message_end", message }, { sessionManager: { getBranch: () => [] } });
+    assert.notEqual(fresh_?.message.content, content, "an ordinary oversized notice is still capped in storage");
+    const request = handlers.get("context")!({ type: "context", messages: [message] }, ctx);
+    assert.ok(Buffer.byteLength(request.messages[0].content) < Buffer.byteLength(content), "the model request is capped");
+  } finally {
+    if (previous === undefined) delete process.env.LOOP_PI_RUN_DIR;
+    else process.env.LOOP_PI_RUN_DIR = previous;
+  }
+});
+
 test("a lane caps its own oversized final text with room for the notify's lines, keeping the block and the full copy", () => {
   const runDir = fresh();
   const huge = `Done.\n${BLOCK}\n${"log line\n".repeat(5_000)}END`;

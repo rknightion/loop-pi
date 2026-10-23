@@ -879,9 +879,15 @@ paths are exact, bash write detection is best-effort.
     one `lane-return` block first and at most a few lines of prose after it (home agent files). The
     parser takes the last, here the only, block, and both caps keep a block at the start in the
     head.
-  - Limit: an idle-wake notify (no root extension can rewrite it) holds one previewed lane return
-    with its framing, but pi-subagents batches completions that finish together into one notify,
-    which is stored at the sum of their previews. The `context` hook still caps what the model sees.
+  - Limit: a notify appended without a turn (the parent held, or the recovery wake hold) reaches no
+    root extension at `message_end`, and pi-subagents batches completions that finish together into
+    one notify, which is stored at the sum of their previews. The `context` hook still caps what the
+    model sees.
+  - Pending replay: pi-subagents (since its 0.79.2) records a wake that never started as a
+    `subagent-notify-pending` entry at shutdown and replays it at the next start until a stored
+    `subagent-notify` has identical content (`notify.js` `unreplayedPendingNotices`). loop-state
+    therefore stores a replay of a pending entry whole; only the `context` hook caps it. Capping it in
+    storage would make it replay at every restart.
 ## Closeout and root fences
 
 - **Closeout**: `/loop-closeout` (loop-wait) emits `pi.events.emit("loop-closeout", {lines, pending})`
