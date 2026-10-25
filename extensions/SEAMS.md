@@ -669,6 +669,17 @@ before any `await`. A missing reply means the provider extension is not loaded; 
 - `loop-state` (`core.ts` `parseLaneReturn`) accepts a `lane-return` block with `"v": 3` (lane.md),
   `"v": 2`, or no `v`; the `return` event takes the fields it knows (`status`, `base`, `check`,
   `exit`, `coderabbit`, `questions`, ...) and drops the rest (`patch`, `patch_sha256`, `tail`).
+  The parser stays pure and accepts legacy blocks unchanged. At live completion ingestion only,
+  `loop-state/return-validation.ts` validates v3 evidence before projecting that event: a present,
+  non-null `exit` must be a finite integer, and a `complete` return's numeric exit must be zero.
+  Null or omitted exits remain supported. A present, non-null `patch` must name a readable regular
+  file (relative paths resolve against the root completion context's cwd), with a 64-hex
+  `patch_sha256` matching its bytes. Stat and hash use the same nonblocking opened descriptor;
+  read or close failures reject the evidence. Null or omitted patches remain supported for
+  read-only roles and commit-SHA returns. A rejection emits a diagnostic and records `failed`,
+  even for an otherwise partial/blocked return, while preserving conservative `landed`/`sha`
+  facts and other projected fields. This adds no return fields or event schema and does not
+  validate v2/versionless blocks, revalidate historical rows or establish immutable patch bytes.
 - A return with no usable `lane-return` block is ultimately `failed`. Model-root `loop-state`
   first attempts exactly one package-owned resume asking for the block, correlating the revived
   run to the original lane and run; a refused resume or another missing block falls back to failed

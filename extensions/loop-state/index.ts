@@ -18,6 +18,7 @@ import { basename, isAbsolute, join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { type Brief, deriveLogPath, failedRunBlock, parseBrief, parseLaneReturn, returnEvent, runFailed, runIdFromText } from "./core.ts";
+import { laneReturnError } from "./return-validation.ts";
 import { allocateRepair, type ArtifactIdentity, artifactIdentity, identityOf, readRepair, type RepairBinding, validBinding, validIdentity } from "./repair.ts";
 import { markNotices } from "./notice-marker.ts";
 import { capNotifyMessage, type CompletionInfo, completionInfo, contentText, NOTIFY_CUSTOM_TYPE, RETURN_CAP_BYTES } from "./return-cap.ts";
@@ -383,7 +384,12 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
         }
       }
     }
-    const event = returnEvent(info.lane, runId, runFailed(data) ? failedRunBlock(block) : block, artifact);
+    const invalid = laneReturnError(block, cwd);
+    if (invalid) warn(`return for run ${runId} rejected: ${invalid}`);
+    // Reject the outcome, not conservative landed/sha evidence: dropping it could re-admit work
+    // that may already have landed. Invalid partial/blocked outcomes are failures too.
+    const accepted = invalid ? { ...block, status: "failed" } : runFailed(data) ? failedRunBlock(block) : block;
+    const event = returnEvent(info.lane, runId, accepted, artifact);
     const writeReturn = resumeAttempted.has(runId)
       ? (row: Record<string, unknown>) => appendRecoveryReturn(row, log)
       : (row: Record<string, unknown>) => append(row, log);
