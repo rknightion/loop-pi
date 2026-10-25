@@ -117,6 +117,27 @@ public statement of those contracts.
   one background runner must use the same launcher or none. **The name `nopush` is frozen:**
   native resume uses the recorded launcher name (including recorded absence), not the current agent
   file; removing the name refuses resumes, and runs launched before adoption remain unwrapped.
+- **Lane boot id (pi-subagents 0.82.1):** pi-subagents records a boot id with a run's pid so a pid
+  from before a reboot reads as dead (`runs/background/stale-run-reconciler.js`
+  `checkRecordedPidLiveness`), but omits it for launcher runs (`async-execution.js:440`), since a
+  broker may start the runner under another kernel. `loop-pi-nopush` execs on the same machine, so
+  before exec it adds the boot id pi-subagents reads (`kern.bootsessionuuid` on macOS,
+  `/proc/sys/kernel/random/boot_id` on Linux) to the runner config named by its last argument when
+  that is a regular `async-cfg-*.json` with no `bootId`. The runner primes it from the config
+  (`subagent-runner-bootstrap.js:108`) and writes it into `status.json` with its pid. Any failure
+  leaves the config as it was, which is the upstream behaviour.
+- **Workflow auto-resume (pi-subagents 0.82.1):** the home sets `autoResume: false`. 0.82.0
+  relaunches an interrupted top-level workflow on session reopen through the executor, outside the
+  model `subagent` call loop-guard checks (`src/extension/index.js:953`). loop-guard refuses
+  workflows anyway; the setting keeps a stray one from relaunching unguarded.
+- **Results delivered on reopen (pi-subagents 0.82.1):** a background run that finishes while its
+  root is dead is delivered when the root's session is reopened (`result-delivery-ownership.js`),
+  appended without a turn (`index.js:972`), with the usual `subagent:async-complete` event, so
+  loop-state records the lane's `return` (`loop-state/reopen-delivery-e2e.test.ts`). 0.81.0 never
+  reported it.
+- **Package skills:** the home loads pi-subagents with `"skills": []` in its `packages` entry. Its
+  bundled skills teach `workflow` launches and `bg_wait`, which loop-guard refuses; the root's own
+  `subagent` description and policy cover delegation (`loop-guard/home-package-skills.test.ts`).
 
 ## Scratch candidate installation
 

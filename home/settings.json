@@ -22,7 +22,7 @@
     "-builtin:tool-search"
   ],
   "packages": [
-    "{{PREFIX}}/node_modules/pi-subagents"
+    { "source": "{{PREFIX}}/node_modules/pi-subagents", "skills": [] }
   ],
   "subagents": {
     "disableBuiltins": true

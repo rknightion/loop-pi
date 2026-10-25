@@ -2,6 +2,7 @@
   "waitTool": false,
   "runnerLaunchers": { "nopush": ["{{HOME}}/bin/loop-pi-nopush"] },
   "forceTopLevelAsync": true,
+  "autoResume": false,
   "defaultSubagentContext": "fresh",
   "maxSubagentDepth": 2,
   "maxActiveAsyncRunsPerSession": 19,

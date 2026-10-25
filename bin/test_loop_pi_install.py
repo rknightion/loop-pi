@@ -85,6 +85,50 @@ class NopushTests(unittest.TestCase):
                                     env=env, capture_output=True, text=True, timeout=15)
             self.assertEqual(result.returncode, 23, result.stderr)
 
+    def test_wrapper_records_this_machines_boot_id_in_the_runner_config(self):
+        import shutil
+        node = shutil.which("node")
+        self.assertIsNotNone(node, "node is required to run the wrapper's config step")
+        boot_module = (HERE.parent / "node_modules/pi-subagents/src/runs/background/boot-id.js").as_uri()
+        expected = subprocess.run([node, "--input-type=module", "-e",
+                                   f"import {{ currentBootId }} from {json.dumps(boot_module)};"
+                                   " process.stdout.write(currentBootId() ?? '')"],
+                                  capture_output=True, text=True, timeout=15, check=True).stdout
+        self.assertTrue(expected, "pi-subagents reads a boot id on this platform")
+        reader = "const fs=require('node:fs'); process.stdout.write(JSON.stringify(JSON.parse(fs.readFileSync(process.argv[1],'utf8'))))"
+        with tempfile.TemporaryDirectory(prefix="loop-pi-nopush-boot-") as temporary:
+            root = Path(temporary)
+            def run(config_name, payload, *, link=False):
+                config = root / config_name
+                if link:
+                    target = root / "target.json"
+                    target.write_text(payload)
+                    config.symlink_to(target)
+                else:
+                    config.write_text(payload)
+                    os.chmod(config, 0o600)
+                result = subprocess.run([str(HERE / "loop-pi-nopush"), node, "-e", reader, str(config)],
+                                        capture_output=True, text=True, timeout=15)
+                return config, result
+            config, result = run("async-cfg-abc.json", '{"id":"run-1","asyncDir":"/x"}')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout), {"id": "run-1", "asyncDir": "/x", "bootId": expected})
+            self.assertEqual(config.stat().st_mode & 0o777, 0o600, "the private config stays private")
+            self.assertEqual(sorted(p.name for p in root.iterdir()), ["async-cfg-abc.json"], "no temporary file is left")
+            _, result = run("async-cfg-keep.json", '{"id":"run-2","bootId":"recorded"}')
+            self.assertEqual(json.loads(result.stdout)["bootId"], "recorded", "an existing boot id is never replaced")
+            _, result = run("other.json", '{"id":"run-3"}')
+            self.assertNotIn("bootId", json.loads(result.stdout), "only a pi-subagents runner config is touched")
+            _, result = run("async-cfg-linked.json", '{"id":"run-4"}', link=True)
+            self.assertNotIn("bootId", json.loads(result.stdout), "a symlinked config is left alone")
+            # A config the step cannot parse still launches, with the runner's own exit status.
+            bad = root / "async-cfg-bad.json"
+            bad.write_text("{not json")
+            result = subprocess.run([str(HERE / "loop-pi-nopush"), node, "-e", "process.exit(23)", str(bad)],
+                                    capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 23, result.stderr)
+            self.assertEqual(bad.read_text(), "{not json")
+
     def test_installed_wrapper_config_agent_set_and_drift_in_subprocess(self):
         import sys
         with tempfile.TemporaryDirectory(prefix="loop-pi-nopush-install-") as temporary:
@@ -572,7 +616,13 @@ class NopushNativeCanary(unittest.TestCase):
             wrapped = [s for s in statuses if s.get("steps", [{}])[0].get("agent") == "worker"]
             self.assertTrue(wrapped, statuses)
             self.assertTrue(all(s.get("launcher", {}).get("name") == "nopush" for s in wrapped), wrapped)
-            print("WRAPPED: unknown helper denial; native status launcher.name=nopush", flush=True)
+            boot_module = (HERE.parent / "node_modules/pi-subagents/src/runs/background/boot-id.js").as_uri()
+            boot = subprocess.run([node, "--input-type=module", "-e",
+                                   f"import {{ currentBootId }} from {json.dumps(boot_module)};"
+                                   " process.stdout.write(currentBootId() ?? '')"],
+                                  capture_output=True, text=True, timeout=15, check=True).stdout
+            self.assertTrue(boot and all(s.get("bootId") == boot for s in wrapped), wrapped)
+            print("WRAPPED: unknown helper denial; native status launcher.name=nopush with this boot id", flush=True)
             prompt("LOCAL_ROOT")
             _, result = child_result("LOCAL_CHILD")
             self.assertFalse(result.get("isError"), result)

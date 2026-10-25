@@ -2,6 +2,38 @@
 # Honest-mistake fence for network Git pushes from a background runner and its tools.
 # Not an OS boundary: explicit pushurl, scrubbed env, Git libraries and API writes bypass it.
 set -eu
+# pi-subagents records no boot id for a launcher run, since a broker launcher may start the runner
+# under another kernel. This wrapper execs on the same machine, so it adds the boot id pi-subagents
+# itself reads (sysctl kern.bootsessionuuid on macOS, /proc/sys/kernel/random/boot_id on Linux) to
+# the runner config that is its last argument. The runner then records it with its pid, and a pid
+# left from before a reboot reads as dead instead of holding a run slot. Any failure leaves the
+# config as it was.
+boot_id() {
+  if [ -r /proc/sys/kernel/random/boot_id ]; then
+    head -n 1 /proc/sys/kernel/random/boot_id
+  elif [ -x /usr/sbin/sysctl ]; then
+    /usr/sbin/sysctl -n kern.bootsessionuuid
+  fi
+}
+if [ "$#" -ge 2 ]; then
+  for config do :; done
+  case $config in
+    */async-cfg-*.json)
+      boot=$(boot_id 2>/dev/null || true)
+      if [ -n "$boot" ] && [ -f "$config" ] && [ ! -L "$config" ]; then
+        NODE_OPTIONS='' "$1" -e '
+          const fs = require("node:fs"), path = require("node:path");
+          const [file, boot] = process.argv.slice(1);
+          const config = JSON.parse(fs.readFileSync(file, "utf8"));
+          if (!config || typeof config !== "object" || Array.isArray(config) || config.bootId !== undefined) process.exit(0);
+          const temporary = path.join(path.dirname(file), "." + path.basename(file) + "." + process.pid + ".tmp");
+          fs.writeFileSync(temporary, JSON.stringify({ ...config, bootId: boot }), { mode: 0o600, flag: "wx" });
+          fs.renameSync(temporary, file);
+        ' "$config" "$boot" >/dev/null 2>&1 || true
+      fi
+      ;;
+  esac
+fi
 export GIT_CONFIG_COUNT=5
 export GIT_CONFIG_KEY_0='url.loop-pi-push-denied::.pushInsteadOf'
 export GIT_CONFIG_VALUE_0='https://'

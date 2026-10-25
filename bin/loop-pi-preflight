@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Target-repository preflight for loop-pi children.
 
-Children load a target repository's `.pi/settings.json`, `.pi/SYSTEM.md` and project
-extensions regardless of trust, and project agent files under `.pi/agents/` or `.agents/`
-outrank the loop-pi ones. Before the root's first spawn into a repository, this script
-refuses to proceed when any of that is present, and separately checks the checkout is
+Children follow the parent session's project trust (SEAMS.md "Project trust"). In a trusted
+project they load the target repository's `.pi/settings.json`, `.pi/SYSTEM.md` and project
+extensions, and project agent files under `.pi/agents/` or `.agents/` outrank the loop-pi ones.
+Before the root's first spawn into a repository, this script refuses to proceed when any of
+that is present, and separately checks the checkout is
 clean and `.pi/` is gitignored (pi-subagents writes `.pi/subagents/` into the checkout).
 
 It also asserts, from the files under `$PI_CODING_AGENT_DIR/agents/*.md`, that the C3
