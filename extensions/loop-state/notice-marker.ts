@@ -1,6 +1,6 @@
 // Marks loop-pi's own automated messages in the model request (SEAMS.md "Automated notice marker").
 // pi sends a custom message to the model as a plain user message, so a nudge, a wake or a recovery
-// notice reads like text the owner typed. pi-subagents 0.81.0 wraps its notices the same way. The
+// notice reads like text the owner typed. pi-subagents 0.82.1 wraps its notices the same way. The
 // marker depends only on the message, so history renders the same bytes every turn and cached
 // prefixes stay valid. Only the model request changes: the stored message and the chat view do not.
 

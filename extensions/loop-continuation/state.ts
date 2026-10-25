@@ -22,7 +22,7 @@ export const SUBAGENT_WAKE_TYPES: ReadonlySet<string> = new Set([
   "subagent-notify", "subagent-completion-unanswered", "subagent-completion-unhandled",
   "subagent-wait-subscription", "subagent-incremental-child-notify", "subagent-workflow-result-write-failed",
   "subagent_control_notice", "subagent_steering_notice", "subagent_watchdog_warning",
-  "subagent_watchdog_clarification", "subagent-compaction-resume",
+  "subagent_watchdog_clarification", "subagent-auto-resume", "subagent-compaction-resume",
 ]);
 export const isSubagentWakeRun = (event: { messageType?: string; message?: { customType?: unknown } }): boolean =>
   event.messageType === "custom" && typeof event.message?.customType === "string" && SUBAGENT_WAKE_TYPES.has(event.message.customType);
