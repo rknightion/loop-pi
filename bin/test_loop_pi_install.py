@@ -133,8 +133,8 @@ class NopushTests(unittest.TestCase):
                 # A failed replace leaves the config as it was and no temporary file behind.
                 locked = root / "async-cfg-locked.json"
                 locked.write_text('{"id":"run-5"}')
-                subprocess.run(["chflags", "uchg", str(locked)], check=True, timeout=15)
                 try:
+                    subprocess.run(["chflags", "uchg", str(locked)], check=True, timeout=15)
                     result = subprocess.run([str(HERE / "loop-pi-nopush"), node, "-e", reader, str(locked)],
                                             capture_output=True, text=True, timeout=15)
                 finally:

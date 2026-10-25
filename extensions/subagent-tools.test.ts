@@ -10,17 +10,30 @@
 // so the test follows the shipped flags) against a local Responses peer, and reads the `tools` array
 // of the requests on the wire: once for the root, once for a real child process it launches.
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
-import { cleanupAll, freshDir, PI_SUBAGENTS_PACKAGE_DIR, startPiRpc, waitForCondition } from "./loop-guard/rpc-test-helpers.ts";
+import { cleanupAllAfterExit, expectDetachedRuns, freshDir, PI_SUBAGENTS_PACKAGE_DIR, startPiRpc, waitForCondition } from "./loop-guard/rpc-test-helpers.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
-after(cleanupAll);
+after(() => cleanupAllAfterExit());
+
+test("cleanup waits for the actual detached async writer after root.close", { timeout: 90_000 }, async (t) => {
+  const kill = process.kill;
+  t.mock.method(process, "kill", (pid: number, signal: NodeJS.Signals | number = "SIGTERM") => {
+    assert.equal(signal, 0, "detached cleanup must only observe, never signal a persisted PID");
+    return kill(pid, signal);
+  });
+  await captureDeclaredTools(launcherExclusions(), "", undefined, true);
+});
+
+test("early cleanup with missing async startup metadata retains every directory and fails explicitly", { timeout: 90_000 }, async () => {
+  await captureDeclaredTools(launcherExclusions(), "", undefined, "missing-metadata");
+});
 
 /** The tool names the shipped root launcher excludes. */
 function launcherExclusions(): string[] {
@@ -31,10 +44,12 @@ function launcherExclusions(): string[] {
 
 interface Capture { root: string[]; child: string[] }
 
-async function captureDeclaredTools(exclusions: string[], extraChildTools = "", bridge?: "always"): Promise<Capture> {
+async function captureDeclaredTools(exclusions: string[], extraChildTools = "", bridge?: "always", holdChild: boolean | "missing-metadata" = false): Promise<Capture> {
   const home = freshDir("subagent-tools-home-");
   const cwd = freshDir("subagent-tools-work-");
   const requests: { kind: "root" | "child"; tools: string[] }[] = [];
+  let releaseChild!: () => void;
+  const childRelease = new Promise<void>((resolve) => { releaseChild = resolve; });
   const server = createServer(async (req, res) => {
     let raw = "";
     for await (const chunk of req) raw += chunk;
@@ -44,6 +59,7 @@ async function captureDeclaredTools(exclusions: string[], extraChildTools = "", 
       : JSON.stringify(input).includes("CHILD_PROOF") ? "child" : "root";
     requests.push({ kind, tools: (body.tools ?? []).map((tool: any) => tool.name) });
     const n = requests.length;
+    if (kind === "child" && holdChild) await childRelease;
     res.writeHead(200, { "content-type": "text/event-stream" });
     const send = (value: object) => res.write(`data: ${JSON.stringify(value)}\n\n`);
     send({ type: "response.created", response: { id: `resp_${n}`, status: "in_progress", output: [] } });
@@ -82,9 +98,11 @@ async function captureDeclaredTools(exclusions: string[], extraChildTools = "", 
   mkdirSync(join(home, "agents"));
   writeFileSync(join(home, "agents/probe.md"), `---\nname: probe\ndescription: Declared-tools proof\ntools: ${workerTools}\nextensions: []\nmodel: fixture/fixture\n---\nComplete the proof.\n`);
 
+  const subagentTempRoot = freshDir("subagent-tools-sub-");
+  expectDetachedRuns(subagentTempRoot, 1);
   const session = startPiRpc({
     extensions: [], extraArgs: ["--provider", "fixture", "--model", "fixture", "--exclude-tools", exclusions.join(",")],
-    sessionArgs: [], agentDir: home, subagentTempRoot: freshDir("subagent-tools-sub-"), cwd, fauxScriptPath: "",
+    sessionArgs: [], agentDir: home, subagentTempRoot, cwd, fauxScriptPath: "",
   });
   try {
     session.send({ type: "prompt", id: "go", message: "GO" });
@@ -96,8 +114,39 @@ async function captureDeclaredTools(exclusions: string[], extraChildTools = "", 
     throw new Error(`${error}\nrequests: ${JSON.stringify(requests)}\nstderr:\n${session.stderr.join("")}`);
   } finally {
     await session.close();
-    server.closeAllConnections();
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    try {
+      if (holdChild === "missing-metadata") {
+        const runsDir = join(subagentTempRoot, "async-subagent-runs");
+        const run = readdirSync(runsDir).find((name) => !name.startsWith("."))!;
+        const status = join(runsDir, run, "status.json");
+        const hidden = `${status}.fixture-held`;
+        // A real runner is blocked at its local HTTP peer. Hide startup metadata before teardown,
+        // exactly the uncertain pre-dispatch surface: the absence must never authorize deletion.
+        renameSync(status, hidden);
+        try {
+          await assert.rejects(cleanupAllAfterExit(100), /retaining fixture directories: detached writer quiescence unknown/, "missing startup metadata must fail closed");
+          assert.ok(existsSync(home) && existsSync(cwd) && existsSync(subagentTempRoot), "unknown async startup must retain all fixture directories");
+        } finally { if (existsSync(hidden)) renameSync(hidden, status); }
+      }
+      const cleanup = cleanupAllAfterExit();
+      let settled = false;
+      void cleanup.then(() => { settled = true; }, () => { settled = true; });
+      try {
+        if (holdChild) {
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          assert.equal(settled, false, "cleanup cannot finish while the detached HTTP writer is held after root.close");
+          assert.ok(existsSync(home) && existsSync(cwd) && existsSync(subagentTempRoot), "all detached writer fixture directories remain until it closes");
+        }
+      } finally {
+        releaseChild();
+        await cleanup;
+      }
+      assert.equal(existsSync(subagentTempRoot), false, "cleanup removes fixtures only after detached terminal receipt and runner exit");
+    } finally {
+      releaseChild();
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   }
 }
 

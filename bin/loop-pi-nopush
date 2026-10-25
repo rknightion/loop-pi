@@ -24,13 +24,14 @@ if [ "$#" -ge 2 ]; then
           const config = JSON.parse(fs.readFileSync(file, "utf8"));
           if (!config || typeof config !== "object" || Array.isArray(config) || config.bootId !== undefined) process.exit(0);
           const temporary = path.join(path.dirname(file), "." + path.basename(file) + "." + process.pid + ".tmp");
-          const fd = fs.openSync(temporary, "wx", 0o600);
+          let fd = fs.openSync(temporary, "wx", 0o600);
           try {
             fs.writeFileSync(fd, JSON.stringify({ ...config, bootId: boot }));
             fs.closeSync(fd);
+            fd = undefined;
             fs.renameSync(temporary, file);
           } catch (error) {
-            try { fs.closeSync(fd); } catch {}
+            if (fd !== undefined) { try { fs.closeSync(fd); } catch {} }
             fs.rmSync(temporary, { force: true });
             throw error;
           }

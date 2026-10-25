@@ -12,7 +12,7 @@
 // a parallel B4 lane and still being written): it is a self-contained copy of
 // the same documented pattern, scoped to loop-guard's own e2e proof.
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -60,7 +60,75 @@ export function writeFauxScript(rules: FauxRule[]): string {
   return path;
 }
 
+const detachedFixtures = new Map<string, number>();
+// Register before sending a launch: missing startup metadata is uncertainty, not an empty run set.
+export function expectDetachedRuns(root: string, count: number): void {
+  detachedFixtures.set(root, count);
+}
+
+export async function waitForDetachedWriters(root: string, count: number, timeoutMs = 30_000): Promise<void> {
+  const { readProcessTerminalCandidate, readProcessTerminal } = await import(new URL("../../node_modules/pi-subagents/src/runs/background/process-terminal.js", import.meta.url).href);
+  const { inspectSessionLease } = await import(new URL("../../node_modules/pi-subagents/src/runs/shared/session-lease.js", import.meta.url).href);
+  let diagnostic = "startup metadata missing";
+  try {
+    await waitForCondition(() => {
+      try {
+        const runsDir = join(root, "async-subagent-runs");
+        const runs = readdirSync(runsDir, { withFileTypes: true }).filter((entry) => entry.isDirectory() && ![".active-runs", ".terminal-runs"].includes(entry.name));
+        if (runs.length !== count) { diagnostic = `expected ${count} runs, found ${runs.length}`; return; }
+        for (const run of runs) {
+          const dir = join(runsDir, run.name);
+          const status = JSON.parse(readFileSync(join(dir, "status.json"), "utf8"));
+          const receipt = readProcessTerminalCandidate(dir);
+          const proof = readProcessTerminal(dir, { runId: run.name, runnerProcessInstanceId: receipt?.runnerProcessInstanceId });
+          const expected = receipt?.expectedWriters;
+          const entries = Object.entries(expected ?? {}) as [string, number][];
+          const writers = Object.values(receipt?.writers ?? {}).flat() as any[];
+          if (status.runId !== run.name || !receipt || receipt.runId !== run.name
+            || receipt.runnerProcessInstanceId !== status.processTerminal?.runnerProcessInstanceId
+            || !["complete", "completed", "failed", "stopped", "paused"].includes(status.state)
+            || !proof || !["pending", "observed"].includes(proof.state)
+            || !entries.length
+            || entries.some(([index, n]) => receipt.writers[index]?.length !== n)
+            || Object.keys(receipt.writers).some((index) => !(index in expected))
+            || writers.some((writer) => writer.processTree.state !== "observed")
+            || (receipt.revivalLeaseToken && receipt.revivalLeaseReleaseAcknowledged !== true)
+            || (receipt.sessionFile && inspectSessionLease(receipt.sessionFile, join(root, "session-leases")).state !== "free")) {
+            diagnostic = `${run.name}: terminal writer receipt incomplete`; return;
+          }
+          // In-process native sessions have expectedWriters=0: their only OS writer is the runner.
+          // With a dead root the overall proof may stay pending, so require its validated candidate,
+          // terminal status, all external writer closures, free session lease AND runner absence.
+          // Numeric PID absence is exit evidence only. Never use status metadata to signal a process.
+          if (!Number.isInteger(status.pid) || status.pid <= 1) { diagnostic = `${run.name}: runner identity missing`; return; }
+          try { process.kill(status.pid, 0); diagnostic = `${run.name}: runner has not exited`; return; }
+          catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
+        }
+        return true;
+      } catch (error) { diagnostic = String(error); return; }
+    }, timeoutMs, 50);
+  } catch {
+    throw new Error(`retaining fixture directories: detached writer quiescence unknown (${diagnostic})`);
+  }
+}
+
+export async function cleanupAllAfterExit(timeoutMs = 30_000): Promise<void> {
+  await Promise.all([...liveChildren].map((child) => new Promise<void>((resolve, reject) => {
+    if (child.exitCode !== null || child.signalCode !== null) { resolve(); return; }
+    const timer = setTimeout(() => { child.off("exit", exited); reject(new Error("fixture child did not exit before cleanup")); }, 10_000);
+    const exited = () => { clearTimeout(timer); resolve(); };
+    child.once("exit", exited);
+    child.kill("SIGKILL");
+  })));
+  await Promise.all([...detachedFixtures].map(([root, count]) => waitForDetachedWriters(root, count, timeoutMs)));
+  detachedFixtures.clear();
+  cleanupAll();
+}
+
 export function cleanupAll(): void {
+  if (detachedFixtures.size || [...liveChildren].some((child) => child.exitCode === null && child.signalCode === null)) {
+    throw new Error("retaining fixture directories: writers require asynchronous cleanup");
+  }
   for (const child of liveChildren) {
     try {
       child.kill("SIGKILL");
@@ -71,8 +139,37 @@ export function cleanupAll(): void {
   liveChildren.clear();
   while (cleanupDirs.length) {
     const dir = cleanupDirs.pop();
-    if (dir) rmSync(dir, { recursive: true, force: true });
+    if (dir) rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
+}
+
+// Execute the installed bundle's actual module body, not its parallel src/ copy.
+// esbuild preserves module boundaries as comments; follow only chunks reachable from pi.extensions.
+export function bundledModuleUrl(module: string, names: string[]): string {
+  const pkg = JSON.parse(readFileSync(join(PI_SUBAGENTS_PACKAGE_DIR, "package.json"), "utf8"));
+  const pending = [...pkg.pi.extensions] as string[];
+  const seen = new Set<string>();
+  const sections: string[] = [];
+  while (pending.length) {
+    const relative = pending.pop()!;
+    if (seen.has(relative)) continue;
+    seen.add(relative);
+    const path = join(PI_SUBAGENTS_PACKAGE_DIR, relative);
+    const text = readFileSync(path, "utf8");
+    for (const match of text.matchAll(/(?:from\s*|import\s*\()"(\.\/[^"\n]+\.js)"/g)) {
+      pending.push(join(dirname(relative), match[1]));
+    }
+    const marker = `// src/${module}.ts\n`;
+    let start = text.indexOf(marker);
+    while (start >= 0) {
+      start += marker.length;
+      const end = text.indexOf("\n// src/", start);
+      sections.push(text.slice(start, end < 0 ? undefined : end));
+      start = text.indexOf(marker, start);
+    }
+  }
+  if (!sections.length) throw new Error(`installed bundle is missing ${module}`);
+  return `data:text/javascript;base64,${Buffer.from(sections.join("\n") + `\nexport { ${names.join(", ")} };`).toString("base64")}`;
 }
 
 export interface PiRpcSession {
@@ -186,12 +283,12 @@ export function startPiRpc(opts: StartPiOptions): PiRpcSession {
 
   function close(): Promise<void> {
     return new Promise((resolve) => {
-      liveChildren.delete(child);
       if (child.exitCode !== null || child.signalCode !== null) {
+        liveChildren.delete(child);
         resolve();
         return;
       }
-      child.once("exit", () => resolve());
+      child.once("exit", () => { liveChildren.delete(child); resolve(); });
       try {
         child.stdin.end();
       } catch {

@@ -34,10 +34,10 @@ test("every custom message type loop-pi sends to the model is marked", () => {
   };
   walk(EXTENSIONS);
   const source = files.map((f) => readFileSync(f, "utf8")).join("\n");
-  const constants = new Map([...source.matchAll(/export const ([A-Z_]+) = "([a-z-]+)";/g)].map((m) => [m[1], m[2]]));
+  const constants = new Map([...source.matchAll(/\bconst\s+([\w$]+)\s*=\s*["'](loop-[a-z-]+)["']/g)].map((m) => [m[1], m[2]]));
   const sent = new Set<string>();
   // Messages: sendMessage calls, nudge drafts (custom_message entries) and before_agent_start messages.
-  for (const m of source.matchAll(/customType:\s*(?:"([a-z-]+)"|([A-Z_]+))/g)) {
+  for (const m of source.matchAll(/customType:\s*(?:["']([a-z-]+)["']|([\w$]+))/g)) {
     const type = m[1] ?? constants.get(m[2]);
     if (type?.startsWith("loop-")) sent.add(type);
   }

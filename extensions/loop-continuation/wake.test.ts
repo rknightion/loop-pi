@@ -6,6 +6,8 @@ import { readFileSync } from "node:fs";
 import { after, test } from "node:test";
 import { SUBAGENT_MESSAGE_TYPES } from "../../node_modules/pi-subagents/src/tui/subagent-messages.js";
 import { PARENT_WAKE_TEXT, SUBAGENT_WAKE_TYPES, isParentWake, isSubagentWakeRun } from "./state.ts";
+import { bundledModuleUrl } from "../loop-guard/rpc-test-helpers.ts";
+import { createParentWake } from "../../node_modules/pi-subagents/src/shared/parent-wake.js";
 import { cleanupFixtures, fakePi, loopFixture } from "./test-fixture.ts";
 
 after(cleanupFixtures);
@@ -17,6 +19,20 @@ const plainStop = (pi: Awaited<ReturnType<typeof fakePi>>) =>
   );
 const nudged = (result: any) => Array.isArray(result?.entries) && result.entries.some((e: any) => e.customType === "loop-continuation");
 const PACKAGE = new URL("../../node_modules/pi-subagents/src/", import.meta.url);
+
+const bundledWake = await import(bundledModuleUrl("shared/parent-wake", ["createParentWake"]));
+
+for (const [label, createWake] of [["source", createParentWake], ["installed bundle", bundledWake.createParentWake]] as const) {
+  test(`${label} wakes an idle parent with the original notice and reserves one turn`, () => {
+    const sent: any[] = [];
+    const wake = createWake({ sendMessage: (...args: any[]) => sent.push(args) } as any, () => 100);
+    wake.bindSession({ isIdle: () => true, sessionManager: { getSessionId: () => label } } as any);
+    const notice = { customType: "subagent-notify", content: "lane finished", display: true };
+    wake.sendMessage(notice, { triggerTurn: true });
+    wake.sendMessage(notice, { triggerTurn: true });
+    assert.deepEqual(sent, [[notice, { triggerTurn: true }], [notice, { triggerTurn: false }]], "retain both notices, start only one turn without a user wake");
+  });
+}
 
 test("the installed pi-subagents wakes with a turn-starting notice and no user wake text", () => {
   const wake = readFileSync(new URL("shared/parent-wake.js", PACKAGE), "utf8");

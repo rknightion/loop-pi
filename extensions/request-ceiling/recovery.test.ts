@@ -4,9 +4,42 @@ import { createServer } from "node:http";
 import { writeFileSync, readFileSync, mkdirSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { cleanupAll, freshDir, startPiRpc, PI_SUBAGENTS_PACKAGE_DIR, waitForCondition } from "../loop-guard/rpc-test-helpers.ts";
+import { bundledModuleUrl, cleanupAll, freshDir, startPiRpc, PI_SUBAGENTS_PACKAGE_DIR, waitForCondition } from "../loop-guard/rpc-test-helpers.ts";
+import { installRecovery } from "./recovery.ts";
 const HERE = dirname(fileURLToPath(import.meta.url));
 after(cleanupAll);
+
+test("idle summary cancellation re-holds the shared wake reservation after compact_failed", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 1000 });
+  const handlers = new Map<string, any>();
+  const model = { provider: "fixture", id: "fixture", api: "openai-responses", baseUrl: "http://localhost", contextWindow: 100000 };
+  const ctx = {
+    model, sessionManager: { getSessionId: () => "idle-summary" }, isIdle: () => true,
+    abort: () => undefined,
+    modelRegistry: {
+      getRegisteredProviderConfig: () => ({}), getProvider: () => ({ auth: {} }),
+      find: () => model, getRegisteredNativeProvider: () => undefined, isUsingOAuth: () => false,
+    },
+  };
+  const sent: any[] = [];
+  const pi = { on: (name: string, fn: any) => handlers.set(name, fn), events: { on: () => undefined, emit: () => undefined }, sendMessage: (...args: any[]) => sent.push(args) };
+  installRecovery(pi as any, () => ({ loopPi: { retryRecovery: { providerIds: ["fixture"], episodeMs: 10000 } }, retry: { provider: { maxRetries: 0 } } }));
+  const fire = (name: string, event: any = {}) => handlers.get(name)(event, ctx);
+  fire("turn_start");
+  fire("before_provider_request", { payload: { input: [{ role: "user", content: "hello" }] } });
+  const failure = fire("message_end", { message: { role: "assistant", content: [], stopReason: "error", errorMessage: "maximum context length exceeded", usage: { input: 0, output: 0 } } });
+  assert.equal(failure.message.loopPiRecovery.reason, "native-compaction", "establish an eligible summary episode");
+  fire("agent_settled");
+  assert.equal(fire("session_before_compact", { preparation: { isSplitTurn: false, messagesToSummarize: [], turnPrefixMessages: [] } }), undefined, "idle summary is allowed");
+  fire("session_compact_failed", { aborted: true });
+  const { createParentWake } = await import(bundledModuleUrl("shared/parent-wake", ["createParentWake"]));
+  const wake = createParentWake(pi, () => Date.now());
+  wake.bindSession(ctx);
+  const notice = { customType: "subagent-notify", content: "finished" };
+  wake.sendMessage(notice, { triggerTurn: true });
+  assert.deepEqual(sent.at(-1), [notice, { triggerTurn: false }], "compact_failed must immediately retain the notice without waking the cancelled idle root");
+  fire("session_shutdown");
+});
 
 type BoundaryMode = "timeout-tool" | "mixed-tool" | "mixed-budget" | "server-budget" | "refusal" | "cancel" | "excluded-timeout" | "compaction-budget";
 interface BoundaryOptions {
@@ -127,7 +160,7 @@ async function boundaryCase(options: BoundaryOptions) {
   writeFileSync(fixture, `
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { createParentWake } from ${JSON.stringify(join(PI_SUBAGENTS_PACKAGE_DIR, "src/shared/parent-wake.js"))};
+import { createParentWake } from ${JSON.stringify(bundledModuleUrl("shared/parent-wake", ["createParentWake"]))};
 import { installRequestCeiling, installRetryBackoff } from ${JSON.stringify(join(HERE, "index.ts"))};
 export default function(pi) {
   const child = process.env.PI_SUBAGENT_CHILD === "1";

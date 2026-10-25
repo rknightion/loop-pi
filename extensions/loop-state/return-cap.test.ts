@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import loopState from "./index.ts";
+import { bundledModuleUrl } from "../loop-guard/rpc-test-helpers.ts";
 import { parseLaneReturn, returnEvent } from "./core.ts";
 import { capLaneAssistantMessage, capNotifyContent, capNotifyMessage, capText, completionInfo, HEAD_BYTES, LANE_RETURN_CAP_BYTES, RETURN_CAP_BYTES, TAIL_BYTES } from "./return-cap.ts";
 
@@ -20,6 +21,7 @@ const BLOCK = '```lane-return\n{"v":2,"lane":"L1","status":"complete","sha":null
 
 // Invoke the pinned package's real preview producer: do not reproduce its slice/line-end logic.
 const nativeOutput = await import(new URL("../../node_modules/pi-subagents/src/runs/shared/single-output.js", import.meta.url).href);
+const bundledOutput = await import(bundledModuleUrl("runs/shared/single-output", ["formatSavedOutputReference", "capSummaryOutputs", "capInlineOutput"]));
 const agentDir = new URL("../../home/agents/", import.meta.url);
 const serializedBudget = (policy: string) => {
   const match = /serialized fenced block at most ([\d,]+) UTF-16 code units/.exec(policy);
@@ -52,6 +54,11 @@ const nativePreview = (output: string, mode: "artifact" | "saved" | "summary") =
   const preview = mode === "summary"
     ? nativeOutput.capSummaryOutputs(`worker:\n${input}`, [{ agent: "worker", output: input, artifactPaths: { outputPath: fullPath } }])
     : nativeOutput.capInlineOutput(input, mode === "saved" ? { savedPath: fullPath } : { artifactPath: fullPath });
+  const bundledInput = mode === "saved" ? `${output}\n\n${bundledOutput.formatSavedOutputReference(fullPath, output).message}` : output;
+  const bundledPreview = mode === "summary"
+    ? bundledOutput.capSummaryOutputs(`worker:\n${bundledInput}`, [{ agent: "worker", output: bundledInput, artifactPaths: { outputPath: fullPath } }])
+    : bundledOutput.capInlineOutput(bundledInput, mode === "saved" ? { savedPath: fullPath } : { artifactPath: fullPath });
+  assert.equal(bundledPreview, preview, "installed bundle and source must preserve the same return/notice preview");
   assert.ok(preview.includes("…"), "exercise actual truncation, not a short-output bypass");
   assert.ok(preview.includes(fullPath), "native preview retains its full-output reference");
   assert.equal(readFileSync(fullPath, "utf8"), output, "full copy is unchanged");
@@ -306,8 +313,11 @@ test("the loop-state extension caps with the saved output recorded from the asyn
 test("installed pi-subagents clears a pending notice only on an identical stored notice", async () => {
   const { unreplayedPendingNotices } = await import(new URL("../../node_modules/pi-subagents/src/runs/background/notify.js", import.meta.url).href);
   const pending = { type: "custom", customType: "subagent-notify-pending", data: { message: { customType: "subagent-notify", content: "big" } } };
-  assert.equal(unreplayedPendingNotices([pending, { type: "custom_message", customType: "subagent-notify", content: "capped" }]).length, 1);
-  assert.equal(unreplayedPendingNotices([pending, { type: "custom_message", customType: "subagent-notify", content: "big" }]).length, 0);
+  const bundledNotify = await import(bundledModuleUrl("runs/background/notify", ["unreplayedPendingNotices"]));
+  for (const [label, pendingNotices] of [["source", unreplayedPendingNotices], ["installed bundle", bundledNotify.unreplayedPendingNotices]] as const) {
+    assert.equal(pendingNotices([pending, { type: "custom_message", customType: "subagent-notify", content: "capped" }]).length, 1, `${label}: a capped preview cannot acknowledge the full notice`);
+    assert.equal(pendingNotices([pending, { type: "custom_message", customType: "subagent-notify", content: "big" }]).length, 0, `${label}: the identical stored notice acknowledges it`);
+  }
 });
 
 test("a replayed pending notice is stored whole and capped only in the model request", () => {
