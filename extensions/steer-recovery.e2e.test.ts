@@ -11,13 +11,13 @@ import type { AddressInfo } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
-import { cleanupAll, freshDir, PI_SUBAGENTS_PACKAGE_DIR, ROOT_EXTENSION, startPiRpc, waitForCondition, type PiRpcSession } from "./loop-guard/rpc-test-helpers.ts";
+import { cleanupAllAfterExit, expectDetachedRuns, freshDir, PI_SUBAGENTS_PACKAGE_DIR, ROOT_EXTENSION, startPiRpc, waitForCondition, waitForDetachedWriters, type PiRpcSession } from "./loop-guard/rpc-test-helpers.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
 const BLOCK_EXTENSION = join(HERE, "test-support/block-sync-extension.ts");
 const CHILD_MARKER = "STEER_PROBE_CHILD_PROMPT";
-after(cleanupAll);
+after(() => cleanupAllAfterExit(60_000));
 
 interface Peer {
   server: Server;
@@ -81,7 +81,7 @@ async function startPeer(childBlockMs: number, childFirstDelayMs = 0): Promise<P
       const steer = /STEER (\S+?)(?: NORECOVERY)?\\?"/.exec(prompt);
       const resume = /RESUME (\S+?)\\?"/.exec(prompt);
       if (prompt.includes("LAUNCH")) item = call("subagent", { agent: "scout", task: "CHILD_TASK", async: true, worktree: false });
-      else if (steer) item = call("subagent", { action: "steer", id: steer[1], message: "STEER_MSG", ...(prompt.includes("NORECOVERY") ? { options: { steeringRecovery: false } } : {}) });
+      else if (steer) item = call("subagent", { action: "steer", id: steer[1], message: "STEER_MSG", options: { steeringRecovery: !prompt.includes("NORECOVERY") } });
       else if (resume) item = call("subagent", { action: "resume", id: resume[1], message: "RESUME_MSG" });
       else item = text("idle");
     }
@@ -97,7 +97,7 @@ async function startPeer(childBlockMs: number, childFirstDelayMs = 0): Promise<P
   return peer;
 }
 
-interface Rig { peer: Peer; root: PiRpcSession; runsDir: string; cwd: string; close(): Promise<void> }
+interface Rig { peer: Peer; root: PiRpcSession; runsDir: string; tempRoot: string; expectedRuns: number; cwd: string; close(): Promise<void> }
 
 async function startRig(childBlockMs: number, opts: { loopGuard?: boolean; childFirstDelayMs?: number } = {}): Promise<Rig> {
   const peer = await startPeer(childBlockMs, opts.childFirstDelayMs);
@@ -120,18 +120,28 @@ async function startRig(childBlockMs: number, opts: { loopGuard?: boolean; child
     extraArgs: ["--provider", "fixture", "--model", "fixture"],
     sessionArgs: [], agentDir: home, subagentTempRoot: tempRoot, cwd, fauxScriptPath: "",
   });
-  return {
-    peer, root, cwd, runsDir: join(tempRoot, "async-subagent-runs"),
+  const rig: Rig = {
+    peer, root, cwd, tempRoot, expectedRuns: 0, runsDir: join(tempRoot, "async-subagent-runs"),
     async close() {
       await root.close();
-      peer.server.closeAllConnections();
-      await new Promise<void>((resolve) => peer.server.close(() => resolve()));
+      // Native terminal receipts, writer closure and session-lease release precede cleanup.
+      // On uncertainty cleanupAllAfterExit retains every directory for diagnosis.
+      try { await waitForDetachedWriters(tempRoot, rig.expectedRuns, 60_000); }
+      finally {
+        peer.server.closeAllConnections();
+        await new Promise<void>((resolve) => peer.server.close(() => resolve()));
+      }
     },
   };
+  return rig;
 }
 
 let promptSeq = 0;
 async function prompt(rig: Rig, message: string, timeoutMs = 60_000): Promise<string> {
+  if (message === "LAUNCH" || message.startsWith("RESUME ")) {
+    rig.expectedRuns += 1;
+    expectDetachedRuns(rig.tempRoot, rig.expectedRuns);
+  }
   const before = rig.peer.rootOutputs.length;
   const ends = rig.root.events.filter((e) => e.type === "agent_end").length;
   rig.root.send({ type: "prompt", id: `p${++promptSeq}`, message });
@@ -187,7 +197,10 @@ test("timeout: a steer whose pause is confirmed after 15 s strands the child pau
     assert.match(out, /did not (reach|confirm) (a )?confirmed paused state|did not confirm a paused state/);
     // The interrupt is already in the run's inbox: when the block ends the runner pauses the child.
     const paused = await waitForCondition(() => { const s = status(rig, id); return s.state === "paused" && s.endedAt ? s : undefined; }, 60_000);
-    console.log(`[timeout] child paused ${paused.endedAt - started} ms after the steer; claim present=${existsSync(claimPath(rig, id))}`);
+    console.log(`[timeout] child paused ${paused.endedAt - started} ms after the steer; claim present=${existsSync(claimPath(rig, id))}; state=${paused.state}; runs=${runIds(rig).length}`);
+    // The no-strand removal hypothesis fails on these pins: recovery is still unsafe.
+    assert.equal(paused.state, "paused");
+    assert.ok(elapsed >= 15_000 && elapsed < 30_000, `recovery timed out before the slow boundary (${elapsed} ms)`);
     assert.equal(runIds(rig).length, 1, "no replacement was launched");
     assert.ok(!rig.peer.childInputs.some((text) => text.includes("STEER_MSG")), "the steering message was never applied");
     // Explicit resume continues the paused child; its saved work survives.
@@ -195,6 +208,10 @@ test("timeout: a steer whose pause is confirmed after 15 s strands the child pau
     console.log(`[timeout] resume: ${resumed}`);
     await waitForCondition(() => (runIds(rig).length === 2 ? true : undefined), 30_000);
     await waitForCondition(() => (rig.peer.childInputs.some((text) => text.includes("RESUME_MSG")) ? true : undefined), 30_000);
+    const revivedId = runIds(rig).find((runId) => runId !== id)!;
+    await waitForCondition(() => (status(rig, revivedId).state === "complete" ? true : undefined), 30_000);
+    assert.equal(status(rig, id).state, "paused", "only explicit resume replaces the stranded run");
+    console.log(`[timeout] after explicit resume: source=${status(rig, id).state}; revived=${status(rig, revivedId).state}; runs=${runIds(rig).length}`);
     assert.ok(existsSync(join(rig.cwd, "saved-work.txt")), "saved work survives the strand");
   } finally {
     await rig.close();
@@ -218,7 +235,7 @@ test("fix: steeringRecovery false never interrupts; the steer is delivered when 
   }
 });
 
-test("loop-guard: a plain root steer is sent without recovery, so a slow child is never stranded", { timeout: 180_000 }, async () => {
+test("loop-guard: even an explicit recovery request is disabled, so a slow child is never stranded", { timeout: 180_000 }, async () => {
   const rig = await startRig(30_000, { loopGuard: true });
   try {
     const id = await launchBlockedChild(rig);
@@ -228,7 +245,9 @@ test("loop-guard: a plain root steer is sent without recovery, so a slow child i
     await waitForCondition(() => (status(rig, id).state === "complete" ? true : undefined), 90_000);
     assert.ok(rig.peer.childInputs.some((text) => text.includes("STEER_MSG")), "the steer reached the child at its boundary");
     assert.equal(existsSync(claimPath(rig, id)), false);
+    assert.equal(existsSync(join(rig.runsDir, id, "control", "interrupt.json")), false);
     assert.equal(runIds(rig).length, 1, "no replacement");
+    console.log(`[guard] terminal state=${status(rig, id).state}; runs=${runIds(rig).length}; steer_seen=true`);
   } finally {
     await rig.close();
   }

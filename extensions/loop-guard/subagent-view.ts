@@ -53,7 +53,8 @@ export function hasSubagentField(input: unknown, key: string): boolean {
 
 /** A native `steer` that misses its 3 s acknowledgement makes pi-subagents interrupt the child and
  *  wait a fixed 15 s for the pause before launching a replacement. A child that pauses later is left
- *  paused with the message unapplied (upstream issue 2956). Steer calls therefore always carry
+ *  paused with the message unapplied (upstream issue 2956). The native slow-boundary e2e still
+ *  reproduces this with pi-subagents 0.82.1 / pi 1.4.0. Steer calls therefore always carry
  *  `steeringRecovery: false`: the message stays queued for the child's next boundary and nothing is
  *  interrupted. pi-subagents' own RPC and slash steering force the same value. */
 export function disableSteeringRecovery(input: Record<string, unknown>): void {
