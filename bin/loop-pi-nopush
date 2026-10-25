@@ -4,32 +4,37 @@
 set -eu
 # pi-subagents records no boot id for a launcher run, since a broker launcher may start the runner
 # under another kernel. This wrapper execs on the same machine, so it adds the boot id pi-subagents
-# itself reads (sysctl kern.bootsessionuuid on macOS, /proc/sys/kernel/random/boot_id on Linux) to
-# the runner config that is its last argument. The runner then records it with its pid, and a pid
-# left from before a reboot reads as dead instead of holding a run slot. Any failure leaves the
-# config as it was.
-boot_id() {
-  if [ -r /proc/sys/kernel/random/boot_id ]; then
-    head -n 1 /proc/sys/kernel/random/boot_id
-  elif [ -x /usr/sbin/sysctl ]; then
-    /usr/sbin/sysctl -n kern.bootsessionuuid
-  fi
-}
+# itself reads (/proc/sys/kernel/random/boot_id on Linux, sysctl kern.bootsessionuuid on macOS,
+# bounded at one second as pi bounds it) to the runner config that is its last argument. The
+# runner then records it with its pid, and a pid left from before a reboot reads as dead instead
+# of holding a run slot. Any failure leaves the config as it was. With a pi binary host the
+# config arrives in PI_SUBAGENT_RUNNER_CONFIG and "$1" is pi, not node: that form is left alone.
 if [ "$#" -ge 2 ]; then
   for config do :; done
   case $config in
     */async-cfg-*.json)
-      boot=$(boot_id 2>/dev/null || true)
-      if [ -n "$boot" ] && [ -f "$config" ] && [ ! -L "$config" ]; then
+      if [ -f "$config" ] && [ ! -L "$config" ]; then
         NODE_OPTIONS='' "$1" -e '
-          const fs = require("node:fs"), path = require("node:path");
-          const [file, boot] = process.argv.slice(1);
+          const fs = require("node:fs"), path = require("node:path"), { execFileSync } = require("node:child_process");
+          const file = process.argv[1];
+          let boot;
+          if (process.platform === "linux") boot = fs.readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+          else if (process.platform === "darwin") boot = execFileSync("sysctl", ["-n", "kern.bootsessionuuid"], { encoding: "utf8", timeout: 1000, stdio: ["ignore", "pipe", "ignore"], env: { PATH: "/usr/sbin:/sbin:/usr/bin:/bin" } }).trim();
+          if (!boot) process.exit(0);
           const config = JSON.parse(fs.readFileSync(file, "utf8"));
           if (!config || typeof config !== "object" || Array.isArray(config) || config.bootId !== undefined) process.exit(0);
           const temporary = path.join(path.dirname(file), "." + path.basename(file) + "." + process.pid + ".tmp");
-          fs.writeFileSync(temporary, JSON.stringify({ ...config, bootId: boot }), { mode: 0o600, flag: "wx" });
-          fs.renameSync(temporary, file);
-        ' "$config" "$boot" >/dev/null 2>&1 || true
+          const fd = fs.openSync(temporary, "wx", 0o600);
+          try {
+            fs.writeFileSync(fd, JSON.stringify({ ...config, bootId: boot }));
+            fs.closeSync(fd);
+            fs.renameSync(temporary, file);
+          } catch (error) {
+            try { fs.closeSync(fd); } catch {}
+            fs.rmSync(temporary, { force: true });
+            throw error;
+          }
+        ' "$config" >/dev/null 2>&1 || true
       fi
       ;;
   esac

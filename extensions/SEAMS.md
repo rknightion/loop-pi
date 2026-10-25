@@ -122,10 +122,13 @@ public statement of those contracts.
   `checkRecordedPidLiveness`), but omits it for launcher runs (`async-execution.js:440`), since a
   broker may start the runner under another kernel. `loop-pi-nopush` execs on the same machine, so
   before exec it adds the boot id pi-subagents reads (`kern.bootsessionuuid` on macOS,
-  `/proc/sys/kernel/random/boot_id` on Linux) to the runner config named by its last argument when
-  that is a regular `async-cfg-*.json` with no `bootId`. The runner primes it from the config
+  `/proc/sys/kernel/random/boot_id` on Linux; the `sysctl` read is bounded at one second, as pi
+  bounds it) to the runner config named by its last argument when that is a regular
+  `async-cfg-*.json` with no `bootId`. The runner primes it from the config
   (`subagent-runner-bootstrap.js:108`) and writes it into `status.json` with its pid. Any failure
-  leaves the config as it was, which is the upstream behaviour.
+  leaves the config as it was and removes the step's temporary file; that is the upstream
+  behaviour. A pi binary host passes the config in `PI_SUBAGENT_RUNNER_CONFIG` and execs the pi
+  binary as `$1`, so the wrapper leaves that form alone: never run `"$1" -e` against it.
 - **Workflow auto-resume (pi-subagents 0.82.1):** the home sets `autoResume: false`. 0.82.0
   relaunches an interrupted top-level workflow on session reopen through the executor, outside the
   model `subagent` call loop-guard checks (`src/extension/index.js:953`). loop-guard refuses
@@ -135,9 +138,12 @@ public statement of those contracts.
   appended without a turn (`index.js:972`), with the usual `subagent:async-complete` event, so
   loop-state records the lane's `return` (`loop-state/reopen-delivery-e2e.test.ts`). 0.81.0 never
   reported it.
-- **Package skills:** the home loads pi-subagents with `"skills": []` in its `packages` entry. Its
-  bundled skills teach `workflow` launches and `bg_wait`, which loop-guard refuses; the root's own
-  `subagent` description and policy cover delegation (`loop-guard/home-package-skills.test.ts`).
+- **Package skills:** the home loads pi-subagents with `"skills": []` in its `packages` entry, so
+  neither the root nor a senior lane gets its bundled `pi-subagents` or `council-mode` skill. They
+  are general delegation guidance (single, async, resume, steer, review fanout) that also teaches
+  `workflow` launches, `bg_wait` and `async: false`, which loop-guard refuses or the launcher
+  excludes. Delegation is defined by the `subagent` tool description, the home policy and the lane
+  policy instead (`loop-guard/home-package-skills.test.ts`).
 
 ## Scratch candidate installation
 

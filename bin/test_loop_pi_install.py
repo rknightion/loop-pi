@@ -87,6 +87,7 @@ class NopushTests(unittest.TestCase):
 
     def test_wrapper_records_this_machines_boot_id_in_the_runner_config(self):
         import shutil
+        import sys
         node = shutil.which("node")
         self.assertIsNotNone(node, "node is required to run the wrapper's config step")
         boot_module = (HERE.parent / "node_modules/pi-subagents/src/runs/background/boot-id.js").as_uri()
@@ -128,6 +129,18 @@ class NopushTests(unittest.TestCase):
                                     capture_output=True, text=True, timeout=15)
             self.assertEqual(result.returncode, 23, result.stderr)
             self.assertEqual(bad.read_text(), "{not json")
+            if sys.platform == "darwin":
+                # A failed replace leaves the config as it was and no temporary file behind.
+                locked = root / "async-cfg-locked.json"
+                locked.write_text('{"id":"run-5"}')
+                subprocess.run(["chflags", "uchg", str(locked)], check=True, timeout=15)
+                try:
+                    result = subprocess.run([str(HERE / "loop-pi-nopush"), node, "-e", reader, str(locked)],
+                                            capture_output=True, text=True, timeout=15)
+                finally:
+                    subprocess.run(["chflags", "nouchg", str(locked)], check=True, timeout=15)
+                self.assertEqual(json.loads(result.stdout), {"id": "run-5"})
+                self.assertEqual([p.name for p in root.iterdir() if p.name.endswith(".tmp")], [])
 
     def test_installed_wrapper_config_agent_set_and_drift_in_subprocess(self):
         import sys
