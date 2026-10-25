@@ -64,15 +64,23 @@ function fakeCtx(cwd: string, sessionId = "test-session") {
 }
 
 let agentDir: string;
+const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+const previousRunDir = process.env.LOOP_PI_RUN_DIR;
 
 before(async () => {
   agentDir = await mkdtemp(join(tmpdir(), "loop-guard-root-test-"));
   await cp(TEMPLATES_DIR, join(agentDir, "scripts"), { recursive: true });
   process.env.PI_CODING_AGENT_DIR = agentDir;
+  // Ordinary fake contexts must not inherit an enclosing armed loop. Armed
+  // cases below opt into their own run directory and restore this baseline.
+  delete process.env.LOOP_PI_RUN_DIR;
 });
 
 after(async () => {
-  delete process.env.PI_CODING_AGENT_DIR;
+  if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+  else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+  if (previousRunDir === undefined) delete process.env.LOOP_PI_RUN_DIR;
+  else process.env.LOOP_PI_RUN_DIR = previousRunDir;
   await rm(agentDir, { recursive: true, force: true });
 });
 
