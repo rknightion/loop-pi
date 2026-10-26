@@ -1156,6 +1156,91 @@ def load_audit_module():
     return module
 
 
+class FetchedTagTests(unittest.TestCase):
+    """A local tag that is new since the before-snapshot but already sat on a remote, at the same
+    target, in that snapshot was fetched, not created. Anything else new stays UNGRANTED."""
+
+    def setUp(self):
+        self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="loop-pi-audit-fetched-test-"))
+        self.repo, self.remote = init_repo_with_remote(self.tmp, "repo")
+        git(self.remote, "symbolic-ref", "HEAD", "refs/heads/main")
+        self.other = os.path.join(self.tmp, "other")
+        subprocess.run([GIT, "clone", "--no-local", "-q", self.remote, self.other], check=True, timeout=60)
+        git(self.other, "config", "user.email", "bot@example.com")
+        git(self.other, "config", "user.name", "bot")
+        self.env = {"PATH": make_bin_with_gh_stub(self.tmp)}
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def remote_tag(self, name, annotated=False):
+        git(self.other, "tag", *(["-a", "-m", "release"] if annotated else []), name)
+        git(self.other, "push", "-q", "origin", f"refs/tags/{name}")
+
+    def compare(self, act):
+        before, after = (os.path.join(self.tmp, f"{phase}.json") for phase in ("before", "after"))
+        snapshot(before, self.repo, env_overrides=self.env)
+        act()
+        snapshot(after, self.repo, env_overrides=self.env)
+        return run_audit("compare", before, after, env_overrides=self.env)
+
+    def lines(self, result, needle):
+        return [line for line in result.stdout.splitlines() if needle in line]
+
+    def test_fetching_a_tag_the_remote_already_had_is_not_a_violation(self):
+        for annotated in (False, True):
+            with self.subTest(annotated=annotated):
+                self.tearDown()
+                self.setUp()
+                self.remote_tag("v0.9.0", annotated)
+                result = self.compare(lambda: git(self.repo, "fetch", "-q", "--tags", "origin"))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertNotIn("UNGRANTED", result.stdout)
+                added = [line for line in self.lines(result, "tag added: refs/tags/v0.9.0 ") if " note: " not in line]
+                self.assertEqual(len(added), 1, result.stdout)
+                self.assertIn("[FETCHED]", added[0])
+                self.assertTrue(any("fetched, not created" in line and "'origin'" in line
+                                    for line in self.lines(result, "tag added: refs/tags/v0.9.0 ")), result.stdout)
+
+    def test_a_new_local_tag_the_remote_never_had_is_ungranted(self):
+        result = self.compare(lambda: git(self.repo, "tag", "v1"))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("[UNGRANTED]", self.lines(result, "tag added: refs/tags/v1 ")[0])
+        self.assertNotIn("FETCHED", result.stdout)
+
+    def test_a_local_tag_with_the_remote_tags_name_at_another_target_is_ungranted(self):
+        self.remote_tag("v1")
+        def act():
+            git(self.repo, "commit", "--allow-empty", "-q", "-m", "local only")
+            git(self.repo, "tag", "v1")
+        result = self.compare(act)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("[UNGRANTED]", self.lines(result, "tag added: refs/tags/v1 ")[0])
+        self.assertNotIn("FETCHED", result.stdout)
+
+    def test_a_local_tag_that_moved_onto_the_remote_target_is_never_fetched(self):
+        # Only a tag that was absent counts; one that existed and now points where the remote's does is a move.
+        git(self.other, "commit", "--allow-empty", "-q", "-m", "remote work")
+        git(self.other, "push", "-q", "origin", "main")
+        self.remote_tag("v1")
+        target = git(self.other, "rev-parse", "HEAD").stdout.strip()
+        git(self.repo, "tag", "v1")
+        def act():
+            git(self.repo, "fetch", "-q", "origin", "main")
+            git(self.repo, "tag", "-f", "v1", target)
+        result = self.compare(act)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("tag moved: refs/tags/v1 ", result.stdout)
+        self.assertIn("[UNGRANTED]", self.lines(result, "tag moved: refs/tags/v1 ")[0])
+        self.assertNotIn("FETCHED", result.stdout)
+
+    def test_a_tag_created_locally_and_pushed_is_still_ungranted_on_both_sides(self):
+        result = self.compare(lambda: (git(self.repo, "tag", "v2"), git(self.repo, "push", "-q", "origin", "v2")))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("[UNGRANTED]", self.lines(result, "remote 'origin' ref added: refs/tags/v2 ")[0])
+        self.assertIn("[UNGRANTED]", self.lines(result, "tag added: refs/tags/v2 ")[0])
+
+
 class CharterAuthorityParsingTests(unittest.TestCase):
     """What the charter's `authority:` block grants. Only that block counts, and only a clause that
     names release-please without a negation."""
@@ -1411,6 +1496,121 @@ class ReleaseAuthorityTests(unittest.TestCase):
         self.assertIn(f"commit {sha[:12]} is a release-please merge", result.stdout)
         self.assertIn("[UNGRANTED]", self.line(result, "ref added: refs/tags/v0.4.0 "))
         self.assertIn("[UNGRANTED]", self.line(result, "release added: v0.4.0"))
+
+    def state_log(self, digest, name="state.jsonl", events=None):
+        """A state log holding the open event continuation appends at arm (or the given events)."""
+        path = os.path.join(self.run_dir, name)
+        events = [{"ev": "open", "by": "ext", "charter_sha256": digest, "root": "llm"}] if events is None else events
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("".join(json.dumps(e) + "\n" for e in events))
+        return path
+
+    def open_line(self, digest, by="ext"):
+        return json.dumps({"ev": "open", "by": by, "charter_sha256": digest}).encode()
+
+    def raw_state_log(self, data):
+        # A fresh file per call: a table of cases builds every log before any case runs.
+        self.raw_logs = getattr(self, "raw_logs", 0) + 1
+        path = os.path.join(self.run_dir, f"raw-{self.raw_logs}.jsonl")
+        with open(path, "wb") as fh:
+            fh.write(data)
+        return path
+
+    def test_the_digest_can_come_from_the_state_log_the_harness_wrote(self):
+        sha = self.flow()
+        charter = self.in_repo()
+        log = self.state_log(charter[3])
+        result = self.closeout("--charter", charter[1], "--state-log", log)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"commit {sha[:12]} is a release-please merge", result.stdout)
+        self.assertNotIn("UNGRANTED", result.stdout)
+        # Bytes after the open event are never decoded.
+        tail = self.raw_state_log(json.dumps({"ev": "open", "by": "ext", "charter_sha256": charter[3]}).encode() + b"\n\xff\xfe\n")
+        after = self.closeout("--charter", charter[1], "--state-log", tail)
+        self.assertEqual(after.returncode, 0, after.stdout + after.stderr)
+        # An explicit digest that agrees changes nothing.
+        agreed = self.closeout(*charter, "--state-log", log)
+        self.assertEqual(agreed.returncode, 0, agreed.stdout + agreed.stderr)
+
+    def test_a_wrong_charter_hash_fails_closed(self):
+        self.flow()
+        charter = self.in_repo()
+        wrong = "0" * 64
+        cases = {
+            "an explicit digest that does not match": (["--charter-sha256", wrong], "no longer matches"),
+            "a state log naming another digest": (["--state-log", self.state_log(wrong, "other.jsonl")],
+                                                  "no longer matches"),
+            "a state log without an open event": (["--state-log", self.state_log("", "none.jsonl", events=[{"ev": "dispatch"}])],
+                                                  "has no open event"),
+            "an explicit digest that differs from the log": (["--charter-sha256", wrong,
+                                                              "--state-log", self.state_log(charter[3], "good.jsonl")],
+                                                             "differs"),
+            "an unreadable state log": (["--state-log", os.path.join(self.tmp, "absent.jsonl")], "cannot read state log"),
+            "a state log with bytes that are not UTF-8 before the open event": (
+                ["--state-log", self.raw_state_log(b"\xff\xfe\n" + self.open_line(charter[3]))],
+                "cannot parse line 1"),
+            "a malformed open digest": (["--state-log", self.state_log("not-a-digest", "bad.jsonl")],
+                                        "no valid charter_sha256"),
+            "an open event a root appended": (["--state-log", self.raw_state_log(self.open_line(charter[3], "root"))],
+                                              "not written by the harness"),
+            "a root's open ahead of the harness's": (
+                ["--state-log", self.raw_state_log(self.open_line(charter[3], "root") + b"\n" + self.open_line(charter[3]))],
+                "not written by the harness"),
+            "a wrong digest first and the right one second": (
+                ["--state-log", self.raw_state_log(self.open_line(wrong) + b"\n" + self.open_line(charter[3]))],
+                "no longer matches"),
+            "a BOM-prefixed line before the open event": (
+                ["--state-log", self.raw_state_log(b"\xef\xbb\xbf" + self.open_line(charter[3]))], "cannot parse line 1"),
+            "an unparseable line before the open event": (
+                ["--state-log", self.raw_state_log(b"{not json\n" + self.open_line(charter[3]))], "cannot parse line 1"),
+            "a line before the open event that is not an event": (
+                ["--state-log", self.raw_state_log(b"[1]\n" + self.open_line(charter[3]))], "is not an event"),
+            "nesting deep enough to exhaust the parser before the open event": (
+                ["--state-log", self.raw_state_log(b"[" * 400000 + b"\n" + self.open_line(charter[3]))],
+                "cannot parse line 1"),
+        }
+        for label, (args, why) in cases.items():
+            with self.subTest(label):
+                result = self.closeout("--charter", charter[1], *args)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn(why, result.stderr)
+                self.assertIn("the charter grants nothing", result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertIn("[UNGRANTED]", self.line(result, "ref added: refs/tags/v0.4.0 "))
+
+    def test_a_charter_edited_after_arm_fails_closed_under_a_state_log(self):
+        self.flow()
+        charter = self.in_repo(edit_after=True)
+        result = self.closeout("--charter", charter[1], "--state-log", self.state_log(charter[3]))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("no longer matches", result.stderr)
+
+    def test_an_unrelated_main_move_is_ungranted_even_with_a_verified_charter(self):
+        self.root_push(self.commit(self.repo, "f.txt", "root work"))
+        late = self.commit(self.other, "g.txt", "unrelated work")
+        git(self.other, "push", "-q", "origin", "main")
+        charter = self.in_repo()
+        result = self.closeout("--charter", charter[1], "--state-log", self.state_log(charter[3]))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertTrue(self.unaccounted_note(result, late), result.stdout)
+        self.assertIn("[UNGRANTED]", self.line(result, "ref moved: refs/heads/main "))
+
+    def test_a_tag_fetched_from_before_the_run_does_not_hide_or_spoil_the_release(self):
+        # The remote already had v0.3.0 when the run began; a fetch at the end brings it in beside
+        # the run's own release.
+        git(self.other, "tag", "v0.3.0")
+        git(self.other, "push", "-q", "origin", "refs/tags/v0.3.0")
+        os.remove(os.path.join(self.run_dir, "audit-before.json"))
+        self.assertEqual(run_audit("begin", self.repo, env_overrides=self.env).returncode, 0)
+        self.flow()
+        charter = self.in_repo()
+        result = self.closeout("--charter", charter[1], "--state-log", self.state_log(charter[3]))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("UNGRANTED", result.stdout)
+        self.assertIn("[FETCHED]", self.line(result, "tag added: refs/tags/v0.3.0 "))
+        self.assertIn("[GRANTED]", self.line(result, "tag added: refs/tags/v0.4.0 "))
+        self.assertIn("[GRANTED]", self.line(result, "release added: v0.4.0"))
+
 
     def test_removing_the_release_branch_needs_an_accounted_release_merge(self):
         self.root_push(self.commit(self.repo, "f.txt", "root work"))

@@ -189,6 +189,10 @@ evidence, judges a move of a remote's default branch commit by commit:
   granted tag; and the deletion of a `release-please--*` branch once such a merge is accounted for.
   Anything else on the repository, including a release-shaped commit that lacks the manifest change,
   a tag on another commit and a moved or added release branch, stays `UNGRANTED`.
+  `--state-log FILE` replaces `--charter-sha256`: the digest is the `charter_sha256` of the log's first
+  `open` event, which must be `by: ext`; any other state of the log grants nothing. A new local tag
+  whose name and target a remote already had in the before-snapshot was fetched, not created, and is
+  reported `FETCHED` without failing the audit.
 - Another snapshotted remote whose unchanged URL is byte-identical to the canonical repository's
   (no scheme, user, host-case or path normalisation) receives only that canonical's exact
   `actor: root` `old..new` ranges. Only absolute URLs qualify (`scheme://`, scp-like `host:path`,

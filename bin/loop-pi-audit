@@ -49,6 +49,17 @@ evidence keep the old behaviour: no default-branch move is accounted for. Protoc
 retained in the before-snapshot once observed, and an explicit --push-log also requires it, so
 deleting the marker cannot downgrade those audits.
 
+`--state-log FILE` (on `closeout` and `compare`) replaces typing the digest: it is the `charter_sha256`
+of the first `open` event in the run's state log, which must carry `by: ext` (the harness writes it at
+arm; a root's own append is `by: root`). A log that is unreadable, has any non-empty line before that
+event which is not a UTF-8 JSON object, has no `open` event, a first one not written by the harness or
+without a valid digest, or a `--charter-sha256` that disagrees with it, grants nothing (fail closed, a
+warning on stderr).
+
+A local tag that is new since the before-snapshot but whose name and target already appear in that
+snapshot's refs for some remote was fetched, not created: it is reported as FETCHED and is not a
+violation. A new local tag with no such remote counterpart, or one at a different target, is UNGRANTED.
+
 Endpoint-equivalent aliases: a push-log line whose `actor` is `root`, whose `old` is an exact SHA
 and whose `repo` is itself a snapshot key, with that remote's URL unchanged between snapshots, also
 covers the same ref in any other snapshotted remote whose unchanged URL is byte-identical. No URL
@@ -346,17 +357,20 @@ def cmd_closeout(args: argparse.Namespace) -> int:
     run_dir = run_dir_of(args)
     with open(os.path.join(run_dir, ".audit.lock"), "w", encoding="utf-8") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        return closeout_locked(run_dir, args.push_log, args.charter, args.charter_sha256)
+        return closeout_locked(run_dir, args.push_log, args.charter, args.charter_sha256,
+                              args.state_log)
 
 
 PUSH_LOG_HELP = "Push log (default: <run-dir>/push-log.jsonl)."
 CHARTER_HELP = ("The run's charter. Its `authority:` entries that name release-please grant that repository's "
                 "release merge, version tag, release and release-branch deletion.")
 CHARTER_SHA_HELP = "sha256 of the charter as frozen at arm; a charter that no longer hashes to it grants nothing."
+STATE_LOG_HELP = ("The run's state log. Its first `open` event holds the charter sha256 frozen at arm, used as "
+                  "the digest for --charter (an explicit --charter-sha256 must agree).")
 
 
 def closeout_locked(run_dir: str, push_log: str | None = None, charter: str | None = None,
-                    charter_sha256: str | None = None) -> int:
+                    charter_sha256: str | None = None, state_log: str | None = None) -> int:
     before_path = os.path.join(run_dir, "audit-before.json")
     with open(before_path, "r", encoding="utf-8") as fh:
         repos = sorted(json.load(fh)["repos"])
@@ -364,7 +378,8 @@ def closeout_locked(run_dir: str, push_log: str | None = None, charter: str | No
     write_json(after_path, {"taken_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                             "repos": {repo: snapshot_repo(repo) for repo in repos}})
     return cmd_compare(argparse.Namespace(before=before_path, after=after_path, push_log=push_log,
-                                          run_dir=run_dir, charter=charter, charter_sha256=charter_sha256))
+                                          run_dir=run_dir, charter=charter, charter_sha256=charter_sha256,
+                                          state_log=state_log))
 
 
 def diff_ref_map(before: dict, after: dict) -> list[tuple[str, str, str, str]]:
@@ -630,6 +645,52 @@ def read_release_authority(path: str | None, sha256: str | None) -> tuple[dict |
     folder = os.path.dirname(os.path.realpath(path))
     charter_repo = os.path.dirname(folder) if os.path.basename(folder) == "codex" else None
     return {"grants": release_grant_entries(data.decode("utf-8", "replace")), "charter_repo": charter_repo}, None
+
+
+def state_log_charter_sha256(path: str | None) -> tuple[str | None, str | None]:
+    """(digest, None) from the first `open` event of the state log, or (None, why). The log is written
+    by the harness at arm, so the digest is the one frozen then, not one the root computed later."""
+    if not path:
+        return None, None
+    try:
+        with open(path, "rb") as fh:
+            raw_lines = fh.read().splitlines()
+    except OSError as exc:
+        return None, f"cannot read state log {path}: {exc}"
+    for number, raw in enumerate(raw_lines, 1):
+        if not raw.strip():
+            continue
+        # Decoded record by record and only up to the first open event, so bytes after it never matter.
+        # Any record before it that is not a UTF-8 JSON object (a BOM, a truncated line, nesting deep
+        # enough to exhaust the parser) leaves the log without authority; none is skipped.
+        try:
+            event = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError, RecursionError) as exc:
+            return None, f"cannot parse line {number} of state log {path}: {type(exc).__name__}"
+        if not isinstance(event, dict):
+            return None, f"line {number} of state log {path} is not an event"
+        if event.get("ev") == "open":
+            # The harness appends it with --by ext; loop-state gives a root's append by=root.
+            if event.get("by") != "ext":
+                return None, f"the first open event in {path} was not written by the harness"
+            digest = event.get("charter_sha256")
+            if isinstance(digest, str) and re.fullmatch(r"[0-9a-fA-F]{64}", digest):
+                return digest.lower(), None
+            return None, f"the open event in {path} carries no valid charter_sha256"
+    return None, f"{path} has no open event"
+
+
+def frozen_charter_digest(sha256: str | None, state_log: str | None) -> tuple[str | None, str | None]:
+    """The digest to check the charter against: the state log's when given, which an explicit
+    `--charter-sha256` must then equal."""
+    if not state_log:
+        return sha256, None
+    digest, why = state_log_charter_sha256(state_log)
+    if why:
+        return None, why
+    if sha256 and sha256.lower() != digest:
+        return None, "--charter-sha256 differs from the state log's frozen charter digest"
+    return digest, None
 
 
 def repo_slugs(*entries: dict) -> set[str]:
@@ -985,6 +1046,14 @@ def compare_repo(name: str, before: dict, after: dict, report: list[str],
                 report.append(f"{shown} [GRANTED]")
                 report.append(f"{shown} note: version tag on a release-please merge, covered by the charter's release authority")
                 continue
+            fetched_from = sorted(r for r, entry in before_remotes.items()
+                                  if change == "added" and entry.get("available") and after_sha
+                                  and entry.get("refs", {}).get(ref) == after_sha)
+            if fetched_from:
+                report.append(f"{shown} [FETCHED]")
+                report.append(f"{shown} note: already at this target on remote '{fetched_from[0]}' in the "
+                              "before-snapshot; fetched, not created")
+                continue
             all_covered = False
             report.append(f"{shown} [UNGRANTED]")
 
@@ -1031,7 +1100,10 @@ def cmd_compare(args: argparse.Namespace) -> int:
                   "only by backlog-only commits.", file=sys.stderr)
         proto = {"push_log": load_push_log(log_path)}
         charter = getattr(args, "charter", None)
-        authority, why = read_release_authority(charter, getattr(args, "charter_sha256", None))
+        digest, why = frozen_charter_digest(getattr(args, "charter_sha256", None), getattr(args, "state_log", None))
+        authority = None
+        if not why:
+            authority, why = read_release_authority(charter, digest)
         if why:
             print(f"loop-pi-audit: warning: the charter grants nothing ({why}); release-please changes stay UNGRANTED.",
                   file=sys.stderr)
@@ -1097,6 +1169,7 @@ def main() -> int:
                                         "when it holds loop-pi-proto (compare never reads $LOOP_PI_RUN_DIR).")
     comp.add_argument("--charter", help=CHARTER_HELP)
     comp.add_argument("--charter-sha256", help=CHARTER_SHA_HELP)
+    comp.add_argument("--state-log", help=STATE_LOG_HELP)
     comp.set_defaults(func=cmd_compare)
 
     for name, func, text in (("begin", cmd_begin, "Start a run's before-snapshot with REPO."),
@@ -1115,6 +1188,7 @@ def main() -> int:
     close.add_argument("--push-log", help=PUSH_LOG_HELP)
     close.add_argument("--charter", help=CHARTER_HELP)
     close.add_argument("--charter-sha256", help=CHARTER_SHA_HELP)
+    close.add_argument("--state-log", help=STATE_LOG_HELP)
     close.set_defaults(func=cmd_closeout)
 
     args = parser.parse_args()
