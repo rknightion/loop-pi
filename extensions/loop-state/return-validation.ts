@@ -23,17 +23,19 @@ export function laneReturnError(block: Record<string, unknown> | null, cwd: stri
   if (typeof block.patch_sha256 !== "string" || !/^[a-fA-F0-9]{64}$/.test(block.patch_sha256)) {
     return "patch_sha256 must be a SHA-256 digest for the named patch";
   }
+  const path = resolve(cwd, block.patch);
   let fd: number | undefined;
   try {
     // Nonblocking open avoids hanging the event queue on a FIFO. Stat and hash the same opened
     // file so replacing the pathname between those operations cannot validate different bytes.
-    fd = openSync(resolve(cwd, block.patch), constants.O_RDONLY | constants.O_NONBLOCK);
-    if (!fstatSync(fd).isFile()) return "patch must name a regular file";
+    fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
+    if (!fstatSync(fd).isFile()) return `patch must name a regular file: ${path}`;
     const actual = createHash("sha256").update(readFileSync(fd)).digest("hex");
-    if (actual !== block.patch_sha256.toLowerCase()) return "patch_sha256 mismatch for named patch";
+    const claimed = block.patch_sha256.toLowerCase();
+    if (actual !== claimed) return `patch_sha256 mismatch for named patch ${path}: claimed ${claimed}, actual ${actual}`;
     return null;
   } catch (error) {
-    return `patch is unreadable: ${error instanceof Error ? error.message : String(error)}`;
+    return `patch ${path} is unreadable: ${error instanceof Error ? error.message : String(error)}`;
   } finally {
     if (fd !== undefined) {
       try {

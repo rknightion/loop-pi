@@ -123,3 +123,47 @@ test("patch close failure becomes a rejection diagnostic, not an escaping except
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("rejection diagnostics name the patch path and, for a mismatch, both digests", () => {
+  const dir = mkdtempSync(join(tmpdir(), "return-diag-"));
+  const patch = join(dir, "candidate.patch");
+  writeFileSync(patch, "fixture patch\n");
+  const good = digest("fixture patch\n");
+  const wrong = "b".repeat(64);
+  const base = { v: 3, status: "complete", exit: 0 };
+  try {
+    // matching digest passes, in either hex case
+    assert.equal(laneReturnError({ ...base, patch, patch_sha256: good }, dir), null);
+    assert.equal(laneReturnError({ ...base, patch, patch_sha256: good.toUpperCase() }, dir), null);
+    // relative patch paths resolve against the completion cwd
+    assert.equal(laneReturnError({ ...base, patch: "candidate.patch", patch_sha256: good }, dir), null);
+    const mismatch = laneReturnError({ ...base, patch, patch_sha256: wrong }, dir) ?? "";
+    assert.match(mismatch, /patch_sha256 mismatch/);
+    assert.ok(mismatch.includes(patch), `names the patch: ${mismatch}`);
+    assert.ok(mismatch.includes(wrong), `names the claimed digest: ${mismatch}`);
+    assert.ok(mismatch.includes(good), `names the actual digest: ${mismatch}`);
+    const missing = join(dir, "missing.patch");
+    const absent = laneReturnError({ ...base, patch: missing, patch_sha256: good }, dir) ?? "";
+    assert.match(absent, /patch.*unreadable/);
+    assert.ok(absent.includes(missing), `names the missing patch: ${absent}`);
+    const directory = laneReturnError({ ...base, patch: dir, patch_sha256: good }, dir) ?? "";
+    assert.match(directory, /patch.*regular/);
+    assert.ok(directory.includes(dir), `names the directory: ${directory}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("exit and status combinations: complete with nonzero exit fails, honest non-complete passes", () => {
+  const sha = "a".repeat(40);
+  assert.match(laneReturnError({ v: 3, status: "complete", exit: 1, sha }, "/") ?? "", /exit 1.*complete/);
+  for (const status of ["partial", "blocked", "failed"]) {
+    assert.equal(laneReturnError({ v: 3, status, exit: 1, sha }, "/"), null, status);
+  }
+});
+
+test("compose and board returns carry sha, not a patch, and skip the patch hash check", () => {
+  const sha = "a".repeat(40);
+  assert.equal(laneReturnError({ v: 3, status: "complete", exit: 0, sha }, "/missing"), null);
+  assert.equal(laneReturnError({ v: 3, status: "complete", exit: 0, sha, patch: null, patch_sha256: null }, "/missing"), null);
+});
