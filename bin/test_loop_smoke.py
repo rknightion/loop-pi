@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import signal
 import subprocess
 import tempfile
 import threading
@@ -67,6 +68,51 @@ class Rpc:
         self.proc.stdout.close()
         self.proc.stderr.close()
         return self.proc.returncode
+
+
+def wait_for_runners(root, timeout=30):
+    """A detached pi-subagents runner (`subagent-runner-bootstrap.js`, reparented to init) can still
+    be writing under this tree for about a second after the root exits; on Linux removing the tree
+    then failed with "Directory not empty" every time. Wait for every process that a run record names
+    or whose command line names this tree, then kill any left, so the removal does not race them."""
+    root = str(root)
+    me = os.getpid()
+    def alive(pid):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            pass
+        return True
+    def live():
+        pids = set()
+        for status in Path(root).rglob('status.json'):
+            try:
+                pid = json.loads(status.read_text()).get('pid')
+            except (OSError, ValueError):
+                continue
+            if isinstance(pid, int) and pid > 0 and alive(pid):
+                pids.add(pid)
+        listing = subprocess.run(['ps', '-axo', 'pid=,command='], capture_output=True, text=True, timeout=10).stdout
+        for line in listing.splitlines():
+            fields = line.strip().split(None, 1)
+            if len(fields) == 2 and root in fields[1] and int(fields[0]) != me:
+                pids.add(int(fields[0]))
+        return pids
+    started = time.monotonic()
+    waiting = live()
+    deadline = started + timeout
+    while live() and time.monotonic() < deadline:
+        time.sleep(.2)
+    left = live()
+    print(f'processes under the smoke tree at root exit: {len(waiting)}; waited {time.monotonic() - started:.1f}s', flush=True)
+    for pid in left:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    return left
 
 
 class InstalledLoopSmoke(unittest.TestCase):
@@ -236,7 +282,9 @@ class InstalledLoopSmoke(unittest.TestCase):
                 print('step 7b: the root alone pushed the lane commit', flush=True)
             finally:
                 code = rpc.close()
+                left = wait_for_runners(tmp)
             self.assertEqual(code, 0, 'step 7 launcher exits cleanly')
+            self.assertEqual(left, set(), 'async runners outlived the root by more than 30 s')
             output = run(str(bins / 'loop-pi-audit'), 'closeout', '--run-dir', str(run_dir))
             before = json.loads(runs[0].read_text())['repos'][str(repo)]['remotes']['origin']['refs']
             after = json.loads((run_dir / 'audit-after.json').read_text())['repos'][str(repo)]['remotes']['origin']['refs']
