@@ -7,6 +7,7 @@ import {
   evaluateBashCommand,
   evaluateBgWait,
   evaluateSubagentCall,
+  evaluateSubagentPolicyFields,
   evaluateWatchProcess,
   hasUnextractedSubstitution,
   isAsyncSubagentLaunch,
@@ -929,6 +930,17 @@ test("subagent deny: workflowScript launch (one async call per lane, never a wor
 test("subagent deny: workflowScriptPath launch", () => {
   const decision = evaluateSubagentCall({ workflowScriptPath: "codex/dispatch.js", async: true });
   assert.equal(decision.block, true);
+});
+
+test("subagent deny: options.script runs a workflow (pi-subagents 0.83.0 lowers it to workflowScript)", () => {
+  const script = 'return runs.run("main", { agent: "worker", task: "x" })';
+  for (const call of [{ options: { script } }, { async: true, options: { script, timeoutMs: 1000 } }]) {
+    for (const decision of [evaluateSubagentCall(call), evaluateSubagentPolicyFields(call)]) {
+      assert.equal(decision.block, true);
+      assert.match(decision.reason ?? "", /own async `subagent` call/);
+    }
+    assert.equal(isAsyncSubagentLaunch(call), true, "an options.script call is a launch for active-run tracking");
+  }
 });
 
 test("subagent allow: validating a workflow script launches nothing", () => {

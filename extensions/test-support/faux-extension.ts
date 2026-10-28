@@ -11,7 +11,7 @@
 // `stopReason: "length"` scripts an output-budget stop. `hang: true` never answers: the request
 // stays open until it is aborted, like a model that keeps streaming reasoning.
 // With no matching rule the reply is the text "FAUX: no rule matched".
-import { readFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 import { fauxAssistantMessage, fauxProvider, fauxText, fauxThinking, fauxToolCall } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -44,12 +44,15 @@ function latestText(context: any): string {
 export default function (pi: ExtensionAPI) {
   const scriptPath = process.env.LOOP_PI_FAUX_SCRIPT;
   if (!scriptPath) return;
+  const requestLog = process.env.LOOP_PI_FAUX_REQUEST_LOG;
   const rules: Rule[] = JSON.parse(readFileSync(scriptPath, "utf8")).rules;
   const used = new Set<number>();
   const faux = fauxProvider({ provider: "faux", models: [{ id: "faux-1", reasoning: true, contextWindow: 272000, maxTokens: 128000 }] });
   faux.setResponses(
     Array.from({ length: 10_000 }, () => async (context: any, options: any) => {
       const text = latestText(context);
+      // What the provider receives, after every `context` and `context_with_system` handler.
+      if (requestLog) appendFileSync(requestLog, JSON.stringify(context?.messages ?? []) + "\n");
       const index = rules.findIndex((rule, i) => !(rule.once && used.has(i)) && new RegExp(rule.match, "s").test(text));
       if (index < 0) return fauxAssistantMessage("FAUX: no rule matched");
       used.add(index);

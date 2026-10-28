@@ -66,7 +66,7 @@ const nativePreview = (output: string, mode: "artifact" | "saved" | "summary") =
 };
 
 test("pinned native preview exposes the old allowed 40-line v2 return cut mid-block", () => {
-  assert.equal(JSON.parse(readFileSync(new URL("../../node_modules/pi-subagents/package.json", import.meta.url), "utf8")).version, "0.82.1");
+  assert.equal(JSON.parse(readFileSync(new URL("../../node_modules/pi-subagents/package.json", import.meta.url), "utf8")).version, "0.83.0");
   const block = oldAllowedReturn("partial");
   assert.equal(JSON.parse(block.split("\n")[1]).tail.split("\n").length, 40);
   assert.equal(parseLaneReturn(block)!.status, "partial");

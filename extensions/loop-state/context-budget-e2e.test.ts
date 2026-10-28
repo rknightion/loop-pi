@@ -151,9 +151,9 @@ test(`native async public subagent return previews 2000 characters and retains t
   const observer = join(freshDir(), "observer.ts");
   const completions = join(s.repo, "completed.jsonl");
   const actualRequests = join(s.repo, "requests.jsonl");
-  writeFileSync(observer, `import { appendFileSync } from "node:fs"; export default function(pi) { pi.events.on("subagent:async-complete", d => appendFileSync(${JSON.stringify(completions)}, JSON.stringify({runId:d.runId, sessionId:d.sessionId, path:d.results?.[0]?.savedOutputPath ?? d.results?.[0]?.artifactPaths?.outputPath, output:d.results?.[0]?.output}) + "\\n")); pi.on("context_with_system", e => appendFileSync(${JSON.stringify(actualRequests)}, JSON.stringify(e.messages) + "\\n")); }`);
+  writeFileSync(observer, `import { appendFileSync } from "node:fs"; export default function(pi) { pi.events.on("subagent:async-complete", d => appendFileSync(${JSON.stringify(completions)}, JSON.stringify({runId:d.runId, sessionId:d.sessionId, path:d.results?.[0]?.savedOutputPath ?? d.results?.[0]?.artifactPaths?.outputPath, output:d.results?.[0]?.output}) + "\\n")); }`);
   const requestedOutput = explicitOutput ? join(s.runDir, "full-return.md") : undefined;
-  const session = startPiRpc({ extensions: [FAUX_EXTENSION, CONTINUATION, STATE, observer], agentDir: s.agentDir, subagentTempRoot: freshDir(), cwd: s.repo, sessionArgs: [], extraArgs: ["--exclude-tools", "subagents_enable"], env: { LOOP_PI_RUN_DIR: s.runDir },
+  const session = startPiRpc({ extensions: [FAUX_EXTENSION, CONTINUATION, STATE, observer], agentDir: s.agentDir, subagentTempRoot: freshDir(), cwd: s.repo, sessionArgs: [], extraArgs: ["--exclude-tools", "subagents_enable"], env: { LOOP_PI_RUN_DIR: s.runDir, LOOP_PI_FAUX_REQUEST_LOG: actualRequests },
     fauxScriptPath: writeFauxScript([
       { match: "NATIVE_PREVIEW", once: true, toolCalls: [{ name: "subagent", args: { agent: "worker", task: "Lane: L1 · Task: T-1 · Tier: routine\nObjective: CHILD_PREVIEW", async: true, worktree: false, ...(requestedOutput ? { output: requestedOutput } : {}) } }] },
       { match: "CHILD_PREVIEW", text: full },
@@ -202,11 +202,13 @@ test(`native async public subagent return previews 2000 characters and retains t
     await session.waitFor(e => e.type === "agent_settled" && session.events.filter(x => x.type === "agent_settled").length > settledCount);
     const requests = readFileSync(actualRequests, "utf8").trim().split("\n").map(line => JSON.parse(line));
     const request = requests.at(-1);
-    const notify = request.find((m: any) => m.customType === "subagent-notify");
-    assert.ok(notify, "the next actual provider request contains the native completion");
-    // pi-subagents 0.81.0 marks its notices in the model request only; the stored message is unchanged.
+    // The faux provider logs what it receives, after every context and context_with_system handler.
+    // pi sends the custom notice as a user message; pi-subagents 0.83.0 marks it in context_with_system.
     const marker = '<pi_subagents_notice type="subagent-notify" origin="automated message from the pi-subagents extension, not typed by the user">';
-    assert.equal(notify.content, `${marker}\n${content}\n</pi_subagents_notice>`, "the real request receives the same bounded native preview and actual path");
+    const textOf = (m: any) => typeof m.content === "string" ? m.content : m.content.filter((p: any) => p.type === "text").map((p: any) => p.text).join("");
+    const notify = request.find((m: any) => m.role === "user" && textOf(m).startsWith(marker));
+    assert.ok(notify, "the next actual provider request contains the marked native completion");
+    assert.equal(textOf(notify), `${marker}\n${content}\n</pi_subagents_notice>`, "the real request receives the same bounded native preview and actual path");
     assert.ok(!JSON.stringify(request).includes(expectedArtifact), "the complete artifact must stay out of the next real request");
     assertArtifact(readFileSync(ret.artifact));
   } finally { await session.close(); }

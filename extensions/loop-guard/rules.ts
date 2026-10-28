@@ -2090,6 +2090,8 @@ export function isSubagentLaunch(raw: SubagentInput): boolean {
   if (typeof input.agent === "string" && typeof input.task === "string") return true;
   if (typeof input.workflowScript === "string") return true;
   if (typeof input.workflowScriptPath === "string") return true;
+  // pi-subagents 0.83.0 takes script text as `options.script` and lowers it to `workflowScript`.
+  if (typeof input.script === "string") return true;
   if (typeof input.workflow === "string") return true;
   return false;
 }
@@ -2154,10 +2156,12 @@ export function evaluateSubagentPolicyFields(raw: SubagentInput): Decision {
   // and each lane's completion wakes the root separately. pi-subagents 0.77.0
   // carries a workflow in one `workflow` field (`true` for the reply's js
   // block, a path, or a named resource); the removed `workflowScript` /
-  // `workflowScriptPath` stay listed as a backstop. `action: "validate"` with
-  // the removed fields launches nothing and stays allowed.
+  // `workflowScriptPath` stay listed as a backstop. 0.83.0 also takes script text
+  // as `options.script`, which it lowers to `workflowScript` after this hook runs.
+  // `action: "validate"` with the removed fields launches nothing and stays allowed.
   const carriesWorkflow =
-    input.workflow !== undefined || input.workflowScript !== undefined || input.workflowScriptPath !== undefined;
+    input.workflow !== undefined || input.workflowScript !== undefined || input.workflowScriptPath !== undefined ||
+    input.script !== undefined;
   if (carriesWorkflow && input.action === undefined) {
     return block(
       "loop-guard: workflows are not used in loop-pi (loop protocol, pi harness file). Launch each lane as its " +

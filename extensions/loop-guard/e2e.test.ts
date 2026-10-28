@@ -62,6 +62,48 @@ test("(a) root: a forbidden bash command from the model is blocked by loop-guard
   }
 });
 
+
+test("root: a workflow sent as options.script is refused and never starts a run", async () => {
+  // pi-subagents 0.83.0 lowers `options.script` to `workflowScript` inside its execute, after this
+  // hook; the guard must refuse it like any workflow, on the real installed package.
+  const agentDir = freshDir("loop-guard-e2e-script-agentdir-");
+  const subagentTemp = freshDir("loop-guard-e2e-script-subtemp-");
+  const cwd = freshDir("loop-guard-e2e-script-cwd-");
+  mkdirSync(join(agentDir, "agents"), { recursive: true });
+  writeFileSync(join(agentDir, "settings.json"), JSON.stringify({
+    packages: [PI_SUBAGENTS_PACKAGE_DIR],
+    subagents: { agentExcludeDirs: ["~/.agents"] },
+  }));
+  writeFileSync(join(agentDir, "agents", "worker.md"), [
+    "---", "name: worker", "description: Fixture", "tools: bash", "extensions: []",
+    `subagentOnlyExtensions: ${FAUX_EXTENSION}`, "model: faux/faux-1", "---", "", "Fixture",
+  ].join("\n"));
+  const script = 'return runs.run("main", { agent: "worker", task: "SCRIPT_CHILD" })';
+  const fauxScript = writeFauxScript([
+    { match: "RUN_SCRIPT", once: true, toolCalls: [{ name: "subagent", args: { options: { script } } }] },
+    { match: ".*", text: "ok" },
+  ]);
+  const session = startPiRpc({
+    extensions: [FAUX_EXTENSION, ROOT_EXTENSION],
+    fauxScriptPath: fauxScript,
+    agentDir,
+    subagentTempRoot: subagentTemp,
+    cwd,
+  });
+  try {
+    session.send({ id: "p1", type: "prompt", message: "RUN_SCRIPT please" });
+    const toolEnd = await session.waitFor(
+      (e) => e.type === "tool_execution_end" && (e as { toolName?: string }).toolName === "subagent",
+    );
+    const result = toolEnd.result as { content: { type: string; text: string }[] };
+    assert.equal(toolEnd.isError, true, "the options.script call must be refused");
+    assert.match(result.content[0].text, /loop-guard: workflows are not used in loop-pi/);
+    const runs = join(subagentTemp, "async-subagent-runs");
+    assert.deepEqual(existsSync(runs) ? readdirSync(runs).filter((name) => !name.startsWith(".")) : [], [], "no async run was started");
+  } finally {
+    await session.close();
+  }
+});
 test(
   "(b) lane: a pi-subagents child spawned via the subagent tool is fenced by loop-guard/lane.ts " +
     "delivered through registerRequiredChildExtensions",
