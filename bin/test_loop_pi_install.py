@@ -608,8 +608,24 @@ class NopushNativeCanary(unittest.TestCase):
                 time.sleep(.1)
             self.fail("native runs did not reach terminal states")
         def run_for_session(session):
-            matches = [(p, json.loads(p.read_text())) for p in (home / "tmp").rglob("status.json")
-                       if json.loads(p.read_text()).get("sessionFile") == str(session)]
+            # pi-subagents sets a run's terminal state and its final sessionFile in separate
+            # status writes, so a record can read terminal before it names its session (seen
+            # intermittently on Linux CI). Wait for the record that names this session.
+            def records():
+                found = []
+                for p in (home / "tmp").rglob("status.json"):
+                    try:
+                        data = json.loads(p.read_text())
+                    except ValueError:
+                        continue  # mid-write; the next poll reads it whole
+                    if data.get("sessionFile") == str(session):
+                        found.append((p, data))
+                return found
+            deadline = time.monotonic() + 20
+            matches = records()
+            while len(matches) != 1 and time.monotonic() < deadline:
+                time.sleep(.1)
+                matches = records()
             self.assertEqual(len(matches), 1, [str(p) for p, _ in matches])
             return matches[0]
         try:
