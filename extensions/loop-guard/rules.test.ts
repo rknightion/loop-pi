@@ -974,6 +974,27 @@ test("subagent allow: control actions that name their run", () => {
   }
 });
 
+test("subagent deny: interrupt whose runId is empty falls back past a named id", () => {
+  // The package targets `runId ?? id` and falls back to the newest run when that is falsy.
+  for (const call of [{ action: "interrupt", id: "run-1", runId: "" }, { action: "interrupt", id: "run-1", runId: 0 }]) {
+    assert.equal(evaluateSubagentPolicyFields(call).block, true, JSON.stringify(call));
+  }
+});
+
+test("subagent deny: options.script under any action but validate", () => {
+  for (const action of ["schedule.create", "status", " resume "]) {
+    const decision = evaluateSubagentCall({ action, id: "run-1", options: { script: "x" } });
+    assert.equal(decision.block, true, action);
+    assert.match(decision.reason ?? "", /may not carry a workflow script/);
+  }
+});
+
+test("validate with options.script is allowed and is not a launch", () => {
+  const call = { action: "validate", options: { script: "x" } };
+  assert.equal(evaluateSubagentCall(call).block, false);
+  assert.equal(isAsyncSubagentLaunch(call), false, "a validate is not an active run");
+});
+
 test("subagent allow: validating a workflow script launches nothing", () => {
   const decision = evaluateSubagentCall({ action: "validate", workflowScriptPath: "codex/dispatch.js" });
   assert.equal(decision.block, false);

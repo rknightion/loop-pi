@@ -888,10 +888,11 @@ paths are exact, bash write detection is best-effort.
   `isSubagentLaunch`). 0.83.0 also converts string scalars inside `options` (`"true"`, `"120000"`)
   to their declared types after the hooks; loop-pi's value checks on the raw call fail closed on a
   string (`worktree: "true"` is not retained), so no guard reads the converted value.
-  A control action must name its run: an `interrupt` without `id` or `runId` goes to the newest async
-  run in the session (`interruptAsyncRun`, `fallbackToNewest`; upstream issue 3081), so the root and
-  lane guards refuse it, and refuse `stop`, `steer` and `resume` with no `id`, `runId` or `dir`
-  (`rules.ts` `controlTargetBlock`).
+  A control action must name its run: an `interrupt` targets `runId ?? id` and goes to the newest async
+  run in the session when that is empty (`getAsyncInterruptTarget`; upstream issue 3081), so the root
+  and lane guards refuse it unless `runId ?? id` is a non-empty string, and refuse `stop`, `steer` and
+  `resume` unless that or `dir` is (`rules.ts` `controlTargetBlock`). `options.script` is refused
+  under every action except `validate`, which launches nothing and is not counted as a run.
   With it off the message stays queued for the child's next boundary and nothing is interrupted.
 - **Return cap** (lane: loop-guard's lane entry at the child's assistant `message_end`; root:
   loop-state at `message_end`, plus the request hook for already-stored messages).

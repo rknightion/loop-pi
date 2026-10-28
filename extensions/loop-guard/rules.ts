@@ -2090,8 +2090,9 @@ export function isSubagentLaunch(raw: SubagentInput): boolean {
   if (typeof input.agent === "string" && typeof input.task === "string") return true;
   if (typeof input.workflowScript === "string") return true;
   if (typeof input.workflowScriptPath === "string") return true;
-  // pi-subagents 0.83.0 takes script text as `options.script` and lowers it to `workflowScript`.
-  if (typeof input.script === "string") return true;
+  // pi-subagents 0.83.0 takes script text as `options.script` and lowers it to `workflowScript`;
+  // with an action (`validate`) it launches nothing.
+  if (typeof input.script === "string" && input.action === undefined) return true;
   if (typeof input.workflow === "string") return true;
   return false;
 }
@@ -2139,7 +2140,6 @@ export function evaluateBriefHeader(raw: SubagentInput): Decision {
   );
 }
 
-/** Shared host-execution policy only. Native child role/depth/allowlists stay native-owned. */
 const named = (value: unknown) => typeof value === "string" && value.trim() !== "";
 
 /** A control action must name its run. pi-subagents 0.83.0 sends an `interrupt` with no `id` or
@@ -2148,7 +2148,9 @@ const named = (value: unknown) => typeof value === "string" && value.trim() !== 
  *  and are refused by the package without a target; the guard refuses them first as a backstop. */
 function controlTargetBlock(input: Record<string, unknown>): Decision | undefined {
   const action = typeof input.action === "string" ? input.action.trim() : undefined;
-  const byId = named(input.id) || named(input.runId);
+  // The package targets `runId ?? id` and treats a falsy target as none, so an empty `runId` beside a
+  // named `id` still reaches the newest run.
+  const byId = named(input.runId ?? input.id);
   if (action === "interrupt" && !byId) {
     return block("loop-guard: `interrupt` needs an explicit run `id` (without one the package interrupts the newest run, which may be another lane).");
   }
@@ -2158,6 +2160,7 @@ function controlTargetBlock(input: Record<string, unknown>): Decision | undefine
   return undefined;
 }
 
+/** Shared host-execution policy only. Native child role/depth/allowlists stay native-owned. */
 export function evaluateSubagentPolicyFields(raw: SubagentInput): Decision {
   const merged = subagentCallView(raw);
   if (!merged.ok) return block(merged.reason);
@@ -2191,6 +2194,10 @@ export function evaluateSubagentPolicyFields(raw: SubagentInput): Decision {
   }
   if (input.workflow !== undefined) {
     return block("loop-guard: `subagent` calls may not carry a `workflow` (it runs host commands or children outside the loop protocol).");
+  }
+  // `validate` only checks a script; any other action with `options.script` (`schedule.create`) can run it.
+  if (input.script !== undefined && (typeof input.action !== "string" || input.action.trim() !== "validate")) {
+    return block("loop-guard: `subagent` calls may not carry a workflow script (`options.script`) except to `validate` it.");
   }
   return allow();
 }

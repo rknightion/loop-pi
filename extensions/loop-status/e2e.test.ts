@@ -3,7 +3,7 @@
 // pi-subagents lane events. The status line is read off the RPC `setStatus` UI requests, which is
 // exactly what the interactive footer receives.
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 
@@ -106,4 +106,11 @@ test("pi-subagents' jobs-changed notice refreshes the status line with no turn",
   } finally {
     await pi.close();
   }
+});
+
+test("the installed pi-subagents emits the jobs-changed event this extension listens for", () => {
+  // The e2e above plays the event from a companion; this pins its name to the installed package.
+  const types = readFileSync(new URL("../../node_modules/pi-subagents/src/shared/types.js", import.meta.url), "utf8");
+  assert.match(types, /export const SUBAGENT_JOBS_CHANGED_EVENT = "subagent:jobs-changed";/);
+  assert.match(readFileSync(join(import.meta.dirname, "index.ts"), "utf8"), /pi\.events\.on\("subagent:jobs-changed"/);
 });
