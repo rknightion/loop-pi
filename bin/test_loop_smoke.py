@@ -73,31 +73,18 @@ class Rpc:
 def wait_for_runners(root, timeout=30):
     """A detached pi-subagents runner (`subagent-runner-bootstrap.js`, reparented to init) can still
     be writing under this tree for about a second after the root exits; on Linux removing the tree
-    then failed with "Directory not empty" every time. Wait for every process that a run record names
-    or whose command line names this tree, then kill any left, so the removal does not race them."""
+    then failed with "Directory not empty" every time. Wait for every live process whose command
+    line names this tree, then kill any left, so the removal does not race them. Identity comes from
+    the current process table only (never a recorded pid, which may be reused), and zombies are
+    skipped since they hold no files."""
     root = str(root)
     me = os.getpid()
-    def alive(pid):
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            pass
-        return True
     def live():
+        listing = subprocess.run(['ps', '-axo', 'pid=,stat=,command='], capture_output=True, text=True, timeout=10).stdout
         pids = set()
-        for status in Path(root).rglob('status.json'):
-            try:
-                pid = json.loads(status.read_text()).get('pid')
-            except (OSError, ValueError):
-                continue
-            if isinstance(pid, int) and pid > 0 and alive(pid):
-                pids.add(pid)
-        listing = subprocess.run(['ps', '-axo', 'pid=,command='], capture_output=True, text=True, timeout=10).stdout
         for line in listing.splitlines():
-            fields = line.strip().split(None, 1)
-            if len(fields) == 2 and root in fields[1] and int(fields[0]) != me:
+            fields = line.strip().split(None, 2)
+            if len(fields) == 3 and not fields[1].startswith('Z') and root in fields[2] and int(fields[0]) != me:
                 pids.add(int(fields[0]))
         return pids
     started = time.monotonic()
