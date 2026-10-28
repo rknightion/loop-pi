@@ -43,6 +43,8 @@ test("readTail returns whole lines from the end of a large file", () => {
     writeFileSync(path, ["a".repeat(50), "bbbb", "cccc"].join("\n"));
     assert.equal(readTail(path, 9), "cccc");
     assert.equal(readTail(path, 1000), ["a".repeat(50), "bbbb", "cccc"].join("\n"));
+    writeFileSync(path, "x".repeat(40) + "\n");
+    assert.equal(readTail(path, 10, false), "xxxxxxxxx\n", "a plain-text tail keeps a partial last line");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

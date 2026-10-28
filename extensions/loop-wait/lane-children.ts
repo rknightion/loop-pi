@@ -53,8 +53,8 @@ export function isFinished(state: string): boolean {
   return !LIVE_STATES.has(state);
 }
 
-/** The last `max` bytes of a file, starting at a whole line. Throws like readFileSync. */
-export function readTail(path: string, max = MAX_SESSION_TAIL_BYTES): string {
+/** The last `max` bytes of a file, from a whole line when `wholeLines` (JSONL). Throws like readFileSync. */
+export function readTail(path: string, max = MAX_SESSION_TAIL_BYTES, wholeLines = true): string {
   const fd = openSync(path, "r");
   try {
     const size = fstatSync(fd).size;
@@ -62,7 +62,7 @@ export function readTail(path: string, max = MAX_SESSION_TAIL_BYTES): string {
     const buffer = Buffer.alloc(size - start);
     readSync(fd, buffer, 0, buffer.length, start);
     const text = buffer.toString("utf8");
-    return start === 0 ? text : text.slice(text.indexOf("\n") + 1);
+    return start === 0 || !wholeLines ? text : text.slice(text.indexOf("\n") + 1);
   } finally {
     closeSync(fd);
   }
@@ -105,13 +105,13 @@ export function childResultText(run: ChildRun, status: ChildStatus | { error: st
   if ("error" in status) return `${head} finished, but its result could not be read: ${status.error}`;
   let output: string | undefined;
   let source: string | undefined;
-  for (const [path, read] of [
-    [status.sessionFile, (s: string) => finalAssistantText(s)],
-    [status.outputFile, (s: string) => s.trim() || undefined],
+  for (const [path, read, wholeLines] of [
+    [status.sessionFile, (s: string) => finalAssistantText(s), true],
+    [status.outputFile, (s: string) => s.trim() || undefined, false],
   ] as const) {
     if (!path || output) continue;
     try {
-      output = read(readTail(path));
+      output = read(readTail(path, MAX_SESSION_TAIL_BYTES, wholeLines));
       source = path;
     } catch {
       // Fall through to the next source; the message names what was found.
