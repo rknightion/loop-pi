@@ -37,7 +37,7 @@ jobs:
           node-version: "26.12.1"
 
       - name: Set up just
-        uses: rknightion/.github/.github/actions/setup-just@e824f0fe32ed4750136f9d39e701cedb1dc3971b # v1.25.28
+        uses: rknightion/.github/.github/actions/setup-just@258b73ab8330a8a33b35e954a6003958c6e04caa # v1.25.30
 
       - name: just setup
         run: just setup
@@ -89,7 +89,7 @@ jobs:
           node-version: "26.12.1"
 
       - name: Set up just
-        uses: rknightion/.github/.github/actions/setup-just@e824f0fe32ed4750136f9d39e701cedb1dc3971b # v1.25.28
+        uses: rknightion/.github/.github/actions/setup-just@258b73ab8330a8a33b35e954a6003958c6e04caa # v1.25.30
 
       - name: just setup
         run: just setup
@@ -171,7 +171,7 @@ jobs:
     name: actionlint
     permissions:
       contents: read
-    uses: rknightion/.github/.github/workflows/actionlint.yml@e824f0fe32ed4750136f9d39e701cedb1dc3971b # v1.25.28
+    uses: rknightion/.github/.github/workflows/actionlint.yml@258b73ab8330a8a33b35e954a6003958c6e04caa # v1.25.30
 
   zizmor:
     name: zizmor
@@ -179,4 +179,4 @@ jobs:
       contents: read
       security-events: write
       actions: read
-    uses: rknightion/.github/.github/workflows/zizmor.yml@e824f0fe32ed4750136f9d39e701cedb1dc3971b # v1.25.28
+    uses: rknightion/.github/.github/workflows/zizmor.yml@258b73ab8330a8a33b35e954a6003958c6e04caa # v1.25.30
