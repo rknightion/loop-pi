@@ -14,7 +14,8 @@ const MAX_RESULT_BYTES = 8 * 1024;
 // The boundary runs inside pi-subagents' one-second settle grace, so read only a session's tail.
 const MAX_SESSION_TAIL_BYTES = 1024 * 1024;
 const RETURN_REMINDER =
-  "Your last message is this lane's return: after using this, end with your complete final report, " +
+  "Your last message is this lane's return. If you launch another child, end your turn without a " +
+  "lane-return block; its result will arrive here. Otherwise end with your complete final report, " +
   "including the lane-return block, even if you gave one before.";
 const LIVE_STATES = new Set(["queued", "running"]);
 // The child drain gives up after 30 minutes; each notice buys another drain. Eight cover a senior's
@@ -194,7 +195,7 @@ export function registerChildResultDelivery(pi: ExtensionAPI): void {
         if (notices > MAX_STILL_RUNNING_NOTICES) continue;
         stillRunning.set(run.id, notices);
         const next = notices === MAX_STILL_RUNNING_NOTICES
-          ? "This is the last such notice: if it is still running when your next turn ends, write your final report with what you have, including the lane-return block."
+          ? "This is the last such notice: end this turn with your final report with what you have, including the lane-return block. If the child finishes first, its result is still recorded."
           : "End your turn to keep waiting; its result will arrive here.";
         drafts.push({
           type: "custom_message",

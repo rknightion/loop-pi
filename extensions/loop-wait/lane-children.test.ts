@@ -92,7 +92,7 @@ test("the result names the run, its state and the source, preferring the child's
     const run = { id: "r1", agent: "scout", asyncDir: dir };
     const fromSession = childResultText(run, { state: "complete", sessionFile: session, outputFile: log });
     assert.match(fromSession, new RegExp(`^loop-pi: child run r1 \\(scout\\) finished: complete\\.\n\nSEED-1\n\nFull output: ${session}\n\n`));
-    assert.match(fromSession, /end with your complete final report, including the lane-return block/);
+    assert.match(fromSession, /If you launch another child, end your turn without a lane-return block; its result will arrive here\. Otherwise end with your complete final report, including the lane-return block/);
     const fromLog = childResultText(run, { state: "failed", sessionFile: join(dir, "missing.jsonl"), outputFile: log });
     assert.match(fromLog, /finished: failed\.\n\ntask text\nSEED-1\n\nFull output: .*output-0\.log\n/);
     assert.match(childResultText(run, { state: "stopped" }), /No final output was found\.\n/);
@@ -150,7 +150,7 @@ test("settle appends one message per finished child after the existing entries, 
     );
     assert.match(result.entries[2].content, /is still running\. End your turn to keep waiting/);
     for (let i = 2; i < MAX_STILL_RUNNING_NOTICES; i++) assert.deepEqual(h.settle().entries.map((e: any) => e.details.runId), ["busy"]);
-    assert.match(h.settle().entries[0].content, /last such notice: .* write your final report with what you have/);
+    assert.match(h.settle().entries[0].content, /last such notice: end this turn with your final report with what you have, including the lane-return block\./);
     assert.equal(h.settle(), undefined, "keep-waiting notices are bounded and a delivered child is not delivered again");
     writeFileSync(join(live, "status.json"), JSON.stringify({ state: "failed" }));
     assert.deepEqual(h.settle().entries.map((e: any) => [e.details.runId, e.details.state]), [["busy", "failed"]]);

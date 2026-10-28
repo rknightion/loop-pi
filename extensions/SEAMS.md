@@ -190,7 +190,8 @@ after the child drain has made every child terminal, it reads each undelivered c
 `status.json`. Every child whose `state` is not `queued` or `running` gets one `custom_message`
 (`customType` `loop-pi-child-result`, `details.runId`) holding the child's final assistant text from
 the last 1 MB of its `sessionFile` (else `outputFile`; none when its last turn errored), capped to
-its last 8 KB, and a reminder that the lane's last message is its return. The hook then returns
+its last 8 KB, and a reminder that the lane's last message is its return: end the turn without a
+`lane-return` block when launching another child, otherwise end with the complete final report. The hook then returns
 `continue: true` so the senior's next turn sees it. It acts only on a `completed` outcome, so an
 aborted or failed run is never restarted. pi replaces the boundary entries with what a handler
 returns, so the hook returns `[...event.entries, ...drafts]`.
@@ -212,8 +213,8 @@ launch is one run and is delivered as one message under its first agent; `senior
 brief per child.
 Proof: `loop-wait/child-delivery.e2e.test.ts`
 (real pi and pi-subagents, faux root, senior and scout; the child finishing before the senior's turn
-ends, during its drain, and after it already wrote its return; each checks what the root
-receives) and `loop-wait/lane-children.test.ts`.
+ends, during its drain, after it already wrote its return, and two children in sequence; each
+checks what the root receives) and `loop-wait/lane-children.test.ts`.
 
 ## Role by entry point
 

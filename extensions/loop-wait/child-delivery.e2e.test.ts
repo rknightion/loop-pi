@@ -21,6 +21,7 @@ import {
 after(() => cleanupAll());
 
 const SEED = "CHILD_SEED_4242";
+const SEED2 = "CHILD_SEED_9999";
 
 function sessionFiles(dir: string): string[] {
   const out: string[] = [];
@@ -125,6 +126,22 @@ const SHAPES = [
     marker: "FINAL_REPORT",
     last: FINAL_REPORT,
   },
+  {
+    // Two children in sequence: the first result leads the senior to launch a second, whose result
+    // arrives in the same run before the senior returns.
+    name: "the senior delegates twice in sequence and returns after the second result",
+    order: "child-first",
+    senior: [
+      { match: `loop-pi: child run .*${SEED2}`, text: `SENIOR_GOT_BOTH ${SEED} ${SEED2}` },
+      { match: `loop-pi: child run .*${SEED}`, toolCalls: [{ name: "subagent", args: { agent: "scout", task: "SCOUT2_GO report the second seed" } }] },
+      { match: "Async: scout", delayMs: 4000, text: "WAITING_FOR_SCOUT" },
+      LAUNCH_SCOUT,
+    ],
+    scoutMs: 0,
+    marker: "WAITING_FOR_SCOUT",
+    last: `SENIOR_GOT_BOTH ${SEED} ${SEED2}`,
+    deliveries: 2,
+  },
 ];
 
 for (const shape of SHAPES) {
@@ -135,7 +152,8 @@ for (const shape of SHAPES) {
       { match: "LAUNCH_SENIOR", once: true, toolCalls: [{ name: "subagent", args: { agent: "senior", task: "SENIOR_GO delegate to a scout" } }] },
       { match: "Async: senior", text: "root ok" },
       ...shape.senior,
-      // Scout: return the value only it knows.
+      // Scouts: return the value only each knows.
+      { match: "SCOUT2_GO", text: SEED2 },
       { match: "SCOUT_GO", delayMs: shape.scoutMs, text: SEED },
       { match: ".*", text: "ok" },
     ]);
@@ -168,8 +186,9 @@ for (const shape of SHAPES) {
       if (shape.order === "child-first") assert.ok(scoutDone < seniorMarker, "the scout finished before the senior's turn ended");
       else assert.ok(scoutDone > seniorMarker, "the scout finished after the senior's turn ended");
       const delivered = readTextFile(seniorPath!).split("\n").filter((l) => l.includes('"customType":"loop-pi-child-result"'));
-      assert.equal(delivered.length, 1, "the result was delivered exactly once");
+      assert.equal(delivered.length, shape.deliveries ?? 1, "each child's result was delivered exactly once");
       assert.ok(delivered[0].includes(SEED), "the delivered message carries the scout's output");
+      if (shape.deliveries === 2) assert.ok(delivered[1].includes(SEED2), "the second child's output arrived second");
       for (const p of sessionFiles(sessions)) {
         const calls = readTextFile(p).split("\n").filter(Boolean).flatMap((line) => {
           try {
