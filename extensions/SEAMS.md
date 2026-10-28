@@ -172,6 +172,34 @@ global maximum of 2; no other agent has the `subagent` tool. pi-subagents 0.83.0
 depth 0, its lane at 1 and that lane's child at 2, and intersects the parent's maximum with the
 selected agent's maximum. A senior delegates only when its brief grants a count.
 
+### Child results in a senior lane
+
+A child runtime has no completion notifier in pi-subagents 0.83.0: `fanout-child.js` gives it the
+`subagent` tool but no result watcher, poller or `sendMessage` path, and the package's own route,
+a blocking child `bg_wait` (`wait-tool.js:6`), is off because the home sets `waitTool: false`
+(passed explicitly to every child, `child-launch.js:171-174`). Its `agent_end` drain
+(`auto-drain.js`) waits only for queued or running children and injects no result, so before this
+seam a senior that ended its turn to wait settled without ever seeing its child's output.
+
+`loop-wait/lane.ts` (a required child extension in every lane) closes that gap
+(`lane-children.ts`). It records each child this session launches from `subagent:async-started`
+(`id`, `agent`, `asyncDir`, `sessionId`), and at `agent_before_settle`, which runs after that drain
+has made every child terminal, reads each undelivered child's `status.json`. Every child whose
+`state` is not `queued` or `running` gets one `custom_message` (`customType`
+`loop-pi-child-result`, `details.runId`) holding the child's final assistant text from its
+`sessionFile` (else `outputFile`), capped to its last 8 KB, and the hook returns `continue: true` so
+the senior's next turn sees it. It acts only on a `completed` outcome, so an aborted or failed run
+is never restarted. pi replaces the boundary entries with what a handler returns, so the
+hook returns `[...event.entries, ...drafts]`. Delivered run ids are rebuilt from the branch at
+`session_start`, so a resumed senior is not fed twice. Nothing polls: run records are read only at
+the settle boundary. The root keeps its `bg_wait` refusal. A child still running when the drain's own
+30-minute deadline ends gets a keep-waiting notice instead (`details.pending: true`), which
+continues the run so the senior ends its turn and the next drain waits again; at most eight per
+child, covering the senior's four-hour timeout. A senior resumed in a new process does not see `async-started` for children launched before
+the restart, so their results are not delivered. Proof: `loop-wait/child-delivery.e2e.test.ts`
+(real pi and pi-subagents, faux root, senior and scout; the child finishing before the senior's turn
+ends, and during its drain) and `loop-wait/lane-children.test.ts`.
+
 ## Role by entry point
 
 The model root loads `loop-guard/root.ts`; children receive `loop-guard/lane.ts` through
@@ -889,10 +917,13 @@ paths are exact, bash write detection is best-effort.
   to their declared types after the hooks; loop-pi's value checks on the raw call fail closed on a
   string (`worktree: "true"` is not retained), so no guard reads the converted value.
   A control action must name its run: an `interrupt` targets `runId ?? id` and goes to the newest async
-  run in the session when that is empty (`getAsyncInterruptTarget`; upstream issue 3081), so the root
-  and lane guards refuse it unless `runId ?? id` is a non-empty string, and refuse `stop`, `steer` and
-  `resume` unless that or `dir` is (`rules.ts` `controlTargetBlock`). `options.script` is refused
-  under every action except `validate`, which launches nothing and is not counted as a run.
+  run in the session when that is falsy, an empty `runId` beside a named `id` included
+  (`getAsyncInterruptTarget` skips its `if (runId)` lookup; upstream issue 3081), so the root and lane
+  guards refuse it unless `runId ?? id` is a non-empty string, and refuse `stop` and `steer` unless
+  that or `dir` is. `resume` reads `id ?? runId` (`async-resume.js` `assertRunId`), so the guard checks
+  it in that order (`rules.ts` `controlTargetBlock`). `options.script`, `workflowScript` and
+  `workflowScriptPath` are refused under every action except `validate`, which launches nothing and is
+  not counted as a run.
   With it off the message stays queued for the child's next boundary and nothing is interrupted.
 - **Return cap** (lane: loop-guard's lane entry at the child's assistant `message_end`; root:
   loop-state at `message_end`, plus the request hook for already-stored messages).

@@ -112,5 +112,7 @@ test("the installed pi-subagents emits the jobs-changed event this extension lis
   // The e2e above plays the event from a companion; this pins its name to the installed package.
   const types = readFileSync(new URL("../../node_modules/pi-subagents/src/shared/types.js", import.meta.url), "utf8");
   assert.match(types, /export const SUBAGENT_JOBS_CHANGED_EVENT = "subagent:jobs-changed";/);
+  const tracker = readFileSync(new URL("../../node_modules/pi-subagents/src/runs/background/async-job-tracker.js", import.meta.url), "utf8");
+  assert.match(tracker, /pi\.events\.emit\(SUBAGENT_JOBS_CHANGED_EVENT\b/, "the async job tracker still emits the event");
   assert.match(readFileSync(join(import.meta.dirname, "index.ts"), "utf8"), /pi\.events\.on\("subagent:jobs-changed"/);
 });

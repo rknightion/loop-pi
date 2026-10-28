@@ -981,6 +981,23 @@ test("subagent deny: interrupt whose runId is empty falls back past a named id",
   }
 });
 
+test("subagent allow: resume targets `id ?? runId`, so an empty runId beside a named id still names the run", () => {
+  // async-resume resolves `id` first and never reads `runId` when `id` is set.
+  const call = { action: "resume", id: "run-1", runId: "", message: "x" };
+  assert.equal(evaluateSubagentPolicyFields(call).block, false);
+  assert.equal(evaluateSubagentCall(call).block, false);
+});
+
+test("subagent deny: workflowScript or workflowScriptPath under any action but validate", () => {
+  for (const action of ["status", "schedule.create", " resume "]) {
+    for (const field of ["workflowScript", "workflowScriptPath"]) {
+      const decision = evaluateSubagentCall({ action, id: "run-1", [field]: "x" });
+      assert.equal(decision.block, true, `${action} ${field}`);
+      assert.match(decision.reason ?? "", /except to `validate` it/);
+    }
+  }
+});
+
 test("subagent deny: options.script under any action but validate", () => {
   for (const action of ["schedule.create", "status", " resume "]) {
     const decision = evaluateSubagentCall({ action, id: "run-1", options: { script: "x" } });

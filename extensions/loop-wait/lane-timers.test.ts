@@ -247,15 +247,17 @@ describe("loop-pi-runtime entry", () => {
     const previous = process.env.PI_CODING_AGENT_DIR;
     process.env.PI_CODING_AGENT_DIR = dir;
     try {
-      const handlers: Record<string, Handler> = {};
+      // Real pi runs every handler registered for an event; keep them all.
+      const handlers: Record<string, Handler[]> = {};
       const entries: { customType: string; data: any }[] = [];
       const laneModule = await import("./lane.ts");
       laneModule.default({
         registerTool: () => {},
         appendEntry: (customType: string, data: any) => entries.push({ customType, data }),
-        on: (name: string, h: Handler) => (handlers[name] = h),
+        on: (name: string, h: Handler) => (handlers[name] ??= []).push(h),
+        events: { on: () => () => undefined },
       } as never);
-      handlers.session_start({}, { model: { id: "m-2" } });
+      for (const h of handlers.session_start) h({}, { model: { id: "m-2" }, sessionManager: { getSessionFile: () => undefined, getSessionId: () => "s", getBranch: () => [] } });
       assert.deepEqual(entries, [{ customType: "loop-pi-runtime", data: { v: 1, variant: "unknown", models: { "m-2": { service_tier: "default" } } } }]);
     } finally {
       if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;

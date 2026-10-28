@@ -2148,9 +2148,11 @@ const named = (value: unknown) => typeof value === "string" && value.trim() !== 
  *  and are refused by the package without a target; the guard refuses them first as a backstop. */
 function controlTargetBlock(input: Record<string, unknown>): Decision | undefined {
   const action = typeof input.action === "string" ? input.action.trim() : undefined;
-  // The package targets `runId ?? id` and treats a falsy target as none, so an empty `runId` beside a
-  // named `id` still reaches the newest run.
-  const byId = named(input.runId ?? input.id);
+  // interrupt and stop target `runId ?? id`; a falsy result (absent, or an empty `runId` beside a
+  // named `id`) skips the `if (runId)` lookup in `getAsyncInterruptTarget` and reaches the newest
+  // run. resume reads `id ?? runId` (async-resume), so there an empty `runId` beside a named `id`
+  // still names the run.
+  const byId = named(action === "resume" ? input.id ?? input.runId : input.runId ?? input.id);
   if (action === "interrupt" && !byId) {
     return block("loop-guard: `interrupt` needs an explicit run `id` (without one the package interrupts the newest run, which may be another lane).");
   }
@@ -2196,8 +2198,14 @@ export function evaluateSubagentPolicyFields(raw: SubagentInput): Decision {
     return block("loop-guard: `subagent` calls may not carry a `workflow` (it runs host commands or children outside the loop protocol).");
   }
   // `validate` only checks a script; any other action with `options.script` (`schedule.create`) can run it.
-  if (input.script !== undefined && (typeof input.action !== "string" || input.action.trim() !== "validate")) {
+  // The package already rejects the removed `workflowScript` / `workflowScriptPath` fields outside
+  // `validate`; refusing them here as well keeps that true if it stops.
+  const validating = typeof input.action === "string" && input.action.trim() === "validate";
+  if (input.script !== undefined && !validating) {
     return block("loop-guard: `subagent` calls may not carry a workflow script (`options.script`) except to `validate` it.");
+  }
+  if ((input.workflowScript !== undefined || input.workflowScriptPath !== undefined) && !validating) {
+    return block("loop-guard: `subagent` calls may not carry `workflowScript` or `workflowScriptPath` except to `validate` it.");
   }
   return allow();
 }

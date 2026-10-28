@@ -10,6 +10,9 @@ export const LOOP_PI_NOTICE_TYPES: ReadonlySet<string> = new Set([
   "loop-wake", "loop-watch",
   "loop-recovery-required", "loop-recovery-exhausted", "loop-request-incident",
   "loop-state-digest", "loop-model-time-notice", "loop-child-observation",
+  // Sent in a senior lane (loop-wait/lane-children.ts). Only the root runs this marker, so it is
+  // marked when a root ever carries one; in the lane it stays plain, like lane timer notices.
+  "loop-pi-child-result",
 ]);
 
 const CLOSE = "</loop_pi_notice>";
