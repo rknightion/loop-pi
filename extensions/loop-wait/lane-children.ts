@@ -5,12 +5,17 @@
 // senior's settle boundary, after that drain has made every child terminal, and appends one message
 // per finished child it has not delivered yet, then continues the run so the senior can use it.
 // It reads each child's run record (`status.json`) only at that boundary; nothing polls.
-import { readFileSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readFileSync, readSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export const CHILD_RESULT_CUSTOM_TYPE = "loop-pi-child-result";
 const MAX_RESULT_BYTES = 8 * 1024;
+// The boundary runs inside pi-subagents' one-second settle grace, so read only a session's tail.
+const MAX_SESSION_TAIL_BYTES = 1024 * 1024;
+const RETURN_REMINDER =
+  "Your last message is this lane's return: after using this, end with your complete final report, " +
+  "including the lane-return block, even if you gave one before.";
 const LIVE_STATES = new Set(["queued", "running"]);
 // The child drain gives up after 30 minutes; each notice buys another drain. Eight cover a senior's
 // four-hour timeout.
@@ -48,7 +53,23 @@ export function isFinished(state: string): boolean {
   return !LIVE_STATES.has(state);
 }
 
-/** The child's last assistant text with no tool call: what pi-subagents reports as its output. */
+/** The last `max` bytes of a file, starting at a whole line. Throws like readFileSync. */
+export function readTail(path: string, max = MAX_SESSION_TAIL_BYTES): string {
+  const fd = openSync(path, "r");
+  try {
+    const size = fstatSync(fd).size;
+    const start = Math.max(0, size - max);
+    const buffer = Buffer.alloc(size - start);
+    readSync(fd, buffer, 0, buffer.length, start);
+    const text = buffer.toString("utf8");
+    return start === 0 ? text : text.slice(text.indexOf("\n") + 1);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** The child's last assistant text with no tool call: what pi-subagents reports as its output.
+ *  None when the child's last turn errored, so an earlier interim reply is not passed off as it. */
 export function finalAssistantText(sessionJsonl: string): string | undefined {
   let last: string | undefined;
   for (const line of sessionJsonl.split("\n")) {
@@ -61,6 +82,10 @@ export function finalAssistantText(sessionJsonl: string): string | undefined {
     }
     const message = row?.message;
     if (message?.role !== "assistant" || !Array.isArray(message.content)) continue;
+    if (message.stopReason === "error") {
+      last = undefined;
+      continue;
+    }
     if (message.content.some((part: any) => part?.type === "toolCall")) continue;
     const text = message.content.map((part: any) => (part?.type === "text" ? part.text : "")).join("").trim();
     if (text) last = text;
@@ -86,7 +111,7 @@ export function childResultText(run: ChildRun, status: ChildStatus | { error: st
   ] as const) {
     if (!path || output) continue;
     try {
-      output = read(readFileSync(path, "utf8"));
+      output = read(readTail(path));
       source = path;
     } catch {
       // Fall through to the next source; the message names what was found.
@@ -95,7 +120,21 @@ export function childResultText(run: ChildRun, status: ChildStatus | { error: st
   const lines = [`${head} finished: ${status.state}.`];
   if (output) lines.push("", capTail(output), "", `Full output: ${source}`);
   else lines.push(`No final output was found${status.outputFile ? `; see ${status.outputFile}` : ""}.`);
+  lines.push("", RETURN_REMINDER);
   return lines.join("\n");
+}
+
+/** True when the lane's last assistant message already carries its lane-return block. */
+export function alreadyReturned(messages: readonly any[]): boolean {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message?.role !== "assistant") continue;
+    const content = message.content;
+    const text = typeof content === "string" ? content
+      : Array.isArray(content) ? content.map((part: any) => (part?.type === "text" ? part.text : "")).join("") : "";
+    return /```lane-return\b/.test(text);
+  }
+  return false;
 }
 
 /** Run ids already delivered on this session's branch, so a resumed lane is not fed twice. */
@@ -123,30 +162,44 @@ export function registerChildResultDelivery(pi: ExtensionAPI): void {
     for (const id of deliveredIds(ctx.sessionManager.getBranch())) delivered.add(id);
   });
 
+  // The settle hook is registered with the first child, so lanes that launch none never run the
+  // boundary (pi skips it when no handler is registered).
+  let settleRegistered = false;
   pi.events.on("subagent:async-started", (data: any) => {
     if (typeof data?.id !== "string" || typeof data.asyncDir !== "string") return;
     // Only children this session launched; the event bus is per process, but stay explicit.
     if (data.sessionId !== undefined && data.sessionId !== sessionFile && data.sessionId !== sessionId) return;
     children.set(data.id, { id: data.id, agent: typeof data.agent === "string" ? data.agent : "child", asyncDir: data.asyncDir });
+    if (!settleRegistered) {
+      settleRegistered = true;
+      pi.on("agent_before_settle", settle);
+    }
   });
 
-  pi.on("agent_before_settle", (event) => {
+  function settle(event: { entries: any[]; outcome: string; context?: { contextMessages?: readonly any[] } }) {
     // An aborted or failed run is not ours to restart; its children are delivered at a later settle.
     if (event.outcome !== "completed") return undefined;
+    // A lane that has already written its return keeps it: pi-subagents reports the last assistant
+    // text, so continuing would replace the return. Record finished results without continuing.
+    const returned = alreadyReturned(event.context?.contextMessages ?? []);
     const drafts: any[] = [];
     for (const run of children.values()) {
       if (delivered.has(run.id)) continue;
       const status = readChildStatus(run.asyncDir);
       if (!("error" in status) && !isFinished(status.state)) {
+        if (returned) continue;
         // Only reached when the drain timed out with this child still live: ask the senior to end
         // its turn again so the next drain keeps waiting, a bounded number of times.
-        const notices = stillRunning.get(run.id) ?? 0;
-        if (notices >= MAX_STILL_RUNNING_NOTICES) continue;
-        stillRunning.set(run.id, notices + 1);
+        const notices = (stillRunning.get(run.id) ?? 0) + 1;
+        if (notices > MAX_STILL_RUNNING_NOTICES) continue;
+        stillRunning.set(run.id, notices);
+        const next = notices === MAX_STILL_RUNNING_NOTICES
+          ? "This is the last such notice: if it is still running when your next turn ends, write your final report with what you have, including the lane-return block."
+          : "End your turn to keep waiting; its result will arrive here.";
         drafts.push({
           type: "custom_message",
           customType: CHILD_RESULT_CUSTOM_TYPE,
-          content: `loop-pi: child run ${run.id} (${run.agent}) is still ${status.state}. End your turn to keep waiting; its result will arrive here.`,
+          content: `loop-pi: child run ${run.id} (${run.agent}) is still ${status.state}. ${next}`,
           display: true,
           details: { runId: run.id, agent: run.agent, state: status.state, pending: true },
         });
@@ -158,11 +211,12 @@ export function registerChildResultDelivery(pi: ExtensionAPI): void {
         customType: CHILD_RESULT_CUSTOM_TYPE,
         content: childResultText(run, status),
         display: true,
-        details: { runId: run.id, agent: run.agent, state: "error" in status ? "unknown" : status.state },
+        details: { runId: run.id, agent: run.agent, state: "error" in status ? "unknown" : status.state, ...(returned ? { afterReturn: true } : {}) },
       });
     }
     if (drafts.length === 0) return undefined;
     // pi replaces the boundary entries with what a handler returns, so keep the ones already there.
-    return { entries: [...event.entries, ...drafts], continue: true };
-  });
+    const entries = [...event.entries, ...drafts];
+    return returned ? { entries } : { entries, continue: true };
+  }
 }

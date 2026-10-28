@@ -183,22 +183,37 @@ seam a senior that ended its turn to wait settled without ever seeing its child'
 
 `loop-wait/lane.ts` (a required child extension in every lane) closes that gap
 (`lane-children.ts`). It records each child this session launches from `subagent:async-started`
-(`id`, `agent`, `asyncDir`, `sessionId`), and at `agent_before_settle`, which runs after that drain
-has made every child terminal, reads each undelivered child's `status.json`. Every child whose
-`state` is not `queued` or `running` gets one `custom_message` (`customType`
-`loop-pi-child-result`, `details.runId`) holding the child's final assistant text from its
-`sessionFile` (else `outputFile`), capped to its last 8 KB, and the hook returns `continue: true` so
-the senior's next turn sees it. It acts only on a `completed` outcome, so an aborted or failed run
-is never restarted. pi replaces the boundary entries with what a handler returns, so the
-hook returns `[...event.entries, ...drafts]`. Delivered run ids are rebuilt from the branch at
-`session_start`, so a resumed senior is not fed twice. Nothing polls: run records are read only at
-the settle boundary. The root keeps its `bg_wait` refusal. A child still running when the drain's own
-30-minute deadline ends gets a keep-waiting notice instead (`details.pending: true`), which
-continues the run so the senior ends its turn and the next drain waits again; at most eight per
-child, covering the senior's four-hour timeout. A senior resumed in a new process does not see `async-started` for children launched before
-the restart, so their results are not delivered. Proof: `loop-wait/child-delivery.e2e.test.ts`
+(`id`, `agent`, `asyncDir`, `sessionId`, compared with both the session file and id, as
+pi-subagents' `currentSessionId` is either), and registers its `agent_before_settle` hook with the
+first child, so a lane that launches none never runs the boundary. At that boundary, which runs
+after the child drain has made every child terminal, it reads each undelivered child's
+`status.json`. Every child whose `state` is not `queued` or `running` gets one `custom_message`
+(`customType` `loop-pi-child-result`, `details.runId`) holding the child's final assistant text from
+the last 1 MB of its `sessionFile` (else `outputFile`; none when its last turn errored), capped to
+its last 8 KB, and a reminder that the lane's last message is its return. The hook then returns
+`continue: true` so the senior's next turn sees it. It acts only on a `completed` outcome, so an
+aborted or failed run is never restarted. pi replaces the boundary entries with what a handler
+returns, so the hook returns `[...event.entries, ...drafts]`.
+
+The lane's return is what pi-subagents reports as its result: the last assistant text. So when the
+last assistant message in `event.context.contextMessages` already holds a `lane-return` fence, the
+hook appends finished results for the record (`details.afterReturn`) and does not continue: a
+continued turn would replace the return the root receives.
+
+Delivered run ids are rebuilt from the branch at `session_start`, so a resumed senior is not fed
+twice. Nothing polls: run records are read only at the settle boundary, and only file tails, as the
+boundary runs inside the child's one-second settle grace. The root keeps its `bg_wait` refusal. A
+child still running when the drain's own 30-minute deadline ends gets a keep-waiting notice instead
+(`details.pending: true`), which continues the run so the senior ends its turn and the next drain
+waits again; at most eight per child, covering the senior's four-hour timeout, and the last tells it
+to return with what it has. A senior resumed in a new process does not see `async-started` for
+children launched before the restart, so their results are not delivered. A `tasks` or `chain`
+launch is one run and is delivered as one message under its first agent; `senior.md` asks for one
+brief per child.
+Proof: `loop-wait/child-delivery.e2e.test.ts`
 (real pi and pi-subagents, faux root, senior and scout; the child finishing before the senior's turn
-ends, and during its drain) and `loop-wait/lane-children.test.ts`.
+ends, during its drain, and after it already wrote its return; each checks what the root
+receives) and `loop-wait/lane-children.test.ts`.
 
 ## Role by entry point
 

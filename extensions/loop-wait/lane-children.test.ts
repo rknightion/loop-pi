@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import {
   CHILD_RESULT_CUSTOM_TYPE,
+  alreadyReturned,
+  readTail,
   MAX_STILL_RUNNING_NOTICES,
   capTail,
   childResultText,
@@ -27,6 +29,30 @@ test("finalAssistantText skips tool-call turns and returns the last plain reply"
   ].join("\n");
   assert.equal(finalAssistantText(jsonl), "final answer");
   assert.equal(finalAssistantText(""), undefined);
+});
+
+test("a child whose last turn errored has no final text, so its log is used instead", () => {
+  const errored = JSON.stringify({ type: "message", message: { role: "assistant", stopReason: "error", content: [] } });
+  assert.equal(finalAssistantText([assistant([{ type: "text", text: "interim" }]), errored].join("\n")), undefined);
+});
+
+test("readTail returns whole lines from the end of a large file", () => {
+  const dir = mkdtempSync(join(tmpdir(), "lane-children-"));
+  try {
+    const path = join(dir, "s.jsonl");
+    writeFileSync(path, ["a".repeat(50), "bbbb", "cccc"].join("\n"));
+    assert.equal(readTail(path, 9), "cccc");
+    assert.equal(readTail(path, 1000), ["a".repeat(50), "bbbb", "cccc"].join("\n"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("alreadyReturned looks only at the last assistant message", () => {
+  const fence = "done\n```lane-return\n{}\n```";
+  assert.equal(alreadyReturned([{ role: "assistant", content: [{ type: "text", text: fence }] }, { role: "custom", content: "x" }]), true);
+  assert.equal(alreadyReturned([{ role: "assistant", content: fence }, { role: "assistant", content: "more" }]), false);
+  assert.equal(alreadyReturned([]), false);
 });
 
 test("capTail keeps the end of a long output and says how much it dropped", () => {
@@ -63,10 +89,11 @@ test("the result names the run, its state and the source, preferring the child's
     writeFileSync(log, "task text\nSEED-1\n");
     const run = { id: "r1", agent: "scout", asyncDir: dir };
     const fromSession = childResultText(run, { state: "complete", sessionFile: session, outputFile: log });
-    assert.equal(fromSession, `loop-pi: child run r1 (scout) finished: complete.\n\nSEED-1\n\nFull output: ${session}`);
+    assert.match(fromSession, new RegExp(`^loop-pi: child run r1 \\(scout\\) finished: complete\\.\n\nSEED-1\n\nFull output: ${session}\n\n`));
+    assert.match(fromSession, /end with your complete final report, including the lane-return block/);
     const fromLog = childResultText(run, { state: "failed", sessionFile: join(dir, "missing.jsonl"), outputFile: log });
-    assert.match(fromLog, /finished: failed\.\n\ntask text\nSEED-1\n\nFull output: .*output-0\.log$/);
-    assert.match(childResultText(run, { state: "stopped" }), /No final output was found\.$/);
+    assert.match(fromLog, /finished: failed\.\n\ntask text\nSEED-1\n\nFull output: .*output-0\.log\n/);
+    assert.match(childResultText(run, { state: "stopped" }), /No final output was found\.\n/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -94,8 +121,9 @@ function fakePi(branch: any[] = []) {
   handlers.get("session_start")({}, ctx);
   return {
     started: (data: unknown) => bus.get("subagent:async-started")(data),
-    settle: (entries: any[] = [], outcome = "completed") =>
-      handlers.get("agent_before_settle")({ type: "agent_before_settle", entries, continue: false, outcome }),
+    registered: () => handlers.has("agent_before_settle"),
+    settle: (entries: any[] = [], outcome = "completed", contextMessages: any[] = []) =>
+      handlers.get("agent_before_settle")({ type: "agent_before_settle", entries, continue: false, outcome, context: { contextMessages } }),
   };
 }
 
@@ -119,7 +147,8 @@ test("settle appends one message per finished child after the existing entries, 
       "a finished child is delivered; one still live after the drain gets a keep-waiting notice",
     );
     assert.match(result.entries[2].content, /is still running\. End your turn to keep waiting/);
-    for (let i = 1; i < MAX_STILL_RUNNING_NOTICES; i++) assert.deepEqual(h.settle().entries.map((e: any) => e.details.runId), ["busy"]);
+    for (let i = 2; i < MAX_STILL_RUNNING_NOTICES; i++) assert.deepEqual(h.settle().entries.map((e: any) => e.details.runId), ["busy"]);
+    assert.match(h.settle().entries[0].content, /last such notice: .* write your final report with what you have/);
     assert.equal(h.settle(), undefined, "keep-waiting notices are bounded and a delivered child is not delivered again");
     writeFileSync(join(live, "status.json"), JSON.stringify({ state: "failed" }));
     assert.deepEqual(h.settle().entries.map((e: any) => [e.details.runId, e.details.state]), [["busy", "failed"]]);
@@ -141,8 +170,29 @@ test("a resumed lane does not redeliver a child already on its branch", () => {
   }
 });
 
-test("no children means settle is left alone", () => {
-  assert.equal(fakePi().settle(), undefined);
+test("a lane that launches no child registers no settle hook", () => {
+  const h = fakePi();
+  assert.equal(h.registered(), false);
+  h.started({ id: "x", agent: "scout", asyncDir: "/nowhere", sessionId: "/s/other.jsonl" });
+  assert.equal(h.registered(), false, "another session's child does not count");
+});
+
+test("after the lane has written its return, results are recorded without continuing and no wait is asked for", () => {
+  const dir = mkdtempSync(join(tmpdir(), "lane-children-"));
+  const live = mkdtempSync(join(tmpdir(), "lane-children-"));
+  try {
+    writeFileSync(join(dir, "status.json"), JSON.stringify({ state: "complete" }));
+    writeFileSync(join(live, "status.json"), JSON.stringify({ state: "running" }));
+    const h = fakePi();
+    h.started({ id: "done", agent: "scout", asyncDir: dir, sessionId: "sid" });
+    h.started({ id: "busy", agent: "worker", asyncDir: live, sessionId: "sid" });
+    const result = h.settle([], "completed", [{ role: "assistant", content: [{ type: "text", text: "report\n```lane-return\n{}\n```" }] }]);
+    assert.equal(result.continue, undefined, "the run is not continued, so the return stays the lane's last word");
+    assert.deepEqual(result.entries.map((e: any) => [e.details.runId, e.details.afterReturn]), [["done", true]]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(live, { recursive: true, force: true });
+  }
 });
 
 test("an aborted or failed senior run is never continued", () => {
