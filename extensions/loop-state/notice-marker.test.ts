@@ -53,6 +53,6 @@ test("the loop-state context hook marks loop-pi notices after its own rewrites",
   loopState({ on: (n: string, h: any) => handlers.set(n, h), events: { on: () => () => undefined, emit: () => undefined } } as any);
   const owner = { role: "user", content: "owner text" };
   const wake = { role: "custom", customType: "loop-wake", content: "timer fired" };
-  const result = handlers.get("context")!({ type: "context", messages: [owner, wake] }, {});
+  const result = handlers.get("context_with_system")!({ type: "context_with_system", messages: [owner, wake] }, {});
   assert.deepEqual(result?.messages, [owner, { ...wake, content: `${MARK}\ntimer fired\n</loop_pi_notice>` }]);
 });

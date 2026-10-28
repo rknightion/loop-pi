@@ -60,7 +60,7 @@ test("a held notice after a loop-pi abort reaches the model without the owner-st
   r.pi.events.emit("loop-recovery:request-timeout", { limitType: "inactivity" });
   const notice = heldNotice(Date.now() + 1);
   const user = { role: "user", content: "go", timestamp: before - 10 };
-  const result = r.fire("context", { messages: [user, notice] });
+  const result = r.fire("context_with_system", { messages: [user, notice] });
   assert.ok(result?.messages, "the context hook rewrites the held notice");
   assert.equal(result.messages[0], user);
   assert.ok(!result.messages[1].content.includes(HELD_COMPLETION_ACTION));
@@ -117,7 +117,7 @@ test("an operator Esc keeps the package's held text verbatim", () => {
   const r = root();
   r.fire("session_start");
   const notice = heldNotice(Date.now());
-  const result = r.fire("context", { messages: [notice] });
+  const result = r.fire("context_with_system", { messages: [notice] });
   assert.ok(result === undefined || result.messages[0].content.includes(HELD_COMPLETION_ACTION));
 });
 
@@ -130,7 +130,7 @@ test("the next run closes the window: a later operator-Esc notice is not rewritt
   r.fire("agent_start");
   await new Promise((resolve) => setTimeout(resolve, 5));
   const after = heldNotice(Date.now());
-  const result = r.fire("context", { messages: [during, after] });
+  const result = r.fire("context_with_system", { messages: [during, after] });
   assert.ok(result?.messages);
   assert.ok(result.messages[0].content.includes(HARNESS_HELD_ACTION));
   assert.ok(result.messages[1].content.includes(HELD_COMPLETION_ACTION));
@@ -146,7 +146,7 @@ test("a resumed root rebuilds its windows from the session branch", () => {
   r.fire("session_start");
   const inside = heldNotice(start + 100);
   const outside = heldNotice(start + 900);
-  const result = r.fire("context", { messages: [inside, outside] });
+  const result = r.fire("context_with_system", { messages: [inside, outside] });
   assert.ok(result?.messages);
   assert.ok(result.messages[0].content.includes(HARNESS_HELD_ACTION));
   assert.ok(result.messages[1].content.includes(HELD_COMPLETION_ACTION));

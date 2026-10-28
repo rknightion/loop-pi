@@ -631,7 +631,7 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
     if (event.message.role === "assistant") rootActivity();
     try {
       // A replay of a pending notice stays whole in storage, or pi-subagents would replay it at every
-      // start; the context hook below still caps it in the model request.
+      // start; the request hook below still caps it in the model request.
       if (replaysPendingNotice(event.message, ctx)) return undefined;
       const replacement = capNotifyMessage(event.message as { role?: string; customType?: string; content?: unknown }, process.env.LOOP_PI_RUN_DIR, completionFor);
       if (replacement) return { message: replacement as typeof event.message };
@@ -641,7 +641,10 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
     return undefined;
   });
 
-  pi.on("context", (event) => {
+  // context_with_system, not context: pi 1.4.0 folds every mid-conversation system message into one
+  // new leading message when a context handler changes the list, which misses the prompt cache at each
+  // prompt-section update. Only custom messages are rewritten here; system messages pass through.
+  pi.on("context_with_system", (event) => {
     try {
       let changed = false;
       const messages = event.messages.map((message) => {
@@ -672,7 +675,7 @@ export default function (pi: ExtensionAPI, scheduleRecovery: (job: () => void) =
     return undefined;
   });
 
-  // Native compaction summarises the stored messages and never runs the `context` hook: neutralise the
+  // Native compaction summarises the stored messages and never runs the request hooks: neutralise the
   // same held notices there, or the summary could carry the owner-stop text forward.
   pi.on("session_before_compact", (event) => {
     // A notice stored whole (a pending replay, or one appended with no message_end) is capped here

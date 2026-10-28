@@ -825,9 +825,10 @@ paths are exact, bash write detection is best-effort.
   `triggerTurn: false` and no extension message events. In the model request only, pi-subagents wraps every
   pi-subagents message in `<pi_subagents_notice type=... origin="automated message from the
   pi-subagents extension, not typed by the user">`; the stored message is unchanged. From 0.83.0 the
-  wrapper runs in a `context_with_system` hook, which pi 1.4.0 runs after every `context` hook
-  (`dist/core/extensions/runner.js` `emitContext`), so loop-state's `context` pass sees the notice
-  unwrapped. A test that reads the request must read what the provider receives
+  wrapper runs in a `context_with_system` hook. pi 1.4.0 runs every `context` hook, then every
+  `context_with_system` hook in extension load order (`dist/core/extensions/runner.js` `emitContext`),
+  and loads `--extension` paths before package extensions, so loop-state's own `context_with_system`
+  pass, launched with `--extension`, sees the notice unwrapped. A test that reads the request must read what the provider receives
   (`LOOP_PI_FAUX_REQUEST_LOG` in `test-support/faux-extension.ts`), not a `context_with_system`
   observer: pi runs `--extension` paths before package extensions, so an observer runs before the
   wrapper. A busy root still gets the notice as a steer with message events. So:
@@ -843,14 +844,14 @@ paths are exact, bash write detection is best-effort.
   an operator Esc from loop-pi's request-ceiling or recovery abort. loop-state
   (`loop-state/harness-hold.ts`) opens a window at `loop-recovery:request-timeout` or
   `loop-recovery:abort`, closes it at the next `agent_start`, persists it as `loop-pi-harness-hold`
-  entries, and in its `context` hook replaces that line in held notices timestamped inside a window
+  entries, and in its request hook replaces that line in held notices timestamped inside a window
   with a neutral loop-pi line. An operator Esc keeps the package's text. No wake is restored: after a
   continuing incident the incident's own turn clears the hold, and after a recovery stop the root
   waits for the owner, as the recovery notice already says.
   - **No window for an owner abort.** The ceiling timer and the recovery episode timer emit their
     abort marker only while `ctx.signal` is not already aborted. An owner Esc in the same run (a race
     of milliseconds) is the owner's stop: it opens no window and its held notices keep the package's text.
-  - **Compaction.** pi 1.4.0 runs the `context` hook only on the agent loop's request path
+  - **Compaction.** pi 1.4.0 runs the request hooks (`context`, `context_with_system`) only on the agent loop's request path
     (`core/sdk.js` `transformContext` is the single caller of `emitContext`). Native compaction, manual
     and automatic, summarises the stored messages from `prepareCompaction` and never passes through it.
     loop-state therefore rewrites the same held notices in the `session_before_compact` preparation
@@ -887,9 +888,13 @@ paths are exact, bash write detection is best-effort.
   `isSubagentLaunch`). 0.83.0 also converts string scalars inside `options` (`"true"`, `"120000"`)
   to their declared types after the hooks; loop-pi's value checks on the raw call fail closed on a
   string (`worktree: "true"` is not retained), so no guard reads the converted value.
+  A control action must name its run: an `interrupt` without `id` or `runId` goes to the newest async
+  run in the session (`interruptAsyncRun`, `fallbackToNewest`; upstream issue 3081), so the root and
+  lane guards refuse it, and refuse `stop`, `steer` and `resume` with no `id`, `runId` or `dir`
+  (`rules.ts` `controlTargetBlock`).
   With it off the message stays queued for the child's next boundary and nothing is interrupted.
 - **Return cap** (lane: loop-guard's lane entry at the child's assistant `message_end`; root:
-  loop-state at `message_end`, plus the `context` hook for already-stored messages).
+  loop-state at `message_end`, plus the request hook for already-stored messages).
   - Lane: the last non-empty text part of an assistant message with no tool call and no error (the
     part pi-subagents' `getFinalOutput` returns) over 14,336 bytes becomes up to its first 4,096 bytes, an
     omission line naming `<run dir>/returns/lane-<lane id or session id>-<sha16>.md` (the full
@@ -940,18 +945,18 @@ paths are exact, bash write detection is best-effort.
     head.
   - Limit: a notify appended without a turn (the parent held, or the recovery wake hold) reaches no
     root extension at `message_end`, and pi-subagents batches completions that finish together into
-    one notify, which is stored at the sum of their previews. The `context` hook still caps what the
+    one notify, which is stored at the sum of their previews. The request hook still caps what the
     model sees.
   - Pending replay: pi-subagents (since its 0.79.2) records a wake that never started as a
     `subagent-notify-pending` entry at shutdown and replays it at the next start until a stored
     `subagent-notify` has identical content (`notify.js` `unreplayedPendingNotices`). loop-state
-    therefore stores a replay of a pending entry whole; the `context` hook caps it in the model
+    therefore stores a replay of a pending entry whole; the request hook caps it in the model
     request and `session_before_compact` caps it in native compaction's input (`messagesToSummarize`,
     `turnPrefixMessages`). Capping it in storage would make it replay at every restart.
 ## Automated notice marker
 
 pi sends a custom message to the model as a plain user message. In the root's model request,
-loop-state's `context` hook wraps every loop-pi notice type in `LOOP_PI_NOTICE_TYPES`
+loop-state's request hook wraps every loop-pi notice type in `LOOP_PI_NOTICE_TYPES`
 (`loop-state/notice-marker.ts`) as
 `<loop_pi_notice type="<customType>" origin="automated message from the loop-pi harness, not typed by
 the user">`, newline, the content, newline, `</loop_pi_notice>`; a parts array gains a text part on
@@ -959,7 +964,16 @@ each side. It runs after the return cap and the harness-hold rewrite, which read
 and matches pi-subagents 0.83.0's `<pi_subagents_notice>` shape, which pi-subagents applies later, in
 its `context_with_system` hook. The marker depends only on the
 message, so cached prefixes stay valid; the stored message, the chat view and native compaction input
-are unchanged. Lanes do not load loop-state and are not marked. `notice-marker.test.ts` fails when a
+are unchanged. Lanes do not load loop-state and are not marked.
+
+The request hook is `context_with_system`, not `context`. When a `context` handler returns a changed
+list, pi 1.4.0 replaces every system message with one new leading message holding the current prompt
+(`runner.js` `restoreSystemMessages`). pi-subagents updates its `advertised_subagents` prompt section
+several times a session and pi records each update as a mid-conversation system message, so a
+`context` rewrite would change the request from its first token at each update and miss the whole
+prompt cache on models with `supportsMidConvoSystemMessages` (the gpt-6 catalogue entries). loop-state
+rewrites only custom messages and passes system messages through; `system-delta-e2e.test.ts` proves a
+section update stays in place after a marked notice. pi-subagents 0.83.0 made the same move. `notice-marker.test.ts` fails when a
 source sends a `loop-*` custom message type the set does not name.
 
 ## Closeout and root fences
@@ -1221,8 +1235,10 @@ set with `ctx.ui.setStatus`; it sets no widget and clears the key at `session_sh
   beside the launch closeout. The closeout path (`reportPath`), and `concurrency` for the slot cap, come from
   `loop-continuation:query-launch` once per launch.
 - There is no timer. The line is rebuilt, coalesced to one microtask, on `subagent:async-started`,
-  `subagent:async-complete`, `session_start`, `agent_start`, `agent_settled` and
-  `tool_execution_end`, so heartbeat age and nudge count are as of that rebuild. Nothing is set
+  `subagent:async-complete`, `subagent:jobs-changed` (pi-subagents 0.83.0; emitted when one of this
+  session's background runs changes, checked about every 5 s and only with a UI), `session_start`,
+  `agent_start`, `agent_settled` and `tool_execution_end`, so heartbeat age and nudge count are as of
+  that rebuild. Nothing is set
   without a UI.
 - Format: `loop: <N>/<cap> lanes (or <N> lane(s) when no cap) · <N> timers · <N> watchers · next
   HH:MM (earliest timer or watcher deadline, if any) · root model time <P>% of <wall> (or ?, or

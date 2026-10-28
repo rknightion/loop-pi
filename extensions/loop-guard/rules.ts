@@ -2140,6 +2140,24 @@ export function evaluateBriefHeader(raw: SubagentInput): Decision {
 }
 
 /** Shared host-execution policy only. Native child role/depth/allowlists stay native-owned. */
+const named = (value: unknown) => typeof value === "string" && value.trim() !== "";
+
+/** A control action must name its run. pi-subagents 0.83.0 sends an `interrupt` with no `id` or
+ *  `runId` to the newest async run in the session (`fallbackToNewest`, upstream issue 3081), which can
+ *  cancel a healthy lane; a `dir` does not count there. `stop`, `steer` and `resume` accept a `dir`
+ *  and are refused by the package without a target; the guard refuses them first as a backstop. */
+function controlTargetBlock(input: Record<string, unknown>): Decision | undefined {
+  const action = typeof input.action === "string" ? input.action.trim() : undefined;
+  const byId = named(input.id) || named(input.runId);
+  if (action === "interrupt" && !byId) {
+    return block("loop-guard: `interrupt` needs an explicit run `id` (without one the package interrupts the newest run, which may be another lane).");
+  }
+  if ((action === "stop" || action === "steer" || action === "resume") && !byId && !named(input.dir)) {
+    return block(`loop-guard: \`${action}\` needs an explicit run \`id\` (or \`dir\`).`);
+  }
+  return undefined;
+}
+
 export function evaluateSubagentPolicyFields(raw: SubagentInput): Decision {
   const merged = subagentCallView(raw);
   if (!merged.ok) return block(merged.reason);
@@ -2150,6 +2168,8 @@ export function evaluateSubagentPolicyFields(raw: SubagentInput): Decision {
   if (input.gate !== undefined) {
     return block("loop-guard: `subagent` calls may not carry `gate` (spawns a shell in the host process).");
   }
+  const target = controlTargetBlock(input);
+  if (target) return target;
   // pi-subagents' own guidance asks for one workflow call holding
   // every child. The loop protocol launches each lane as its own async call instead:
   // only single-agent launches get the checkpoint steer before `timeoutMs`,

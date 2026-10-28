@@ -1,7 +1,8 @@
 // Test-only companion extension. It plays the parts of a root the status line reads but a bare
 // test session lacks: pi-subagents' async lane events, loop-continuation's launch answer and its
 // persisted state entry. Driven by prompt text, handled before any model turn:
-//   lane-start <id> | lane-done <id> | timer <iso> | nudges <n> | launch <report path> | cap <n>
+//   lane-start <id> | lane-done <id> | timer <iso> | nudges <n> | launch <report path> | cap <n> |
+//   jobs-changed <any> (pi-subagents 0.83.0's change notice, which carries no payload but a version)
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export default function (pi: ExtensionAPI): void {
@@ -11,7 +12,7 @@ export default function (pi: ExtensionAPI): void {
     (data as { reply: (r: unknown) => void }).reply(concurrency === null ? { reportPath } : { reportPath, concurrency });
   });
   pi.on("input", (event, ctx) => {
-    const m = /^(lane-start|lane-done|timer|nudges|launch|cap) (\S+)$/.exec(event.text.trim());
+    const m = /^(lane-start|lane-done|timer|nudges|launch|cap|jobs-changed) (\S+)$/.exec(event.text.trim());
     if (!m) return { action: "continue" as const };
     const [, verb, arg] = m;
     const sessionId = ctx.sessionManager.getSessionFile() ?? ctx.sessionManager.getSessionId();
@@ -23,6 +24,8 @@ export default function (pi: ExtensionAPI): void {
       pi.events.emit("loop-wait:arm-timer", { at: arg, reason: "status test timer", reply: () => {} });
     } else if (verb === "nudges") {
       pi.appendEntry("loop-continuation-state", { armed: true, launch: null, nudgeCount: Number(arg), chainIncidentWritten: false });
+    } else if (verb === "jobs-changed") {
+      pi.events.emit("subagent:jobs-changed", { version: 1 });
     } else if (verb === "cap") {
       concurrency = Number(arg);
     } else {

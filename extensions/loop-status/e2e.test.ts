@@ -87,3 +87,23 @@ test("a goal's slot cap shows as lanes over cap once the launch carries one", as
     await pi.close();
   }
 });
+
+test("pi-subagents' jobs-changed notice refreshes the status line with no turn", async () => {
+  const pi = start();
+  try {
+    await pi.waitFor(isStatus);
+    const codex = join(freshDir("loop-status-repo-"), "codex");
+    mkdirSync(codex);
+    pi.send({ id: "j0", type: "prompt", message: `launch ${join(codex, "closeout-demo-loop1.md")}` });
+    await pi.waitForResponse("j0");
+    // Written behind the extension's back: only a refresh reads it. Handled inputs start no turn.
+    const heartbeatAt = new Date(Date.now() - 125_000).toISOString();
+    writeFileSync(join(codex, "state-demo-loop1.jsonl"), `{"ev":"open","at":"2026-10-08T00:00:00Z"}\n{"ev":"heartbeat","at":"${heartbeatAt}"}\n`);
+    const seen = pi.events.length;
+    pi.send({ id: "j1", type: "prompt", message: "jobs-changed 1" });
+    const status = await pi.waitFor((e) => isStatus(e) && /hb 2m ago$/.test(text(e)) && pi.events.indexOf(e) >= seen, 5_000);
+    assert.match(text(status), /^loop: 0 lanes · /);
+  } finally {
+    await pi.close();
+  }
+});

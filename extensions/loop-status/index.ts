@@ -275,6 +275,11 @@ export default function (pi: ExtensionAPI): void {
     if (typeof d?.id === "string" && d.sessionId === sessionKey) liveRuns.add(d.id);
     refresh();
   });
+  // pi-subagents 0.83.0: one of this session's background runs started, moved to its next step,
+  // reported progress or finished (its poller checks about every 5 s, and only with a UI, as the status
+  // line needs). The nested count and the heartbeat age then stay current while the root waits idle.
+  // `refresh` coalesces bursts and `render` skips an unchanged line.
+  pi.events.on("subagent:jobs-changed", () => refresh());
   pi.events.on("subagent:async-complete", (data) => {
     const d = data as { runId?: unknown; id?: unknown } | null;
     const id = typeof d?.runId === "string" ? d.runId : typeof d?.id === "string" ? d.id : undefined;

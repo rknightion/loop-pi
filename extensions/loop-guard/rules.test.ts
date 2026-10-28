@@ -943,6 +943,37 @@ test("subagent deny: options.script runs a workflow (pi-subagents 0.83.0 lowers 
   }
 });
 
+test("subagent deny: interrupt without an explicit run id (the package would pick the newest run)", () => {
+  for (const call of [{ action: "interrupt" }, { action: "interrupt", id: "  " }, { action: "interrupt", dir: "/tmp/run" }, { action: "interrupt", options: {} }]) {
+    for (const decision of [evaluateSubagentCall(call), evaluateSubagentPolicyFields(call)]) {
+      assert.equal(decision.block, true, JSON.stringify(call));
+      assert.match(decision.reason ?? "", /explicit run `id`/);
+    }
+  }
+});
+
+test("subagent deny: stop, steer and resume without any run target", () => {
+  for (const action of ["stop", "steer", "resume"]) {
+    const decision = evaluateSubagentPolicyFields({ action, message: "x" });
+    assert.equal(decision.block, true, action);
+    assert.match(decision.reason ?? "", /explicit run `id`/);
+  }
+});
+
+test("subagent allow: control actions that name their run", () => {
+  for (const call of [
+    { action: "interrupt", id: "run-1" },
+    { action: "interrupt", options: { runId: "run-1" } },
+    { action: "stop", id: "run-1" },
+    { action: "stop", dir: "/tmp/run" },
+    { action: "steer", id: "run-1", message: "x" },
+    { action: "resume", runId: "run-1", message: "x" },
+  ]) {
+    assert.equal(evaluateSubagentPolicyFields(call).block, false, JSON.stringify(call));
+    assert.equal(evaluateSubagentCall(call).block, false, JSON.stringify(call));
+  }
+});
+
 test("subagent allow: validating a workflow script launches nothing", () => {
   const decision = evaluateSubagentCall({ action: "validate", workflowScriptPath: "codex/dispatch.js" });
   assert.equal(decision.block, false);

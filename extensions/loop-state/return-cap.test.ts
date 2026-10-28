@@ -240,12 +240,12 @@ test("the context hook caps an oversized notify already in the session, and leav
     const big = { role: "custom", customType: "subagent-notify", content: `${BLOCK}\n${"q".repeat(40_000)}`, display: false };
     const user = { role: "user", content: "u".repeat(40_000) };
     const small = { role: "custom", customType: "subagent-notify", content: "short", display: false };
-    const result = handlers.get("context")!({ type: "context", messages: [user, big, small] }, {});
+    const result = handlers.get("context_with_system")!({ type: "context_with_system", messages: [user, big, small] }, {});
     assert.equal(result.messages[0], user);
     assert.equal(result.messages[2], small);
     assert.ok(Buffer.byteLength(result.messages[1].content) <= RETURN_CAP_BYTES);
     assert.ok(result.messages[1].content.includes(BLOCK));
-    assert.equal(handlers.get("context")!({ type: "context", messages: [user, small] }, {}), undefined);
+    assert.equal(handlers.get("context_with_system")!({ type: "context_with_system", messages: [user, small] }, {}), undefined);
   } finally {
     if (previous === undefined) delete process.env.LOOP_PI_RUN_DIR;
     else process.env.LOOP_PI_RUN_DIR = previous;
@@ -334,7 +334,7 @@ test("a replayed pending notice is stored whole and capped only in the model req
     assert.equal(handlers.get("message_end")!({ type: "message_end", message }, ctx), undefined, "the replay is stored whole");
     const fresh_ = handlers.get("message_end")!({ type: "message_end", message }, { sessionManager: { getBranch: () => [] } });
     assert.notEqual(fresh_?.message.content, content, "an ordinary oversized notice is still capped in storage");
-    const request = handlers.get("context")!({ type: "context", messages: [message] }, ctx);
+    const request = handlers.get("context_with_system")!({ type: "context_with_system", messages: [message] }, ctx);
     assert.ok(Buffer.byteLength(request.messages[0].content) < Buffer.byteLength(content), "the model request is capped");
   } finally {
     if (previous === undefined) delete process.env.LOOP_PI_RUN_DIR;
