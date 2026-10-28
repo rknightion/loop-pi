@@ -80,7 +80,7 @@ def wait_for_runners(root, timeout=30):
     root = str(root)
     me = os.getpid()
     def live():
-        listing = subprocess.run(['ps', '-axo', 'pid=,stat=,command='], capture_output=True, text=True, timeout=10).stdout
+        listing = subprocess.run(['ps', '-axww', '-o', 'pid=,stat=,command='], capture_output=True, text=True, timeout=10).stdout
         pids = set()
         for line in listing.splitlines():
             fields = line.strip().split(None, 2)
