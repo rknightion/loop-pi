@@ -14,7 +14,8 @@ const MAX_RESULT_BYTES = 8 * 1024;
 // The boundary runs inside pi-subagents' one-second settle grace, so read only a session's tail.
 const MAX_SESSION_TAIL_BYTES = 1024 * 1024;
 const RETURN_REMINDER =
-  "Your last message is this lane's return. If you launch another child, end your turn without a " +
+  "Your last message is this lane's return. If you launch another child or one is still running, " +
+  "end your turn without a " +
   "lane-return block; its result will arrive here. Otherwise end with your complete final report, " +
   "including the lane-return block, even if you gave one before.";
 const LIVE_STATES = new Set(["queued", "running"]);
@@ -195,7 +196,7 @@ export function registerChildResultDelivery(pi: ExtensionAPI): void {
         if (notices > MAX_STILL_RUNNING_NOTICES) continue;
         stillRunning.set(run.id, notices);
         const next = notices === MAX_STILL_RUNNING_NOTICES
-          ? "This is the last such notice: end this turn with your final report with what you have, including the lane-return block. If the child finishes first, its result is still recorded."
+          ? "This is the last such notice: end this turn with your final report with what you have, including the lane-return block. If the child finishes before this lane ends, its result is recorded in the session but not shown to you."
           : "End your turn to keep waiting; its result will arrive here.";
         drafts.push({
           type: "custom_message",

@@ -191,8 +191,8 @@ after the child drain has made every child terminal, it reads each undelivered c
 (`customType` `loop-pi-child-result`, `details.runId`) holding the child's final assistant text from
 the last 1 MB of its `sessionFile` (else `outputFile`; none when its last turn errored), capped to
 its last 8 KB, and a reminder that the lane's last message is its return: end the turn without a
-`lane-return` block when launching another child, otherwise end with the complete final report. The hook then returns
-`continue: true` so the senior's next turn sees it. It acts only on a `completed` outcome, so an
+`lane-return` block when launching another child or while one is still running, otherwise end with
+the complete final report. The hook then returns `continue: true` so the senior's next turn sees it. It acts only on a `completed` outcome, so an
 aborted or failed run is never restarted. pi replaces the boundary entries with what a handler
 returns, so the hook returns `[...event.entries, ...drafts]`.
 

@@ -92,7 +92,7 @@ test("the result names the run, its state and the source, preferring the child's
     const run = { id: "r1", agent: "scout", asyncDir: dir };
     const fromSession = childResultText(run, { state: "complete", sessionFile: session, outputFile: log });
     assert.match(fromSession, new RegExp(`^loop-pi: child run r1 \\(scout\\) finished: complete\\.\n\nSEED-1\n\nFull output: ${session}\n\n`));
-    assert.match(fromSession, /If you launch another child, end your turn without a lane-return block; its result will arrive here\. Otherwise end with your complete final report, including the lane-return block/);
+    assert.match(fromSession, /If you launch another child or one is still running, end your turn without a lane-return block; its result will arrive here\. Otherwise end with your complete final report, including the lane-return block/);
     const fromLog = childResultText(run, { state: "failed", sessionFile: join(dir, "missing.jsonl"), outputFile: log });
     assert.match(fromLog, /finished: failed\.\n\ntask text\nSEED-1\n\nFull output: .*output-0\.log\n/);
     assert.match(childResultText(run, { state: "stopped" }), /No final output was found\.\n/);
