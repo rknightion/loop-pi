@@ -1,11 +1,13 @@
-// Pi 1.1.0 public idle/usage/compaction APIs only. See the state-aware context seam.
+// Pi 1.4.0 public idle/usage/projection/compaction APIs only. See the state-aware context seam.
 import { createHash } from "node:crypto";
 import { constants, closeSync, fstatSync, openSync, readSync } from "node:fs";
+import { calculateContextTokens, estimateTokens } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { FrozenRootContext } from "../loop-continuation/state.ts";
 
 export const CONTEXT_BUDGET_STATE = "loop-root-context-budget";
 export const COMPACT_PERCENT = 80;
+export const HARD_COMPACT_PERCENT = 95;
 export const REARM_PERCENT = 70;
 /** Share of the context window past which a root compacts after a landed push. Well below the
  *  80 percent backstop so a long loop compacts at a batch boundary, with room to grow before the next. */
@@ -25,6 +27,42 @@ export function pushCompactPercent(env: NodeJS.ProcessEnv = process.env): number
     if (value >= 1 && value < COMPACT_PERCENT) return value;
   }
   return PUSH_COMPACT_PERCENT;
+}
+
+/** Recover an unaffected native usage anchor only for zero-usage failed-message omissions. */
+function recoveryUsagePercent(ctx: ExtensionContext, nativePercent: number, contextWindow: number): number {
+  if (nativePercent >= HARD_COMPACT_PERCENT) return nativePercent;
+  try {
+    const branch = ctx.sessionManager.getBranch();
+    const projection = ctx.sessionManager.buildSessionProjection?.();
+    if (!projection) return nativePercent;
+    let anchorId: string | undefined, anchorIndex = -1, anchorTokens = 0, index = 0;
+    for (const entry of projection.entries) for (const message of entry.messages) {
+      if (message.role === "assistant" && message.stopReason !== "error" && message.stopReason !== "aborted") {
+        const tokens = calculateContextTokens(message.usage);
+        if (Number.isFinite(tokens) && tokens > 0) { anchorId = entry.sourceEntry.id; anchorIndex = index; anchorTokens = tokens; }
+      }
+      index++;
+    }
+    const rawAnchor = branch.findIndex(entry => entry.id === anchorId);
+    if (rawAnchor < 0) return nativePercent;
+    let omitted = false;
+    for (let i = rawAnchor + 1; i < branch.length; i++) {
+      const entry = branch[i];
+      if (entry.type === "compaction") return nativePercent;
+      if (entry.type !== "context_edit") continue;
+      const targetIndex = branch.findIndex(target => target.id === entry.targetId);
+      const target = branch[targetIndex];
+      if (entry.replacement !== null || targetIndex <= rawAnchor || targetIndex >= i
+        || target?.type !== "message" || target.message.role !== "assistant"
+        || !["error", "aborted"].includes(target.message.stopReason)
+        || ![target.message.usage.input, target.message.usage.output, target.message.usage.cacheRead, target.message.usage.cacheWrite, target.message.usage.totalTokens].every(value => value === 0)) return nativePercent;
+      omitted = true;
+    }
+    if (!omitted) return nativePercent;
+    const trailing = projection.messages.slice(anchorIndex + 1).reduce((sum, message) => sum + estimateTokens(message), 0);
+    return Number.isFinite(trailing) ? (anchorTokens + trailing) / contextWindow * 100 : nativePercent;
+  } catch { return nativePercent; }
 }
 
 /** Why this extension compacted the root; named in the summary the root reads afterwards. */
@@ -195,13 +233,14 @@ export function installContextBudget(pi: ExtensionAPI, services: {
       services.warn("context budget unsupported: active model context usage is unknown");
       return;
     }
-    if (usage.percent < REARM_PERCENT && latched) { latched = false; persist(); }
+    const percent = recoveryUsagePercent(ctx, usage.percent, usage.contextWindow);
+    if (percent < REARM_PERCENT && latched) { latched = false; persist(); }
     // A landed push is a batch boundary: state is on disk, so the fleet need not be quiet. It is
     // spent here whether or not it compacts; the next push is the next boundary.
     const threshold = pushCompactPercent();
-    const viaPush = pushLanded && usage.percent >= threshold;
+    const viaPush = pushLanded && percent >= threshold;
     pushLanded = false;
-    const backstop = usage.percent >= COMPACT_PERCENT;
+    const backstop = percent >= COMPACT_PERCENT;
     if (!viaPush && (!backstop || latched)) return;
     if (attempts >= MAX_COMPACTIONS) return;
     const observed = revision;
@@ -212,8 +251,8 @@ export function installContextBudget(pi: ExtensionAPI, services: {
       latched = true;
     }
     const trigger: CompactionTrigger = viaPush
-      ? { reason: "landed-push", percent: usage.percent, threshold }
-      : { reason: "context-backstop", percent: usage.percent, threshold: COMPACT_PERCENT };
+      ? { reason: "landed-push", percent, threshold }
+      : { reason: "context-backstop", percent, threshold: COMPACT_PERCENT };
     attempts++;
     persist(); // Preparation failures consume this generation too; no repeated automatic attempts.
     // A push compaction that completes, or is declined without an error, hands its attempt back:

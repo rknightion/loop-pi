@@ -1240,6 +1240,14 @@ The native system prompt remains Pi-owned. No authority is inferred from a model
   32-KiB bounds. This avoids the
   pinned package treating proactive compaction as an operator request to resume the root. `percent` is a percentage, so the proactive
   trigger is **80%** (fraction 0.8), not 0.8%. It does not guess tokens from provider clocks.
+  Pi 1.4.0 exposes no estimated/measured discriminator. A recovery omission of a later zero-usage
+  failed assistant invalidates its earlier successful usage anchor and re-estimates all history.
+  The backstop and push trigger retain the unaffected measured anchor only when public session
+  projection/branch evidence shows every intervening edit omits a later failed/aborted assistant
+  with all five usage counters zero. Estimated trailing projected messages are added to the anchor.
+  Other edits, compactions or missing provenance retain native usage. A native **95%** reading
+  bypasses this correction; the existing quiet, latch and attempt guards still apply. Fresh measured
+  usage restores the ordinary 80% backstop. Saved history and pi itself remain unchanged.
   Unknown usage, missing methods or a missing frozen snapshot is a concrete unsupported boundary,
   not permission to restart. The latch survives in `loop-root-context-budget` custom entries:
   at most one attempt per high-usage generation; a known reading below 70% rearms it (10 percentage

@@ -1,0 +1,30 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { AgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
+import { installContextBudget } from "./context-budget.ts";
+
+for (const mode of ["omission", "hard-ceiling", "replacement", "successful-omission"]) test(`native recovery usage provenance: ${mode}`, async () => {
+  const session=SessionManager.inMemory();
+  const usage=(input:number)=>({input,output:1,cacheRead:0,cacheWrite:0,totalTokens:input+1,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}});
+  const assistant=(input:number,stopReason="stop")=>({role:"assistant",api:"openai-responses",provider:"fixture",model:"fixture",content:[{type:"text",text:"done"}],usage:usage(input),stopReason,timestamp:Date.now()});
+  session.appendMessage({role:"user",content:"x".repeat(35000),timestamp:Date.now()});
+  const successful = session.appendMessage(assistant(1000) as any);
+  const failure=assistant(0,"error");failure.usage.output=0;failure.usage.totalTokens=0;
+  const failed=session.appendMessage(failure as any);
+  session.appendContextEdit(mode === "successful-omission" ? successful : failed, mode === "replacement" ? {content:[{type:"text",text:"replacement"}]} : null);
+  if (mode === "hard-ceiling") session.appendMessage({role:"user",content:"y".repeat(5000),timestamp:Date.now()});
+  const native=()=>AgentSession.prototype.getContextUsage.call({_limitsModel:()=>({contextWindow:10000}),sessionManager:session} as any)!;
+  assert.ok(native().percent!>=80,JSON.stringify(native()));
+  assert.equal(native().percent!>=95,mode === "hard-ceiling",JSON.stringify(native()));
+  const handlers=new Map<string,any>();let compactions=0;
+  const pi={on:(name:string,fn:any)=>handlers.set(name,fn),events:{on:()=>undefined},appendEntry:(type:string,data:any)=>session.appendCustomEntry(type,data)};
+  const ctx={sessionManager:session,getContextUsage:native,isIdle:()=>true,hasPendingMessages:()=>false,compact:(o:any)=>{compactions++;o.onError(new Error("fixture"));}};
+  const budget=installContextBudget(pi as any,{drain:async()=>{},quiet:async()=>true,prepare:async()=>({summary:"fixture",log:"unused",logSha256:"fixture"}),warn:()=>{}});
+  budget.sessionStart(ctx as any);
+  await handlers.get("agent_settled")({aborted:false},ctx);
+  assert.equal(compactions,mode === "omission" ? 0 : 1,"only failure-only omission below the hard ceiling retains the usage anchor");
+  if (mode !== "omission") return;
+  session.appendMessage(assistant(9000) as any);
+  await handlers.get("agent_settled")({aborted:false},ctx);
+  assert.equal(compactions,1,"fresh successful measured usage above threshold compacts");
+});
