@@ -16,7 +16,7 @@ const { cleanupAsyncRetention } = await import(retentionUrl.href);
 after(cleanupAll);
 const HERE = dirname(fileURLToPath(import.meta.url));
 
-test("installed lifecycle and restart capture survive pinned package pruning of scratch originals", { timeout: 150_000 }, async () => {
+for (const resumable of [false, true]) test(`installed lifecycle and restart capture survive pinned package pruning (resumable=${resumable})`, { timeout: 150_000 }, async () => {
   const repo = realpathSync(freshDir("patch-repo-"));
   const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, encoding: "utf8", timeout: 10_000 }).trim();
   git("init", "-q", "-b", "main");
@@ -91,16 +91,16 @@ test("installed lifecycle and restart capture survive pinned package pruning of 
     // independently valid; remove their references from scratch metadata, never session or patch files.
     const statusPath = join(asyncDir, "status.json");
     const status = JSON.parse(readFileSync(statusPath, "utf8"));
-    delete status.sessionFile;
+    if (!resumable) delete status.sessionFile;
     // An absolute handoff path would become unreadable after the package's tombstone rename.
     // The local scratch handoff below remains complete and is still checked by the real pruner.
     delete status.parallelHandoff;
-    for (const step of status.steps ?? []) delete step.sessionFile;
+    if (!resumable) for (const step of status.steps ?? []) delete step.sessionFile;
     writeFileSync(statusPath, JSON.stringify(status));
     const descriptorPath = join(asyncDir, "recovery-descriptor.json");
     if (existsSync(descriptorPath)) {
       const descriptor = JSON.parse(readFileSync(descriptorPath, "utf8"));
-      delete descriptor.sessionFile;
+      if (!resumable) delete descriptor.sessionFile;
       writeFileSync(descriptorPath, JSON.stringify(descriptor));
     }
     const handoffPath = join(asyncDir, "handoff.json");
@@ -109,8 +109,16 @@ test("installed lifecycle and restart capture survive pinned package pruning of 
       for (const group of handoff.groups) group.cleanup = { state: "complete" };
       writeFileSync(handoffPath, JSON.stringify(handoff));
     }
+    if (resumable) {
+      assert.ok(status.sessionFile, "resumable status retains the native session");
+      assert.ok(JSON.parse(readFileSync(descriptorPath, "utf8")).sessionFile, "descriptor retains the native session");
+      const control = await cleanupAsyncRetention({ asyncDirRoot: dirname(asyncDir), resultsDir: join(subRoot, "async-subagent-results"),
+        now: () => Date.now() + 40 * 24 * 60 * 60 * 1000, signal: AbortSignal.timeout(15_000) });
+      assert.equal(control.deletedRuns, 0, "40 days does not prune a resumable run");
+      assert.equal(control.workerFailed, false, JSON.stringify(control));
+    }
     const result = await cleanupAsyncRetention({ asyncDirRoot: dirname(asyncDir), resultsDir: join(subRoot, "async-subagent-results"),
-      now: () => Date.now() + 40 * 24 * 60 * 60 * 1000, signal: AbortSignal.timeout(15_000) });
+      now: () => Date.now() + (resumable ? 91 : 40) * 24 * 60 * 60 * 1000, signal: AbortSignal.timeout(15_000) });
     assert.equal(result.workerFailed, false, JSON.stringify(result));
     assert.deepEqual(result.errors, [], JSON.stringify(result));
     assert.equal(result.deletedRuns, 1, JSON.stringify(result));

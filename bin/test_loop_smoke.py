@@ -279,6 +279,30 @@ class InstalledLoopSmoke(unittest.TestCase):
             self.assertEqual(changes, ['refs/heads/main'], output)
             self.assertEqual(after['refs/heads/main'], landed)
             print('step 8: audit records exactly one remote ref change, matching the root-pushed commit', flush=True)
+            # Models-file providers must not be mistaken for extension registrations by subagents.
+            (home / 'models.json').write_text(json.dumps({'providers': {'openai': {
+                'baseUrl': 'http://127.0.0.1:1/v1', 'api': 'openai-responses', 'apiKey': 'fixture',
+            }}}))
+            provider_probe = tmp / 'provider-probe.ts'
+            provider_facts = tmp / 'provider-ids.json'
+            injected = os.environ.get('LOOP_PI_PROVIDER_ID_NEGATIVE') == '1'
+            provider_probe.write_text(
+                "import { writeFileSync } from 'node:fs';\nexport default function(pi) {\n"
+                + ("pi.registerProvider('openai', {baseUrl:'http://127.0.0.1:1/v1', api:'openai-responses', apiKey:'fixture'});\n" if injected else '')
+                + "pi.on('session_start', (_,ctx) => writeFileSync("
+                + json.dumps(str(provider_facts))
+                + ", JSON.stringify(ctx.modelRegistry.getRegisteredProviderIds()))); }\n")
+            probe_rpc = Rpc([str(bins / 'loop-pi-smoke'), '--mode', 'rpc', '--extension', str(faux),
+                             '--extension', str(provider_probe)], repo, env)
+            try:
+                probe_rpc.send(id='provider-probe', type='get_commands')
+                probe_rpc.wait(lambda e: e.get('id') == 'provider-probe', 'provider registration probe')
+                provider_ids = json.loads(provider_facts.read_text())
+                print('provider registration probe: ' + json.dumps({'injected': injected, 'ids': provider_ids}), flush=True)
+                self.assertNotIn('openai', provider_ids, 'models-file provider is not extension-registered')
+            finally:
+                self.assertEqual(probe_rpc.close(), 0)
+
         elapsed = time.monotonic() - started
         self.assertLess(elapsed, 300, 'installed smoke exceeds five minutes')
         print(f'installed loop smoke: {elapsed:.2f}s, no secrets', flush=True)

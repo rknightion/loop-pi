@@ -2142,16 +2142,13 @@ export function evaluateBriefHeader(raw: SubagentInput): Decision {
 
 const named = (value: unknown) => typeof value === "string" && value.trim() !== "";
 
-/** A control action must name its run. pi-subagents 0.83.0 sends an `interrupt` with no `id` or
- *  `runId` to the newest async run in the session (`fallbackToNewest`, upstream issue 3081), which can
- *  cancel a healthy lane; a `dir` does not count there. `stop`, `steer` and `resume` accept a `dir`
- *  and are refused by the package without a target; the guard refuses them first as a backstop. */
+/** A control action must name its run. 0.84.0 refuses an id-less interrupt itself
+ *  (upstream #3081); the guard remains the backstop. A dir does not name an interrupt
+ *  target; stop, steer and resume accept it. */
 function controlTargetBlock(input: Record<string, unknown>): Decision | undefined {
   const action = typeof input.action === "string" ? input.action.trim() : undefined;
-  // interrupt and stop target `runId ?? id`; a falsy result (absent, or an empty `runId` beside a
-  // named `id`) skips the `if (runId)` lookup in `getAsyncInterruptTarget` and reaches the newest
-  // run. resume reads `id ?? runId` (async-resume), so there an empty `runId` beside a named `id`
-  // still names the run.
+  // interrupt, stop and steer target `runId ?? id`; resume reads `id ?? runId`.
+  // Preserve the package's precedence, including an empty runId beside a named id.
   const byId = named(action === "resume" ? input.id ?? input.runId : input.runId ?? input.id);
   if (action === "interrupt" && !byId) {
     return block("loop-guard: `interrupt` needs an explicit run `id` (without one the package interrupts the newest run, which may be another lane).");

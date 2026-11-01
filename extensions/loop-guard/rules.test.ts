@@ -943,7 +943,7 @@ test("subagent deny: options.script runs a workflow (pi-subagents 0.83.0 lowers 
   }
 });
 
-test("subagent deny: interrupt without an explicit run id (the package would pick the newest run)", () => {
+test("subagent deny: interrupt without an explicit run id (guard remains the package backstop)", () => {
   for (const call of [{ action: "interrupt" }, { action: "interrupt", id: "  " }, { action: "interrupt", dir: "/tmp/run" }, { action: "interrupt", options: {} }]) {
     for (const decision of [evaluateSubagentCall(call), evaluateSubagentPolicyFields(call)]) {
       assert.equal(decision.block, true, JSON.stringify(call));
@@ -974,8 +974,8 @@ test("subagent allow: control actions that name their run", () => {
   }
 });
 
-test("subagent deny: interrupt whose runId is empty falls back past a named id", () => {
-  // The package targets `runId ?? id` and falls back to the newest run when that is falsy.
+test("subagent deny: interrupt whose empty runId takes precedence over a named id", () => {
+  // 0.84.0 refuses an id-less interrupt itself (upstream #3081); the guard remains the backstop.
   for (const call of [{ action: "interrupt", id: "run-1", runId: "" }, { action: "interrupt", id: "run-1", runId: 0 }]) {
     assert.equal(evaluateSubagentPolicyFields(call).block, true, JSON.stringify(call));
   }
