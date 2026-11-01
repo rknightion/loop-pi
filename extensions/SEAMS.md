@@ -539,23 +539,6 @@ pi-ai 1.4.0's `isRetryableAssistantError` (`utils/retry.js`) retries natively. p
 network failure and stays `other`. A pi-ai bump re-reads that list: a wording pi retries natively but
 this pattern misses is classed `other`, not `server`. The class only chooses the extra jitter.
 
-## Encrypted reasoning recovery
-
-Managed Responses routes classify `invalid_encrypted_content` separately. `ENCRYPTED_REASONING_RETRIES`
-is one: a rejected request can quarantine its session/provider/model route and retry from completed
-portable history without reasoning items, paired function/custom-call item ids, or the encrypted
-reasoning include. Call ids, arguments, completed outputs and unrelated fields remain intact.
-The existing managed attempt ceiling (at most five requests per episode) and deadline still apply
-when a sanitized request needs an ordinary transient retry. No hosted or otherwise protected history
-is stripped. Saved history is unchanged; a version-1 `loop-encrypted-history-quarantine` custom
-entry keeps later turns and reloads on that route sanitized, and suppresses idle cache warming.
-An unsafe encrypted failure or an exhausted episode that took the sanitized retry parks as
-`encrypted-history-quarantined`. Later unrelated failures retain their own classifications.
-Automatic root recovery, including its quota exception, cannot reopen it. Genuine user input may
-reopen the episode; the route stays sanitized. This request handling covers root and lane entries
-that install request-ceiling; the automatic-root stop below is root-only. Native summary calls
-remain outside this payload transformation and retain their existing protected-route checks.
-
 ## Automatic root recovery
 
 Plain-text authentication, quota and content-policy refusals retain an allowlisted category before
@@ -584,7 +567,6 @@ left the root idle.
   | aborted without a harness marker, or reason `operator-cancelled` | none |
   | reason `upstream-auth-refusal`; code `invalid_api_key`/`authentication_error`/`permission_denied`/`insufficient_permissions`; type `authentication_error`/`permission_error`; status 401/403; unmanaged text naming 401/403, unauthorized, forbidden, authentication | stop: `authentication` |
   | reason `upstream-policy-refusal`; a policy code (`cyber_policy`, `content_policy_violation`, `content_filter`, `policy_violation`, `safety_violation`); type `policy_error`; unmanaged text naming a policy or a refusal | stop: `policy` |
-  | code `invalid_encrypted_content` or reason `encrypted-history-quarantined` | stop: `encrypted-history`; never automatic quota/provider resume |
   | code `insufficient_quota`; unmanaged text naming quota, usage limit, billing, budget or balance | resume: `quota` at most twice per genuine owner-input interval; then stop: `quota` |
   | code `context_length_exceeded`; pi's context-overflow pattern; a summary-route reason (`summary-*`, `two-call-summary-not-authorized`, `opaque-summary-*`) | stop: `context-length` |
   | reason `unobservable-provider-retries` | stop: `configuration` |

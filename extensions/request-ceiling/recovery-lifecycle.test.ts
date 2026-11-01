@@ -385,19 +385,3 @@ for (const errorMessage of [
     assert.equal(classifyRootStop(result.message, { harnessAbort: null }).action, "resume");
   });
 }
-
-test("an unrelated later episode keeps its own reason on a previously sanitized route", (t) => {
-  t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
-  const h = harness();
-  Object.assign(h.ctx.sessionManager, { getBranch: () => [{ type: "custom", customType: "loop-encrypted-history-quarantine", data: { v: 1, provider: "fixture", model: "fixture" } }] });
-  h.emit("session_start");
-  let result: any;
-  for (let i=0;i<4;i++) {
-    h.emit("turn_start");
-    const payload=h.emit("before_provider_request", {payload:{input:[{type:"reasoning",encrypted_content:"fixture"}]}});
-    assert.deepEqual(payload.input, [], "persistent route sanitation remains enabled");
-    result=h.emit("message_end", failure);h.emit("agent_settled");
-  }
-  assert.equal(result.message.loopPiRecovery.reason,"attempt-limit","later unrelated failure must not be relabelled encrypted history");
-  h.emit("session_shutdown");
-});

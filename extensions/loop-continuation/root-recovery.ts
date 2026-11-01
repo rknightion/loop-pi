@@ -43,7 +43,7 @@ export function resumeDelayMs(attempt: number, config: RootRecoveryConfig): numb
 }
 
 export type ResumeCause = "provider-error" | "stalled-request" | "request-ceiling" | "quota";
-export type StopCause = "authentication" | "quota" | "policy" | "context-length" | "configuration" | "encrypted-history";
+export type StopCause = "authentication" | "quota" | "policy" | "context-length" | "configuration";
 
 export type RootRecoveryDecision =
   | { action: "none"; why: "healthy" | "operator-cancelled" }
@@ -115,9 +115,6 @@ export function classifyRootStop(message: SettledMessage | null, evidence: Settl
     (!reason && POLICY_TEXT.test(text))) {
     return { action: "stop", cause: "policy", detail };
   }
-  if (code === "invalid_encrypted_content" || reason === "encrypted-history-quarantined")
-    return { action: "stop", cause: "encrypted-history", detail };
-
   if (code === "insufficient_quota" || (!reason && QUOTA_TEXT.test(text))) return { action: "stop", cause: "quota", detail };
   if (code === "context_length_exceeded" || (reason && CONTEXT_REASONS.has(reason)) ||
     (message.stopReason === "error" && isContextOverflow(message as never, evidence.contextWindow))) {
