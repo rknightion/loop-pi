@@ -105,3 +105,12 @@ test("quota recovery is limited to two retries and persists until genuine owner 
   const auth = classifyRootStop(http(401, "invalid_api_key"), none);
   assert.deepEqual(boundedQuotaRecovery(auth, 0), auth);
 });
+
+
+test("encrypted history is terminal before timeout or generic automatic resume", () => {
+  for (const message of [http(400,"invalid_encrypted_content","invalid_request_error"), managed("encrypted-history-quarantined","stream_incomplete",500), managed("encrypted-history-quarantined","insufficient_quota",429), managed("non-retryable-upstream","invalid_encrypted_content",400)]) {
+    const decision=classifyRootStop(message,{harnessAbort:"request-timeout"});
+    assert.equal(boundedQuotaRecovery(decision,0).action,"stop","quarantine cannot enter the quota retry exception");
+    if(decision.action==="stop") assert.equal(decision.cause,"encrypted-history");
+  }
+});
