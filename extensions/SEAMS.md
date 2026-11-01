@@ -879,7 +879,7 @@ paths are exact, bash write detection is best-effort.
   reservation for the session, or the parent is held, the notice is appended with
   `triggerTurn: false` and no extension message events. In the model request only, pi-subagents wraps every
   pi-subagents message in `<pi_subagents_notice type=... origin="automated message from the
-  pi-subagents extension, not typed by the user">`; the stored message is unchanged. From 0.84.0 the
+  pi-subagents extension, not typed by the user">`; the stored message is unchanged. From 0.83.0 the
   wrapper runs in a `context_with_system` hook. pi 1.4.0 runs every `context` hook, then every
   `context_with_system` hook in extension load order (`dist/core/extensions/runner.js` `emitContext`),
   and loads `--extension` paths before package extensions, so loop-state's own `context_with_system`
@@ -1030,7 +1030,7 @@ several times a session and pi records each update as a mid-conversation system 
 `context` rewrite would change the request from its first token at each update and miss the whole
 prompt cache on models with `supportsMidConvoSystemMessages` (the gpt-6 catalogue entries). loop-state
 rewrites only custom messages and passes system messages through; `system-delta-e2e.test.ts` proves a
-section update stays in place after a marked notice. pi-subagents 0.84.0 made the same move. `notice-marker.test.ts` fails when a
+section update stays in place after a marked notice. pi-subagents made the same move in its 0.83.0 release. `notice-marker.test.ts` fails when a
 source sends a `loop-*` custom message type the set does not name.
 
 ## Closeout and root fences
