@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
-import { cleanupAll, freshDir, startPiRpc, PI_SUBAGENTS_PACKAGE_DIR, ROOT_EXTENSION, waitForCondition } from "./rpc-test-helpers.ts";
-after(cleanupAll);
+import { cleanupAllAfterExit, expectDetachedRuns, freshDir, startPiRpc, PI_SUBAGENTS_PACKAGE_DIR, ROOT_EXTENSION, waitForCondition, waitForDetachedWriters } from "./rpc-test-helpers.ts";
+after(async () => { await cleanupAllAfterExit(); });
 
 for (const guarded of [false, true]) for (const emptyRunId of [false, true]) {
   test(`interrupt requires target (guard=${guarded}, emptyRunId=${emptyRunId})`, { timeout: 90000 }, async () => {
@@ -12,16 +12,17 @@ for (const guarded of [false, true]) for (const emptyRunId of [false, true]) {
     const cwd = freshDir("interrupt-cwd-");
     const probe = join(home, "provider.ts");
     const targetFile = join(home, "target.json");
+    const activeFile = join(home, "child-active");
     const ai = new URL("../../node_modules/@earendil-works/pi-ai/dist/index.js", import.meta.url).pathname;
     writeFileSync(probe, `import { fauxProvider, fauxAssistantMessage, fauxToolCall } from ${JSON.stringify(ai)};
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 export default function(pi) {
  const f=fauxProvider({provider:'faux',models:[{id:'faux-1',contextWindow:272000,maxTokens:128000}]});
  f.setResponses(Array.from({length:100},()=>async(ctx,options)=>{
  const last=[...ctx.messages].reverse().find(m=>m.role!=='assistant');
  const text=typeof last?.content==='string'?last.content:JSON.stringify(last?.content);
  if(last?.role==='toolResult') return fauxAssistantMessage('ready');
- if(text?.includes('CHILD_WAIT')) { await new Promise(resolve=>{if(options.signal?.aborted)return resolve();options.signal?.addEventListener('abort',resolve,{once:true});}); return fauxAssistantMessage('done'); }
+ if(text?.includes('CHILD_WAIT')) return fauxAssistantMessage([fauxToolCall('bash',{command:${JSON.stringify(`printf ready > '${activeFile}'; sleep 60`)},timeout:60})]);
  if(text?.includes('SPAWN'))return fauxAssistantMessage([fauxToolCall('subagent',{agent:'worker',task:'CHILD_WAIT',async:true})]);
  if(text?.includes('INTERRUPT')) { const id=JSON.parse(readFileSync(${JSON.stringify(targetFile)},'utf8')).id; return fauxAssistantMessage([fauxToolCall('subagent',${emptyRunId ? "{action:'interrupt',id,runId:''}" : "{action:'interrupt'}"})]); }
  if(text?.includes('CLEANUP')) { const id=JSON.parse(readFileSync(${JSON.stringify(targetFile)},'utf8')).id; return fauxAssistantMessage([fauxToolCall('subagent',{action:'interrupt',id})]); }
@@ -30,7 +31,8 @@ export default function(pi) {
 }`);
     mkdirSync(join(home, "agents"));
     writeFileSync(join(home, "settings.json"), JSON.stringify({ packages: [PI_SUBAGENTS_PACKAGE_DIR], subagents: { agentExcludeDirs: ["~/.agents"] } }));
-    writeFileSync(join(home, "agents/worker.md"), ["---", "name: worker", "description: interrupt fixture", "tools: read", "extensions: []", `subagentOnlyExtensions: ${probe}`, "model: faux/faux-1", "---", "wait"].join("\n"));
+    writeFileSync(join(home, "agents/worker.md"), ["---", "name: worker", "description: interrupt fixture", "tools: bash", "extensions: []", `subagentOnlyExtensions: ${probe}`, "model: faux/faux-1", "---", "wait"].join("\n"));
+    expectDetachedRuns(subRoot, 1);
     const session = startPiRpc({ extensions: [probe, ...(guarded ? [ROOT_EXTENSION] : [])], fauxScriptPath: "", agentDir: home, subagentTempRoot: subRoot, cwd, sessionArgs: [], extraArgs: ["--exclude-tools", "subagents_enable"] });
     let id: string | undefined;
     try {
@@ -42,6 +44,7 @@ export default function(pi) {
       writeFileSync(targetFile,JSON.stringify({id}));
       const statusPath=join(subRoot,"async-subagent-runs",id!,"status.json");
       await waitForCondition(()=>{try{return JSON.parse(readFileSync(statusPath,"utf8")).state==="running" || undefined;}catch{return;}},30000);
+      await waitForCondition(()=>existsSync(activeFile) || undefined,30000);
       await session.waitFor(e=>e.type==="agent_end");
       const offset=session.events.length;
       session.send({type:"prompt",message:"INTERRUPT"});
@@ -65,7 +68,8 @@ export default function(pi) {
           catch { return; }
         },15000);
       }
-      await session.close();
+      try { if (id) await waitForDetachedWriters(subRoot, 1, 30000); }
+      finally { await session.close(); }
     }
   });
 }

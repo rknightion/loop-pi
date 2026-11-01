@@ -46,6 +46,13 @@ path. `bin/leak-scan` enforces that against two lists: the committed generic sha
 - The pi and pi-subagents versions are pinned exactly in `package.json`. A bump is its own change,
   with the full test run and a note of what the extension API changed.
 
+## Async fixture cleanup
+
+A native run can report running before its child is ready, and paused before its writers close.
+Use an actual work-readiness signal and the terminal-writer/session-lease barrier in
+`rpc-test-helpers.ts` before removing fixture directories. A pending promise alone does not keep
+an SDK child alive; an interrupt probe needs a real bounded process or another live event-loop handle.
+
 ## Recovery changes
 
 Recovery depends on the pinned agent loop refusing to execute tools from failed assistant
