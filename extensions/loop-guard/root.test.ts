@@ -355,6 +355,7 @@ test("session_start registers required child extensions; session_shutdown dispos
 });
 
 test("a registerRequiredChildExtensions failure fails closed: every subsequent subagent call is blocked", async () => {
+  const { registerRequiredChildExtensions } = await import("pi-subagents/required-child-extensions");
   const { api, handlers } = fakeApi();
   rootExtension(api as any);
   const sessionStart = handlers.get("session_start")![0];
@@ -363,12 +364,8 @@ test("a registerRequiredChildExtensions failure fails closed: every subsequent s
   const sessionId = `session-${Math.random()}`;
   const { ctx, notifications } = fakeCtx(agentDir, sessionId);
 
-  // First registration succeeds and is never disposed here, so the second
-  // session_start's registerRequiredChildExtensions call for the SAME
-  // sessionId throws "already registered" (the real pi-subagents contract
-  // exercised in the test above) - this is root.ts's actual failure path,
-  // not a mock.
-  await sessionStart({ type: "session_start", reason: "startup" }, ctx);
+  // A foreign registration owns this session: the root cannot install its required entries.
+  const conflict = registerRequiredChildExtensions({ sessionId, extensions: [] });
   await sessionStart({ type: "session_start", reason: "startup" }, ctx);
   assert.ok(
     notifications.some((n) => n.type === "error" && /failed to register required child extensions/.test(n.message)),
@@ -385,9 +382,8 @@ test("a registerRequiredChildExtensions failure fails closed: every subsequent s
   assert.equal(result?.block, true);
   assert.match(result?.reason ?? "", /required child extension/i);
 
-  // Cleanup: dispose the one registration that did succeed so later tests in
-  // this file are not affected.
   sessionShutdown({ type: "session_shutdown", reason: "quit" }, ctx);
+  conflict.dispose();
 });
 
 test("session_start registers loop-guard-lane pointing at an existing, importable file", async () => {
@@ -512,4 +508,25 @@ test("root: a launch whose first line fails the brief header parse is refused wi
   assert.equal((await armed({ agent: "worker", options: { task: drifted[1] } }))?.block, true);
   assert.equal((await armed({ action: "status", id: "run-a" }))?.block ?? false, false);
   assert.equal((await armed({ action: "resume", id: "run-a", message: "carry on" }))?.block ?? false, false);
+});
+
+
+test("session ceiling contains exactly the root roster, refreshes and disposes", async () => {
+  const { resolveCurrentSubagentCapabilityCeiling } = await import("pi-subagents/capability-ceiling");
+  const { api, handlers } = fakeApi(); rootExtension(api as any);
+  const first = `ceiling-${Math.random()}`, second = `${first}-next`;
+  const { ctx, notifications } = fakeCtx(agentDir, first);
+  const start = handlers.get("session_start")![0];
+  await start({}, ctx);
+  const expected = { version: 1, allowedAgents: ["reviewer", "scout", "senior", "senior-escalation", "worker"], denyExtensions: false, sources: ["loop-guard"] };
+  assert.deepEqual(resolveCurrentSubagentCapabilityCeiling(first), expected);
+  await start({}, ctx);
+  assert.deepEqual(resolveCurrentSubagentCapabilityCeiling(first), expected);
+  assert.deepEqual(notifications, [], "repeated session start refreshes required child entries too");
+  ctx.sessionManager.getSessionId = () => second;
+  await start({}, ctx);
+  assert.equal(resolveCurrentSubagentCapabilityCeiling(first), undefined);
+  assert.deepEqual(resolveCurrentSubagentCapabilityCeiling(second), expected);
+  handlers.get("session_shutdown")![0]({}, ctx);
+  assert.equal(resolveCurrentSubagentCapabilityCeiling(second), undefined);
 });

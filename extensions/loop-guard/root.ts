@@ -9,13 +9,14 @@ import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext, ToolCallEvent, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, isToolCallEventType } from "@earendil-works/pi-coding-agent";
+import { registerSubagentCapabilityCeiling } from "pi-subagents/capability-ceiling";
 import { registerRequiredChildExtensions } from "pi-subagents/required-child-extensions";
 import { hookScriptsToRun, runHookScripts } from "./hooks.ts";
 import { installModelFamily, subagentOverrideBlock } from "./model-family.ts";
 import { deleteSubagentField, disableSteeringRecovery } from "./subagent-view.ts";
 import { installRequestCeiling, installRetryBackoff } from "../request-ceiling/index.ts";
 import { bindLaneIdentity } from "./push-grant.ts";
-import { evaluateBashCommand, evaluateBgWait, evaluateBriefHeader, evaluateSubagentCall, evaluateWatchProcess, isAsyncSubagentLaunch, wrappedGateCommands, bindGateExecution } from "./rules.ts";
+import { C3_AGENTS, evaluateBashCommand, evaluateBgWait, evaluateBriefHeader, evaluateSubagentCall, evaluateWatchProcess, isAsyncSubagentLaunch, wrappedGateCommands, bindGateExecution } from "./rules.ts";
 import { loadGateDeclarations } from "./gates.ts";
 import { isSubagentWakeRun } from "../loop-continuation/state.ts";
 import { bashProtectedPath, protoActive, runDirFromEnv, toolWriteRefusal } from "./guard-paths.ts";
@@ -59,6 +60,7 @@ export default function (pi: ExtensionAPI) {
   // Async runs those launches started, by run id, until `subagent:async-complete`.
   const activeAsyncRuns = new Set<string>();
   let childRegistration: { dispose(): void } | undefined;
+  let capabilityRegistration: { dispose(): void } | undefined;
   // Fail closed (course correction, main thread, 2026-09-27): if
   // registerRequiredChildExtensions ever throws, children can no longer be
   // trusted to load loop-guard-lane/loop-wait-lane regardless of their own
@@ -80,6 +82,21 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", (_event, ctx: ExtensionContext) => {
     wake();
     const sessionId = ctx.sessionManager.getSessionId();
+    try {
+      const replacement = registerSubagentCapabilityCeiling({
+        sessionId, source: "loop-guard", ceiling: { allowedAgents: [...C3_AGENTS] },
+      });
+      capabilityRegistration?.dispose();
+      capabilityRegistration = replacement;
+    } catch {
+      // Native session_start catches exceptions, and RPC shutdown is deferred until input.
+      // Stop here so package-internal delegation cannot run without the required ceiling.
+      process.stderr.write("loop-guard: capability ceiling registration failed; refusing root startup\n");
+      process.exit(1);
+    }
+    childRegistration?.dispose();
+    childRegistration = undefined;
+    childRegistrationFailed = false;
     const extensions: { id: string; path: string }[] = [
       { id: "loop-guard-lane", path: fileURLToPath(new URL("./lane.ts", import.meta.url)) },
       { id: "loop-call-timing", path: fileURLToPath(new URL("../call-timing/index.ts", import.meta.url)) },
@@ -102,6 +119,8 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", () => {
+    capabilityRegistration?.dispose();
+    capabilityRegistration = undefined;
     childRegistration?.dispose();
     childRegistration = undefined;
     for (const pending of pendingPushes.values()) pending.evidence.dispose();

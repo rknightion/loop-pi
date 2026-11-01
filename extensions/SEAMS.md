@@ -63,6 +63,15 @@ public statement of those contracts.
   case alias of a registered path still counts, and a registered extension that pi did not load at
   all fails the launch ("Required child extension failed to load") instead of starting the child
   without it (`src/runs/shared/child-session.js:492-496`).
+- **Root capability ceiling:** at every `session_start`, loop-guard registers a session-id-keyed
+  `loop-guard` ceiling containing only the five root roster `allowedAgents`; it sets neither
+  `allowedTools` nor `denyExtensions`. This covers package delegation as well as model tool calls,
+  filters the advertised agent catalogue and propagates monotonically into nested/recovered runs.
+  Scheduled runs are refused while a ceiling is active (scheduling is already disabled here).
+  Re-registration replaces this extension's old handle only after the new ceiling succeeds;
+  shutdown disposes it. A failed ceiling registration terminates the root at startup: native
+  extension errors are swallowed, so logging or a model-tool guard alone cannot close delegation.
+  Required child-extension registrations are refreshed on session start and disposed on shutdown.
 - pi-subagents 0.84.0 writes no `run-history.jsonl` (0.77.0 appended one row per async child). The
   run record is each child's `status.json` and `process-terminal.json` under its async dir.
   Retention prunes resumable run directories after 90 days and other eligible runs after 30 days;
