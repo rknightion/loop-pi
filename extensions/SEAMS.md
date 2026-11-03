@@ -729,7 +729,8 @@ before any `await`. A missing reply means the provider extension is not loaded; 
   `lane-return` v3 block in its own body.
 - `loop-state` (`core.ts` `parseLaneReturn`) accepts a `lane-return` block with `"v": 3` (lane.md),
   `"v": 2`, or no `v`; the `return` event takes the fields it knows (`status`, `base`, `check`,
-  `exit`, `coderabbit`, `questions`, ...) and drops the rest (`patch`, `patch_sha256`, `tail`).
+  `exit`, `questions`, ...) and drops the rest (`patch`, `patch_sha256`, `tail`, and the retired
+  `coderabbit` an older block may still carry).
   The parser stays pure and accepts legacy blocks unchanged. At live completion ingestion only,
   `loop-state/return-validation.ts` validates v3 evidence before projecting that event: a present,
   non-null `exit` must be a finite integer, and a `complete` return's numeric exit must be zero.
@@ -791,9 +792,10 @@ before any `await`. A missing reply means the provider extension is not loaded; 
   is used only when every tier is known. Historical missing metadata stays unknown, never inferred
   from an agent name. `append` warns on stderr, without rejecting, for an `admit` without `tier`;
   the root extension shows such warnings through notify.
-  Digest/query audit counts split implementation dispatches, review dispatches and reported
-  CodeRabbit reviews by known tier, with a separate unknown bucket. These fields are telemetry,
-  not authority or enforcement inputs.
+  Digest/query audit counts split implementation dispatches and review dispatches by known tier,
+  with a separate unknown bucket. These fields are telemetry, not authority or enforcement inputs.
+  A `return` may still carry the retired `coderabbit` field: `append` and `check` accept any value
+  for it and nothing reads it.
   pi-subagents' async events carry `sessionId` as the parent's session file path
   (`getSessionFile() ?? getSessionId()`) and `deadlineAt` in epoch ms.
 - Lane timers: loop-wait root arms a timer on `subagent:async-started` for this session (brief

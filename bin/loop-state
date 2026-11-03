@@ -40,7 +40,7 @@ INT_OR_NULL = "int?"
 BOOL = "bool"
 STRLIST = "strlist"
 OWNED = "owned"
-CODERABBIT = "coderabbit"
+LEGACY = "legacy"  # a retired field older logs and roots still carry: any value, never read
 ARTIFACT = "artifact"
 
 STATUS = ("complete", "partial", "blocked", "failed")
@@ -75,7 +75,7 @@ SCHEMA = {
             "check": STR,
             "exit": INT_OR_NULL,
             "ci": STR_OR_NULL,
-            "coderabbit": CODERABBIT,
+            "coderabbit": LEGACY,
             "base": STR,
             "questions": STRLIST,
             "artifact": ARTIFACT,
@@ -162,16 +162,6 @@ def _check_value(field, kind, value):
         ok = ok or (isinstance(value, list) and all(isinstance(x, str) for x in value))
         if not ok:
             return "%s must be a string or a list of strings" % field
-    elif kind == CODERABBIT:
-        if value is None:
-            return None
-        if (
-            not isinstance(value, dict)
-            or not isinstance(value.get("ran"), bool)
-            or not _is_int(value.get("major"))
-            or not _is_int(value.get("unreviewed"))
-        ):
-            return "%s must be null or {ran:bool, major:int, unreviewed:int}" % field
     return None
 
 
@@ -580,9 +570,6 @@ def fold(path):
             }
             st["lane_task"][lane] = obj["task"]
         elif ev == "return":
-            audit = st["audit_lanes"].get(obj.get("run"))
-            if audit is not None:
-                audit["coderabbit"] = isinstance(obj.get("coderabbit"), dict) and obj["coderabbit"].get("ran") is True
             run, lane = obj.get("run"), obj.get("lane")
             info = st["lanes"].pop(run, None)
             dispatch = st["dispatches"].get(run) or info or {}
@@ -662,7 +649,7 @@ def fold(path):
                 tier = ("guarded" if "guarded" in tiers else "routine") if all(t in TIER for t in tiers) else "unknown"
             st["audit_lanes"][obj.get("run")] = {
                 "lane": obj.get("lane"), "run": obj.get("run"), "tasks": constituents,
-                "tier": tier, "surface": obj.get("surface"), "kind": obj.get("kind"), "coderabbit": False,
+                "tier": tier, "surface": obj.get("surface"), "kind": obj.get("kind"),
             }
     # Legacy logs lack explicit recovery linkage. A first unfinished outcome
     # from overlapping work must not disappear behind another run's success.
@@ -683,12 +670,11 @@ def fold(path):
 
 
 def tier_audit(st):
-    counts = {tier: {"lanes": 0, "reviews": 0, "coderabbit": 0} for tier in (*TIER, "unknown")}
+    counts = {tier: {"lanes": 0, "reviews": 0} for tier in (*TIER, "unknown")}
     for lane in st["audit_lanes"].values():
         group = counts[lane["tier"]]
         group["lanes"] += 1
         group["reviews"] += lane["kind"] == "review"
-        group["coderabbit"] += lane["coderabbit"]
     return counts
 
 
@@ -786,7 +772,7 @@ def render_digest(st, judgements, task_level):
     out.append("")
     out.append("## Tier audit")
     for tier, counts in summary["by_tier"].items():
-        out.append("- %s: lanes %d reviews %d coderabbit %d" % (tier, counts["lanes"], counts["reviews"], counts["coderabbit"]))
+        out.append("- %s: lanes %d reviews %d" % (tier, counts["lanes"], counts["reviews"]))
     out.append("")
     out.append("## Live lanes (%d)" % summary["live_lanes"])
     for run, info in st["lanes"].items():

@@ -84,10 +84,17 @@ test("returnEvent uses the block when present and drops fields that do not fit",
   });
   assert.deepEqual(ev, {
     ev: "return", lane: "L1", run: "r1", status: "complete", sha: "abc", landed: false, check: "just check",
-    exit: 0, ci: "123", coderabbit: { ran: true, major: 0, unreviewed: 2 }, base: "def", questions: ["q"],
+    exit: 0, ci: "123", base: "def", questions: ["q"],
   });
   const bad = returnEvent("L1", "r1", { status: "great", exit: "zero", coderabbit: { ran: 1 }, questions: [1] });
   assert.deepEqual(bad, { ev: "return", lane: "L1", run: "r1", status: "failed" });
+});
+
+test("returnEvent ignores a retired coderabbit field, so an older lane's block still records", () => {
+  for (const coderabbit of [null, { ran: true, major: 1, unreviewed: 0 }, { ran: 1 }, "skipped"]) {
+    const ev = returnEvent("L1", "r1", { v: 3, status: "complete", check: "just check", exit: 0, coderabbit, questions: [] });
+    assert.deepEqual(ev, { ev: "return", lane: "L1", run: "r1", status: "complete", check: "just check", exit: 0, questions: [] });
+  }
 });
 
 test("a run that finished without a usable lane-return block is recorded failed", () => {

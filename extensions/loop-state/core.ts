@@ -103,11 +103,6 @@ export function returnEvent(lane: string, run: string, block: Record<string, unk
   if (block.exit === null || isInt(block.exit)) ev.exit = block.exit;
   if (block.ci === null || isStr(block.ci)) ev.ci = block.ci;
   else if (isInt(block.ci)) ev.ci = String(block.ci);
-  const cr = block.coderabbit as Record<string, unknown> | null | undefined;
-  if (cr === null) ev.coderabbit = null;
-  else if (cr && typeof cr.ran === "boolean" && isInt(cr.major) && isInt(cr.unreviewed)) {
-    ev.coderabbit = { ran: cr.ran, major: cr.major, unreviewed: cr.unreviewed };
-  }
   if (isStr(block.base)) ev.base = block.base;
   if (Array.isArray(block.questions) && block.questions.every((q) => typeof q === "string")) {
     ev.questions = block.questions;

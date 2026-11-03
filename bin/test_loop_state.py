@@ -16,10 +16,10 @@ OPEN = ["open", "charter_sha256=" + "a" * 64, "tier=routine", "root=llm", "root_
 
 def legacy_audit(lanes):
     return {
-        "by_tier": {tier: {"lanes": len(lanes) if tier == "unknown" else 0, "reviews": 0, "coderabbit": 0}
+        "by_tier": {tier: {"lanes": len(lanes) if tier == "unknown" else 0, "reviews": 0}
                     for tier in ("routine", "guarded", "unknown")},
         "audit_lanes": [{"lane": lane, "run": run, "tasks": tasks, "tier": "unknown",
-                         "surface": None, "kind": None, "coderabbit": False} for lane, run, tasks in lanes],
+                         "surface": None, "kind": None} for lane, run, tasks in lanes],
     }
 
 
@@ -91,12 +91,15 @@ class TierSurfaceTests(Base):
         summary = json.loads(run("digest", self.log, "--json").stdout)
         self.assertEqual(summary["by_tier"]["guarded"]["lanes"], 2)
         self.assertEqual(summary["by_tier"]["guarded"]["reviews"], 1)
-        self.assertEqual(summary["by_tier"]["guarded"]["coderabbit"], 1)
+        self.assertNotIn("coderabbit", summary["by_tier"]["guarded"])
+        self.assertTrue(all("coderabbit" not in lane for lane in summary["audit_lanes"]))
         self.assertEqual(summary["by_tier"]["routine"]["lanes"], 1)
         self.assertEqual(summary["by_tier"]["unknown"]["lanes"], 1)
         self.assertEqual(summary["by_tier"]["unknown"]["reviews"], 0)
         self.assertEqual(summary["audit_lanes"][2]["tasks"], ["T1", "T2"])
-        self.assertIn("guarded: lanes 2 reviews 1 coderabbit 1", run("digest", self.log).stdout)
+        digest = run("digest", self.log).stdout
+        self.assertIn("guarded: lanes 2 reviews 1\n", digest)
+        self.assertNotIn("coderabbit", digest)
         self.assertEqual(self.events()[1]["surfaces"], ["**/auth/**"])
         self.assertEqual(self.events()[3]["surface"], "**/auth/**")
 
@@ -217,7 +220,7 @@ class ValidationTests(Base):
         self.append("dispatch", "lane=L1", "task=T1", "agent=worker", "run=r1", "base=abc", "model=m")
         self.append(
             "return", "lane=L1", "run=r1", "status=partial", "sha=null", "landed=false", "exit=null",
-            'coderabbit={"ran":true,"major":0,"unreviewed":1}', 'questions=["why?"]',
+            'questions=["why?"]',
         )
         self.append("accept", "task=T1", "accepted=false", "reason=needs work")
         self.append("park", "task=T1", "reason=waiting", "needs=owner", "until=2026-10-04T00:00:00Z")
@@ -260,9 +263,14 @@ class ValidationTests(Base):
         self.reject("return", "lane=L", "run=r", "status=partial", "exit=zero", needle="exit must be an integer")
         self.reject("accept", "task=T", "accepted=maybe", "reason=r", needle="accepted must be true or false")
         self.reject(*OPEN[:5], "first_wave=[1,2]", needle="first_wave must be a list of strings")
-        self.reject(
-            "return", "lane=L", "run=r", "status=complete", "coderabbit={}", needle="coderabbit must be"
-        )
+
+    def test_retired_coderabbit_field_is_tolerated_and_ignored(self):
+        # Older roots and logs still carry a CodeRabbit result on `return`; accept any shape, use none.
+        self.seed()
+        for value in ('{"ran":true,"major":0,"unreviewed":0}', "{}", "null", "skipped"):
+            self.append("return", "lane=L", "run=r-" + value[:2], "status=complete", "coderabbit=" + value)
+        self.assertEqual(run("check", self.log).returncode, 0)
+        self.assertNotIn("coderabbit", run("digest", self.log).stdout)
 
     def test_unknown_field_and_reserved_fields(self):
         self.reject("close", "reason=budget", "colour=red", needle="unknown field colour")

@@ -44,6 +44,5 @@ header line, Why, Done when, Scope, Others live in, Root-owned and a `Rules:` li
 {"v":3,"lane":"<id>","task":"<ID>","status":"complete|partial|blocked|failed",
  "base":"<full SHA>","worktree":"<abs path>","patch":"<abs path>","patch_sha256":"<hex>",
  "check":"<exact command>","exit":<int>|null,"tail":"<last lines, at most 40>",
- "coderabbit":{"ran":true|false,"major":<n>,"unreviewed":<n>}|null,
  "questions":["<short; details in return.md>"]}
 ```

@@ -1450,7 +1450,6 @@ LANE_RETURN_V3 = """```lane-return
 {"v":3,"lane":"<id>","task":"<ID>","status":"complete|partial|blocked|failed",
  "base":"<full SHA>","worktree":"<abs path>","patch":"<abs path>","patch_sha256":"<hex>",
  "check":"<exact command>","exit":<int>|null,"tail":"<last lines, at most 40>",
- "coderabbit":{"ran":true|false,"major":<n>,"unreviewed":<n>}|null,
  "questions":["<short; details in return.md>"]}
 ```"""
 
@@ -1468,11 +1467,16 @@ class AgentReturnContractTests(unittest.TestCase):
             self.assertNotIn("Return exactly:", text, path.name)
             self.assertEqual(text.count(LANE_RETURN_V3), 1, f"{path.name} lacks the exact lane-return v3 block")
             self.assertNotIn('"v":2', text, path.name)
+            self.assertNotIn("coderabbit", text.lower(), path.name)
             # loop-state's return cap reads these sentences: the whole serialized block must fit the
             # native preview, and the exact check is never abbreviated.
             self.assertRegex(text, r"serialized fenced block at most 1,800 UTF-16 code units\s+\(including fences,\s*newlines and JSON escapes\)", path.name)
             self.assertIn("never abbreviate the exact check", text, path.name)
             self.assertLessEqual(len(text.split("\n---\n", 1)[1].splitlines()), 40, f"{path.name} body is over 40 lines")
+
+    def test_lane_policy_does_not_run_the_coderabbit_cli(self):
+        text = (HERE.parent / "home/lane-policy.md").read_text().lower()
+        self.assertNotIn("coderabbit", text)
 
     def test_working_roles_point_at_lane_md_and_no_agent_names_a_push_right(self):
         for path in sorted((HERE.parent / "home/agents").glob("*.md")):
