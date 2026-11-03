@@ -29,6 +29,9 @@ interface Peer {
   /** Root replies: the next root user prompt decides the tool call. */
   childBlockMs: number;
   childFirstDelayMs: number;
+  holdNextWake: boolean;
+  wakeHeld: boolean;
+  releaseWake(): void;
 }
 
 function inputText(input: any[]): string {
@@ -45,6 +48,9 @@ function lastUserText(input: any[]): string {
 
 async function startPeer(childBlockMs: number, childFirstDelayMs = 0): Promise<Peer> {
   const peer = { rootOutputs: [], childInputs: [], childBlockMs, childFirstDelayMs } as unknown as Peer;
+  peer.holdNextWake = false;
+  peer.wakeHeld = false;
+  peer.releaseWake = () => {};
   let n = 0;
   peer.server = createServer(async (req, res) => {
     let raw = "";
@@ -80,7 +86,17 @@ async function startPeer(childBlockMs: number, childFirstDelayMs = 0): Promise<P
       const prompt = lastUserText(input);
       const steer = /STEER (\S+?)(?: NORECOVERY)?\\?"/.exec(prompt);
       const resume = /RESUME (\S+?)\\?"/.exec(prompt);
-      if (prompt.includes("LAUNCH")) item = call("subagent", { agent: "scout", task: "CHILD_TASK", async: true, worktree: false });
+      if (JSON.stringify(last).includes("Background task completed:")) {
+        if (peer.holdNextWake) {
+          peer.holdNextWake = false;
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, 30_000);
+            peer.releaseWake = () => { clearTimeout(timer); resolve(); };
+            peer.wakeHeld = true;
+          });
+        }
+        item = text("WAKE_DONE");
+      } else if (prompt.includes("LAUNCH")) item = call("subagent", { agent: "scout", task: "CHILD_TASK", async: true, worktree: false });
       else if (steer) item = call("subagent", { action: "steer", id: steer[1], message: "STEER_MSG", options: { steeringRecovery: !prompt.includes("NORECOVERY") } });
       else if (resume) item = call("subagent", { action: "resume", id: resume[1], message: "RESUME_MSG" });
       else item = text("idle");
@@ -120,6 +136,8 @@ async function startRig(childBlockMs: number, opts: { loopGuard?: boolean; child
     extraArgs: ["--provider", "fixture", "--model", "fixture"],
     sessionArgs: [], agentDir: home, subagentTempRoot: tempRoot, cwd, fauxScriptPath: "",
   });
+  // Even a failed first request must retain unexpected writers for diagnosis.
+  expectDetachedRuns(tempRoot, 0);
   const rig: Rig = {
     peer, root, cwd, tempRoot, expectedRuns: 0, runsDir: join(tempRoot, "async-subagent-runs"),
     async close() {
@@ -137,16 +155,45 @@ async function startRig(childBlockMs: number, opts: { loopGuard?: boolean; child
 }
 
 let promptSeq = 0;
-async function prompt(rig: Rig, message: string, timeoutMs = 60_000): Promise<string> {
-  if (message === "LAUNCH" || message.startsWith("RESUME ")) {
+async function prompt(rig: Rig, message: string, timeoutMs = 60_000, queueWhileBusy = true): Promise<string> {
+  const id = `p${++promptSeq}`;
+  const before = rig.root.events.length;
+  const priorRuns = new Set(runIds(rig));
+  const deadline = Date.now() + timeoutMs;
+  const remaining = () => Math.max(1, deadline - Date.now());
+  const subsequent = (event: PiRpcSession["events"][number]) => rig.root.events.indexOf(event) >= before;
+  rig.root.send({ type: "prompt", id, message, ...(queueWhileBusy ? { streamingBehavior: "followUp" } : {}) });
+  const accepted = await rig.root.waitFor((event) => event.type === "response" && event.id === id && event.command === "prompt", remaining());
+  assert.equal(accepted.success, true, `RPC ${id}: ${accepted.error ?? JSON.stringify(accepted)}`);
+  assert.notEqual((accepted.data as { disposition?: string } | undefined)?.disposition, "handled", `RPC ${id} did not start or queue model work`);
+
+  // Completion wakes have their own turns. Correlate the requested action and its toolCallId;
+  // neither another turn's agent_end nor prompt acceptance proves the tool executed.
+  const action = message.split(" ")[0];
+  const target = message.split(" ")[1];
+  const started = await rig.root.waitFor((event) => {
+    if (!subsequent(event) || event.type !== "tool_execution_start" || event.toolName !== "subagent") return false;
+    const args = event.args as Record<string, unknown>;
+    return action === "LAUNCH"
+      ? args.agent === "scout" && args.task === "CHILD_TASK" && args.async === true
+      : args.action === action.toLowerCase() && args.id === target && args.message === `${action}_MSG`;
+  }, remaining());
+  const ended = await rig.root.waitFor((event) => subsequent(event) && event.type === "tool_execution_end" && event.toolCallId === started.toolCallId, remaining());
+  const result = ended.result as { content?: { type: string; text?: string }[]; details?: { runId?: string } };
+  const output = (result.content ?? []).filter((item) => item.type === "text").map((item) => item.text ?? "").join("\n");
+  if (action === "LAUNCH" || action === "RESUME") {
+    assert.notEqual(ended.isError, true, `RPC ${id} tool failed: ${output}`);
+    const runId = result.details?.runId;
+    assert.ok(runId && !priorRuns.has(runId), `RPC ${id} did not report a new run: ${output}`);
+    // Register only an actually executed launch. Unknown extra runs still fail the exact-count
+    // writer barrier, retaining their directories instead of silently treating them as absent.
+    await waitForCondition(() => runIds(rig).includes(runId) ? true : undefined, remaining());
     rig.expectedRuns += 1;
     expectDetachedRuns(rig.tempRoot, rig.expectedRuns);
   }
-  const before = rig.peer.rootOutputs.length;
-  const ends = rig.root.events.filter((e) => e.type === "agent_end").length;
-  rig.root.send({ type: "prompt", id: `p${++promptSeq}`, message });
-  await waitForCondition(() => (rig.root.events.filter((e) => e.type === "agent_end").length > ends ? true : undefined), timeoutMs);
-  return rig.peer.rootOutputs.slice(before).join("\n");
+  await rig.root.waitFor((event) => event.type === "agent_end" && subsequent(event)
+    && (event.messages as { role?: string; toolCallId?: string }[] | undefined)?.some((item) => item.role === "toolResult" && item.toolCallId === started.toolCallId) === true, remaining());
+  return output;
 }
 
 function runIds(rig: Rig): string[] {
@@ -249,6 +296,59 @@ test("loop-guard: even an explicit recovery request is disabled, so a slow child
     assert.equal(runIds(rig).length, 1, "no replacement");
     console.log(`[guard] terminal state=${status(rig, id).state}; runs=${runIds(rig).length}; steer_seen=true`);
   } finally {
+    await rig.close();
+  }
+});
+
+test("RPC rejection during a native completion wake is reported without inventing a resumed run", { timeout: 60_000 }, async () => {
+  const rig = await startRig(0, { childFirstDelayMs: 1_000 });
+  rig.peer.holdNextWake = true;
+  try {
+    const id = await launchBlockedChild(rig);
+    await waitForCondition(() => rig.peer.wakeHeld ? true : undefined, 30_000);
+    const before = rig.root.events.length;
+    await assert.rejects(prompt(rig, `RESUME ${id}`, 2_000, false), /Agent is already processing/);
+    assert.equal(rig.expectedRuns, 1, "a rejected RPC request cannot create a run expectation");
+    assert.equal(runIds(rig).length, 1);
+    rig.peer.releaseWake();
+    await rig.root.waitFor((event) => event.type === "agent_end" && rig.root.events.indexOf(event) >= before, 5_000);
+    assert.equal(rig.root.events.slice(before).some((event) => event.type === "tool_execution_start"
+      && (event.args as { action?: string } | undefined)?.action === "resume"), false,
+      "the unrelated wake agent_end must not turn a rejected RESUME into success");
+  } catch (error) {
+    console.error("Native wake rejection regression:", error);
+    throw error;
+  } finally {
+    rig.peer.releaseWake();
+    await rig.close();
+  }
+});
+
+test("RESUME queued behind a native completion wake waits for its own tool result and new run", { timeout: 90_000 }, async () => {
+  const rig = await startRig(0, { childFirstDelayMs: 1_000 });
+  rig.peer.holdNextWake = true;
+  try {
+    const id = await launchBlockedChild(rig);
+    await waitForCondition(() => rig.peer.wakeHeld ? true : undefined, 30_000);
+    const requestId = `p${promptSeq + 1}`;
+    const resumed = prompt(rig, `RESUME ${id}`);
+    // Attach immediately so a failed acceptance assertion cannot leave an unhandled rejection.
+    void resumed.catch(() => {});
+    const accepted = await rig.root.waitFor((e) => e.type === "response" && e.id === requestId, 5_000);
+    assert.equal(accepted.success, true, JSON.stringify(accepted));
+    assert.equal(rig.expectedRuns, 1, "queued acceptance is not RESUME execution");
+    assert.equal(runIds(rig).length, 1);
+    rig.peer.releaseWake();
+    const output = await resumed;
+    assert.match(output, /Revived async subagent/);
+    assert.equal(rig.expectedRuns, 2);
+    assert.equal(runIds(rig).length, 2);
+    const revivedId = runIds(rig).find((runId) => runId !== id)!;
+    await waitForCondition(() => status(rig, revivedId).state === "complete" ? true : undefined, 30_000);
+    assert.ok(rig.peer.childInputs.some((text) => text.includes("RESUME_MSG")));
+    assert.ok(existsSync(join(rig.cwd, "saved-work.txt")));
+  } finally {
+    rig.peer.releaseWake();
     await rig.close();
   }
 });
