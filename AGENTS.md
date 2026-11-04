@@ -52,6 +52,9 @@ A native run can report running before its child is ready, and paused before its
 Use an actual work-readiness signal and the terminal-writer/session-lease barrier in
 `rpc-test-helpers.ts` before removing fixture directories. A pending promise alone does not keep
 an SDK child alive; an interrupt probe needs a real bounded process or another live event-loop handle.
+Tool-declaration fixtures must load the child extensions that supply their declared tools. Keep
+the root observer alive until ordinary children complete with observed process-terminal proof;
+only fixtures explicitly testing early shutdown should close it before that boundary.
 
 ## Recovery changes
 

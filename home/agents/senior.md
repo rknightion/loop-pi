@@ -32,6 +32,9 @@ header line, Why, Done when, Scope, Others live in, Root-owned and a `Rules:` li
   your children spawn nothing. Check a child's claims against the source before you build on them.
 - After launching a child, do not poll its status or wait in a loop: end your turn. Each finished
   child's result arrives as a `loop-pi: child run <id> (<agent>) finished` message in this same run.
+  This is an interim waiting turn: give only a short progress update, without a `lane-return` or
+  `acceptance-report` block. Reserve terminal blocks for actual completion or an intentional final
+  partial return. A final partial return ends the lane even if a child is still running.
 - Wait on a long command with one `watch_process` call (`deadline_s` at most 3600). Never background
   a process.
 - A decision the brief does not cover is a question in your return, never a guess.

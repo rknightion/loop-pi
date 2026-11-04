@@ -10,13 +10,14 @@ function harness(settings: unknown = { loopPi: { retryRecovery: { episodeMs: 30,
   const sequence: string[] = [];
   const notices: any[] = [];
   const model = { provider: "fixture", api: "openai-responses", id: "fixture", baseUrl: "http://localhost/v1" };
-  const sessionManager = { getSessionId: () => "lifecycle-session" };
+  const entries: any[] = [];
+  const sessionManager = { getSessionId: () => "lifecycle-session", getBranch: () => entries };
   const ctx = { model, sessionManager, modelRegistry: {
     find: () => model, getProvider: () => ({auth:{}}),
     getRegisteredProviderConfig: () => ({api:"openai-responses",baseUrl:model.baseUrl}),
     getRegisteredNativeProvider: () => undefined, isUsingOAuth: () => false,
   }, abort() { sequence.push("abort"); aborted++; } };
-  installRecovery({ events: { on(name: string, fn: Function) { bus.set(name, [...(bus.get(name) ?? []), fn]); }, emit(name: string, event: unknown) { sequence.push(name); for (const fn of bus.get(name) ?? []) fn(event); } }, sendMessage(message: unknown) { notices.push(message); }, on(name: string, fn: Function) { handlers.set(name, [...(handlers.get(name) ?? []), fn]); } } as any, () => settings);
+  installRecovery({ appendEntry(customType: string, data: unknown) { entries.push({type:"custom",customType,data}); }, events: { on(name: string, fn: Function) { bus.set(name, [...(bus.get(name) ?? []), fn]); }, emit(name: string, event: unknown) { sequence.push(name); for (const fn of bus.get(name) ?? []) fn(event); } }, sendMessage(message: unknown) { notices.push(message); }, on(name: string, fn: Function) { handlers.set(name, [...(handlers.get(name) ?? []), fn]); } } as any, () => settings);
   const dispatch = (name: string, event: any = {}) => handlers.get(name)?.map((fn) => fn(event, ctx)).at(-1);
   // The pinned SDK auth transform runs headers before the Agent payload callback.
   const emit = (name: string, event: any = {}) => {
@@ -385,3 +386,64 @@ for (const errorMessage of [
     assert.equal(classifyRootStop(result.message, { harnessAbort: null }).action, "resume");
   });
 }
+
+test("an unrelated later episode keeps its own reason on a previously sanitized route", (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
+  const h = harness();
+  Object.assign(h.ctx.sessionManager, { getBranch: () => [{ type: "custom", customType: "loop-encrypted-history-quarantine", data: { v: 1, provider: "fixture", model: "fixture" } }] });
+  h.emit("session_start");
+  let result: any;
+  for (let i=0;i<4;i++) {
+    h.emit("turn_start");
+    const payload=h.emit("before_provider_request", {payload:{input:[{type:"reasoning",encrypted_content:"fixture"}]}});
+    assert.deepEqual(payload.input, [], "persistent route sanitation remains enabled");
+    result=h.emit("message_end", failure);h.emit("agent_settled");
+  }
+  assert.equal(result.message.loopPiRecovery.reason,"attempt-limit","later unrelated failure must not be relabelled encrypted history");
+  h.emit("session_shutdown");
+});
+
+
+for (const [code,type,status,reason] of [
+  ["invalid_api_key","authentication_error",401,"upstream-auth-refusal"],
+  ["cyber_policy","policy_error",400,"upstream-policy-refusal"],
+  ["insufficient_quota","rate_limit_error",429,"non-retryable-upstream"],
+] as const) test(`sanitized episode preserves ${code} refusal attribution`, (t) => {
+  t.mock.timers.enable({apis:["Date","setTimeout"]});
+  const h=harness();h.emit("session_start");h.emit("turn_start");
+  h.emit("before_provider_request",{payload:{input:[{type:"reasoning",encrypted_content:"fixture"}]}});
+  const fail=(c:string,ty:string,s:number)=>({message:{role:"assistant",content:[],stopReason:"error",errorMessage:`Fixture API error (${s}): ${JSON.stringify({error:{code:c,type:ty,message:"fixture"}})}`}});
+  const first=h.emit("message_end",fail("invalid_encrypted_content","invalid_request_error",400));
+  assert.equal(first.message.loopPiRecovery.disposition,"retry");
+  h.emit("turn_start");h.emit("before_provider_request",{payload:{input:[{type:"reasoning",encrypted_content:"fixture"}]}});
+  const final=h.emit("message_end",fail(code,type,status));
+  assert.equal(final.message.loopPiRecovery.reason,reason,"a safety/refusal cause is not an encrypted-history exhaustion");
+  h.emit("session_shutdown");
+});
+
+for (const [code, type, status, reason, rootCause] of [
+  ["invalid_api_key", "authentication_error", 401, "upstream-auth-refusal", "authentication"],
+  ["cyber_policy", "policy_error", 400, "upstream-policy-refusal", "policy"],
+  ["insufficient_quota", "rate_limit_error", 429, "non-retryable-upstream", "quota"],
+] as const) test(`expired sanitized episode retains ${code} refusal attribution`, (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
+  const h = harness();
+  const fail = (code: string, type: string, status: number) => ({ message: {
+    role: "assistant", content: [], stopReason: "error",
+    errorMessage: `Fixture API error (${status}): ${JSON.stringify({ error: { code, type, message: "fixture" } })}`,
+  } });
+  h.emit("session_start"); h.emit("turn_start");
+  h.emit("before_provider_request", { payload: { input: [{ type: "reasoning", encrypted_content: "fixture" }] } });
+  const first = h.emit("message_end", fail("invalid_encrypted_content", "invalid_request_error", 400));
+  assert.equal(first.message.loopPiRecovery.disposition, "retry");
+  h.emit("turn_start");
+  h.emit("before_provider_request", { payload: { input: [{ type: "reasoning", encrypted_content: "fixture" }] } });
+  // The response/refusal arrives after the already established episode deadline.
+  t.mock.timers.tick(30);
+  const final = h.emit("message_end", fail(code, type, status));
+  assert.equal(final.message.loopPiRecovery.reason, reason);
+  const decision = classifyRootStop(final.message, { harnessAbort: "request-timeout" });
+  assert.equal(decision.action, "stop");
+  if (decision.action === "stop") assert.equal(decision.cause, rootCause);
+  h.emit("session_shutdown");
+});

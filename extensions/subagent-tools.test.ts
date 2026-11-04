@@ -96,7 +96,7 @@ async function captureDeclaredTools(exclusions: string[], extraChildTools = "", 
   // A child with the shipped worker's tool allowlist, plus whatever a lane would add to it.
   const workerTools = /^tools: (.*)$/m.exec(readFileSync(join(ROOT, "home/agents/worker.md"), "utf8"))![1] + extraChildTools;
   mkdirSync(join(home, "agents"));
-  writeFileSync(join(home, "agents/probe.md"), `---\nname: probe\ndescription: Declared-tools proof\ntools: ${workerTools}\nextensions: []\nmodel: fixture/fixture\n---\nComplete the proof.\n`);
+  writeFileSync(join(home, "agents/probe.md"), `---\nname: probe\ndescription: Declared-tools proof\ntools: ${workerTools}\nextensions: []\nsubagentOnlyExtensions: ${join(ROOT, "extensions/loop-wait/lane.ts")}\nmodel: fixture/fixture\n---\nComplete the proof.\n`);
 
   const subagentTempRoot = freshDir("subagent-tools-sub-");
   expectDetachedRuns(subagentTempRoot, 1);
@@ -109,6 +109,18 @@ async function captureDeclaredTools(exclusions: string[], extraChildTools = "", 
     await waitForCondition(() => (requests.some((r) => r.kind === "child") && requests.some((r) => r.kind === "root") ? true : undefined), 30_000);
     const root = requests.find((r) => r.kind === "root")!.tools;
     const child = requests.find((r) => r.kind === "child")!.tools;
+    if (!holdChild) {
+      // A request proves declaration, not successful child startup or writer shutdown.
+      // Keep its native observer alive until it records the real runner's terminal proof.
+      await waitForCondition(() => {
+        const runsDir = join(subagentTempRoot, "async-subagent-runs");
+        const run = readdirSync(runsDir).find((name) => !name.startsWith("."));
+        if (!run) return;
+        const status = JSON.parse(readFileSync(join(runsDir, run, "status.json"), "utf8"));
+        assert.notEqual(status.state, "failed", `declaration probe failed: ${status.error}`);
+        return status.state === "complete" && status.processTerminal?.state === "observed" ? true : undefined;
+      }, 30_000);
+    }
     return { root, child };
   } catch (error) {
     throw new Error(`${error}\nrequests: ${JSON.stringify(requests)}\nstderr:\n${session.stderr.join("")}`);

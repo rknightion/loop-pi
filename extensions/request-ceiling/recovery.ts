@@ -7,6 +7,8 @@ import { EMPTY_LENGTH_ERROR } from "./core.ts";
 import { classifyRetryError, retryPolicy } from "./backoff.ts";
 
 export const RECOVERY_STOP = "loop-pi recovery required; automatic continuation declined";
+export const ENCRYPTED_REASONING_RETRIES = 1;
+const ENCRYPTED_QUARANTINE = "loop-encrypted-history-quarantine";
 export const EPISODE_STOP = "loop-pi recovery budget exhausted; start a new user turn to resume";
 export interface RecoveryConfig { episodeMs: number; providerIds: string[]; maxAttempts: number }
 /** pi-subagents' shared idle-wake reservation (its `src/shared/parent-wake.js`, documented in its
@@ -28,7 +30,7 @@ export function recoveryConfig(settings: unknown): RecoveryConfig {
 interface ProxyError { code: string; type?: string; message?: string; status?: number }
 const POLICY_CODES = new Set(["cyber_policy", "content_policy_violation", "content_filter", "policy_violation", "safety_violation"]);
 const AUTH_CODES = new Set(["invalid_api_key", "authentication_error", "permission_denied", "insufficient_permissions"]);
-const CODES = new Set(["stream_incomplete", "previous_response_owner_unavailable", "bridge_previous_response_not_found", "continuity_recovery_required", "native_websocket_backpressure", "insufficient_quota", "context_length_exceeded", ...POLICY_CODES, ...AUTH_CODES]);
+const CODES = new Set(["invalid_encrypted_content","stream_incomplete", "previous_response_owner_unavailable", "bridge_previous_response_not_found", "continuity_recovery_required", "native_websocket_backpressure", "insufficient_quota", "context_length_exceeded", ...POLICY_CODES, ...AUTH_CODES]);
 const ERROR_TYPES = new Set(["server_error", "invalid_request_error", "authentication_error", "permission_error", "policy_error", "rate_limit_error"]);
 const correlation = (value: unknown): string | null => typeof value === "string" && /^[A-Za-z0-9._:-]{1,128}$/.test(value) ? value : null;
 function proxyError(value: unknown, status?: number): ProxyError | undefined {
@@ -75,6 +77,19 @@ export function portableRequest(payload: unknown): boolean {
   }
   return true;
 }
+/** Remove account-scoped reasoning only from a fully portable local-tool transcript. */
+export function withoutEncryptedReasoning(payload: unknown): unknown {
+  if (!portableRequest(payload)) return payload;
+  const p = payload as Record<string, any>;
+  return { ...p,
+    input: p.input.filter((item: any) => item.type !== "reasoning").map((item: any) => {
+      if (item.type !== "function_call" && item.type !== "custom_tool_call") return item;
+      const { id: _pairedItemId, ...call } = item;
+      return call;
+    }),
+    ...(Array.isArray(p.include) ? { include: p.include.filter((item: unknown) => item !== "reasoning.encrypted_content") } : {}),
+  };
+}
 export function safeProxyRetry(error: ProxyError | undefined): boolean {
   if (!error || error.type !== "server_error" || (error.status !== undefined && (error.status < 500 || error.status > 504))) return false;
   if (error.code === "previous_response_owner_unavailable" || error.code === "native_websocket_backpressure") return true;
@@ -112,6 +127,10 @@ export function installRecovery(pi: ExtensionAPI, loadSettings: (ctx?: Extension
   let halted = false;
   let provider: string | undefined;
   let portable = false;
+  const encryptedRoutes = new Set<string>();
+  let sanitizedEpisode = false;
+  let currentRoute = "";
+  const routeKey = (ctx: ExtensionContext) => JSON.stringify([ctx.model?.provider, ctx.model?.id]);
   let output = false;
   let error: ProxyError | undefined;
   let attemptId: string | undefined;
@@ -157,7 +176,7 @@ export function installRecovery(pi: ExtensionAPI, loadSettings: (ctx?: Extension
     wakeHold = undefined;
   };
   const clearTimer = () => { if (timer) clearTimeout(timer); timer = undefined; };
-  const reset = () => { releaseWakes(); clearTimer(); deadline = undefined; expired = false; notified = false; halted = false; active = false; stopReason = undefined; stopNotified = false; attempts = 0; exhaustionCause = undefined; ceilingAllowed = false; admissionReason = undefined; stoppedUpstream = undefined; failedUpstream = undefined; lastRequestUpstream = undefined; compactionAllowed = false; summaryScope = false; summaryInvocations = 0; summaryClientId = null; };
+  const reset = () => { sanitizedEpisode = false; releaseWakes(); clearTimer(); deadline = undefined; expired = false; notified = false; halted = false; active = false; stopReason = undefined; stopNotified = false; attempts = 0; exhaustionCause = undefined; ceilingAllowed = false; admissionReason = undefined; stoppedUpstream = undefined; failedUpstream = undefined; lastRequestUpstream = undefined; compactionAllowed = false; summaryScope = false; summaryInvocations = 0; summaryClientId = null; };
   const abortRecovery = (ctx: { abort(): void; signal?: AbortSignal }) => {
     // Synchronous attribution before abort: loop-wait must not mistake this for operator Esc.
     // Not when the owner already aborted this run: that stop is theirs, and announcing it as the
@@ -214,9 +233,18 @@ export function installRecovery(pi: ExtensionAPI, loadSettings: (ctx?: Extension
   pi.on("model_select", () => { reset(); opted = false; });
   // loop-continuation's automatic root resume (SEAMS.md "Automatic root recovery"): after its backoff
   // it resets an idle episode exactly as an owner's idle input would. Wakes never emit this.
-  pi.events.on("loop-recovery:resume", () => { if (!active) reset(); });
+  pi.events.on("loop-recovery:resume", () => { if (!active && stopReason !== "encrypted-history-quarantined") reset(); });
   pi.events.on("loop-recovery:request-timeout", () => { if (active) timedOut = true; });
-  pi.on("session_start", reset);
+  pi.on("session_start", (_event, ctx) => {
+    reset(); encryptedRoutes.clear();
+    for (const entry of ctx.sessionManager.getBranch?.() ?? []) {
+      if (entry.type === "custom" && entry.customType === ENCRYPTED_QUARANTINE) {
+        const data = entry.data as { v?: unknown; provider?: unknown; model?: unknown };
+        if (data?.v === 1 && typeof data.provider === "string" && typeof data.model === "string")
+          encryptedRoutes.add(JSON.stringify([data.provider, data.model]));
+      }
+    }
+  });
   pi.on("session_shutdown", reset);
   pi.on("input", (event) => {
     if (event.source === "extension" && !mayContinue()) return { action: "handled" as const };
@@ -227,6 +255,7 @@ export function installRecovery(pi: ExtensionAPI, loadSettings: (ctx?: Extension
   pi.on("turn_start", (_event, ctx) => {
     if (provider !== ctx.model?.provider) reset();
     provider = ctx.model?.provider;
+    currentRoute = routeKey(ctx);
     active = true;
     startedAt = Date.now();
     const settings = loadSettings(ctx);
@@ -285,9 +314,9 @@ export function installRecovery(pi: ExtensionAPI, loadSettings: (ctx?: Extension
     summaryScope = false; compactionAllowed = false; arm(ctx);
     if (!active) idleHold(ctx);
   });
-  pi.on("cache_warming_decision", () => {
+  pi.on("cache_warming_decision", (_event, ctx) => {
     // Also stop idle refreshes while a retained failed episode awaits a wake.
-    if (opted && (active || deadline !== undefined || halted || expired)) return { action: "stop" };
+    if (opted && (active || deadline !== undefined || halted || expired || encryptedRoutes.has(routeKey(ctx)))) return { action: "stop" };
   });
   pi.on("before_provider_headers", (event, ctx) => {
     if ((!active && !summaryScope) || !opted) return;
@@ -309,7 +338,9 @@ export function installRecovery(pi: ExtensionAPI, loadSettings: (ctx?: Extension
   });
   pi.on("before_provider_request", (event) => {
     if (!active || !opted || summaryScope) return;
-    portable = portableRequest(event.payload);
+    const payload = encryptedRoutes.has(currentRoute) ? withoutEncryptedReasoning(event.payload) : event.payload;
+    portable = portableRequest(payload);
+    return payload;
   });
   pi.on("after_provider_response", (event) => {
     if (!active || !opted) return;
@@ -373,7 +404,11 @@ export function installRecovery(pi: ExtensionAPI, loadSettings: (ctx?: Extension
     const localReplay = responses && portable && !toolsExecuted && !unsafeOutput;
     const interrupted = error?.code === "stream_incomplete" && error.type === "server_error"
       && (error.status === undefined || (error.status >= 500 && error.status <= 504));
-    const retryable = safeProxyRetry(error) || (localReplay && interrupted);
+    const encryptedFailure = error?.code === "invalid_encrypted_content"
+      && error.type === "invalid_request_error" && (error.status === undefined || error.status === 400);
+    const encryptedRetries = encryptedRoutes.has(currentRoute) ? ENCRYPTED_REASONING_RETRIES : 0;
+    const encryptedRetry = encryptedFailure && localReplay && !output && encryptedRetries < ENCRYPTED_REASONING_RETRIES;
+    const retryable = safeProxyRetry(error) || (localReplay && interrupted) || encryptedRetry;
     const contextOverflowAllowed = error === undefined || (error.code === "context_length_exceeded"
       && error.type === "invalid_request_error" && (error.status === undefined || error.status === 400));
     const contextOverflow = contextOverflowAllowed && message.stopReason === "error"
@@ -383,11 +418,13 @@ export function installRecovery(pi: ExtensionAPI, loadSettings: (ctx?: Extension
       && !message.content.some((block) => block.type === "toolCall" || (block.type === "text" && block.text.length > 0));
     const ownedRecovery = nativeCompaction || emptyCeiling;
     let reason: string | undefined;
-    if (failed && expired) reason = exhaustionCause ?? "episode-expired";
-    else if (admissionReason) reason = admissionReason;
+    if (admissionReason) reason = admissionReason;
     else if (failed && !operatorCancelled && error && (POLICY_CODES.has(error.code) || error.type === "policy_error")) reason = "upstream-policy-refusal";
     else if (failed && !operatorCancelled && error && (AUTH_CODES.has(error.code) || error.type === "authentication_error" || error.type === "permission_error" || error.status === 401 || error.status === 403)) reason = "upstream-auth-refusal";
     else if (failed && !operatorCancelled && error && !retryable && !contextOverflow) reason = "non-retryable-upstream";
+    // A deadline can expire while the refusal response is arriving. Preserve that
+    // refusal before attributing the stop to this episode's exhausted budget.
+    else if (failed && expired) reason = exhaustionCause ?? "episode-expired";
     else if (failed && !responses && isContextOverflow(message, ctx.model?.contextWindow)) reason = "summary-route-not-established";
     else if (failed && !ownedRecovery && (message.stopReason === "error" || timedOut)) {
       if (!portable) reason = "protected-request";
@@ -403,6 +440,8 @@ export function installRecovery(pi: ExtensionAPI, loadSettings: (ctx?: Extension
     if (failed && !operatorCancelled && !reason && attempts >= attemptLimit) {
       expired = true; exhaustionCause = "attempt-limit"; reason = exhaustionCause;
     }
+    if (failed && !operatorCancelled && ((encryptedFailure && !encryptedRetry)
+      || (expired && reason !== undefined && ["attempt-limit", "episode-expired", "ceiling-limit"].includes(reason) && sanitizedEpisode))) reason = "encrypted-history-quarantined";
     const denied = reason !== undefined;
     if (denied && !expired) {
       halted = true; stopReason ??= reason;
@@ -418,7 +457,12 @@ export function installRecovery(pi: ExtensionAPI, loadSettings: (ctx?: Extension
       deadline = Date.now() + episodeMs;
       arm(ctx);
     }
-    const retryReason = timedOut ? "safe-local-timeout" : localReplay && interrupted ? "interrupted-local-response" : "unstarted-request";
+    if (allowed && encryptedRetry) {
+      sanitizedEpisode = true;
+      encryptedRoutes.add(currentRoute);
+      pi.appendEntry(ENCRYPTED_QUARANTINE, { v: 1, provider: ctx.model!.provider, model: ctx.model!.id });
+    }
+    const retryReason = encryptedRetry ? "encrypted-reasoning-sanitized" : timedOut ? "safe-local-timeout" : localReplay && interrupted ? "interrupted-local-response" : "unstarted-request";
     const upstreamLabel = stoppedUpstream?.code && stoppedUpstream.code !== "unrecognized" ? `; upstream=${stoppedUpstream.code}` : "";
     const explanation = `${RECOVERY_STOP} (${stopReason ?? reason}${upstreamLabel}). Inspect saved work, then send a new message to resume.`;
     return { message: {
