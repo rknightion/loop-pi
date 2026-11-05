@@ -61,10 +61,11 @@ for (const outcome of ["success", "failure", "abort"] as const) {
       append(s.log, "dispatch", "lane=L2", "task=T-1", "agent=worker", "run=run-two", "base=fixture");
       append(s.log, "park", "task=T-2", "reason=fixture", "needs=owner");
       const ledgerHash = hash(readFileSync(s.log));
-      // Public faux withUsageEstimate reports input plus cache-write on new prompt bytes.
-      // 450k fresh characters yields ~225k/272k reported context tokens: above 80%, below
+      // Public faux withUsageEstimate reports new prompt bytes as cache-write at four characters
+      // per token (pi 1.5.0 stopped also counting them as input).
+      // 900k fresh characters yields ~225k/272k reported context tokens: above 80%, below
       // native overflow. No model/usage backfill or provider wrapper is used.
-      session.send({ type: "prompt", id: "large", message: "history ".repeat(56_250) });
+      session.send({ type: "prompt", id: "large", message: "history ".repeat(112_500) });
       await session.waitFor(e => e.type === "agent_settled" && session.events.filter(x => x.type === "agent_settled").length === 2);
       const attempts = session.events.filter(e => e.type === "compaction_start");
       assert.equal(attempts.length, 1, "native compaction must actually run proactively");
@@ -105,7 +106,7 @@ for (const outcome of ["success", "failure", "abort"] as const) {
         await session.waitFor(e => e.type === "agent_settled" && session.events.filter(x => x.type === "agent_settled").length === 3);
         const contexts = readFileSync(facts, "utf8").trim().split("\n").map(l => JSON.parse(l)).filter(r => r.type === "context");
         assert.ok(contexts.at(-1).bytes < 50_000, "the next real model request receives only bounded recovery context");
-        session.send({ type: "prompt", id: "large-again", message: "history ".repeat(56_250) });
+        session.send({ type: "prompt", id: "large-again", message: "history ".repeat(112_500) });
         await session.waitFor(e => e.type === "agent_settled" && session.events.filter(x => x.type === "agent_settled").length === 4);
         assert.equal(session.events.filter(e => e.type === "compaction_start").length, 2, "low known usage rearms the next generation");
         const next = session.events.filter(e => e.type === "compaction_end").at(-1) as any;
@@ -113,7 +114,7 @@ for (const outcome of ["success", "failure", "abort"] as const) {
         assert.equal(hash(readFileSync(s.log)), ledgerHash);
         session.send({ type: "prompt", id: "small-after-two", message: "short follow-up" });
         await session.waitFor(e => e.type === "agent_settled" && session.events.filter(x => x.type === "agent_settled").length === 5);
-        session.send({ type: "prompt", id: "third-large", message: "history ".repeat(56_250) });
+        session.send({ type: "prompt", id: "third-large", message: "history ".repeat(112_500) });
         await session.waitFor(e => e.type === "agent_settled" && session.events.filter(x => x.type === "agent_settled").length === 6);
         assert.equal(session.events.filter(e => e.type === "compaction_start").length, 2, "same-session run permits only two proactive attempts after rearm");
         const budgetState = (await rpc("get_entries", "capped-entries")).entries.filter((e: any) => e.customType === "loop-root-context-budget").at(-1).data;
@@ -240,7 +241,7 @@ test("live native child defers without consumption, completion wakes, then the s
     session.send({ type: "prompt", id: "spawn", message: "SPAWN_LIVE" });
     await session.waitFor(e => e.type === "agent_settled" && session.events.filter(x => x.type === "agent_settled").length === 2);
     await waitForCondition(() => { try { return readFileSync(s.log, "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line)).find(row => row.ev === "dispatch"); } catch { return undefined; } }, 10_000);
-    session.send({ type: "prompt", id: "large", message: "history ".repeat(56_250) });
+    session.send({ type: "prompt", id: "large", message: "history ".repeat(112_500) });
     await session.waitFor(e => e.type === "agent_settled" && session.events.filter(x => x.type === "agent_settled").length === 3);
     assert.equal(session.events.filter(e => e.type === "agent_start").length, 3, "only three explicit inputs start root turns while the child is live");
     assert.equal(session.events.filter(e => e.type === "compaction_start").length, 0, "active native child defers proactive compaction");
@@ -254,7 +255,7 @@ test("live native child defers without consumption, completion wakes, then the s
     assert.equal(session.events.filter(e => e.type === "agent_start").length, 4, "normal native child-completion wake is intact");
     // The cached completion turn can measure below 80%. Supply a fresh public-boundary
     // high-usage generation after completion, rather than inventing usage at that turn.
-    session.send({ type: "prompt", id: "fresh-high", message: "fresh ".repeat(40_000) });
+    session.send({ type: "prompt", id: "fresh-high", message: "fresh ".repeat(80_000) });
     const terminal = await session.waitFor(e => e.type === "compaction_end", 60_000) as any;
     await session.waitFor(e => e.type === "agent_settled" && session.events.filter(x => x.type === "agent_settled").length === 5);
     assert.ok(terminal.result, "a genuine settled high-usage boundary after child completion compacts");
@@ -300,7 +301,7 @@ test("a landed root push compacts the root past the configured share and the sum
     await session.waitFor(e => e.type === "agent_settled");
     append(s.log, "admit", "task=T-1", "source=first-wave", "owned=a/**", "accept=fixture", "tier=routine");
     // Past the push share on every later turn, below the backstop.
-    session.send({ type: "prompt", id: "large", message: "history ".repeat(41_250) });
+    session.send({ type: "prompt", id: "large", message: "history ".repeat(82_500) });
     await session.waitFor(e => e.type === "agent_settled" && settled() === 2);
     assert.equal(session.events.filter(e => e.type === "compaction_start").length, 0, "high usage without a landed push waits for the backstop");
     session.send({ type: "prompt", id: "push", message: "PUSH_NOW" });

@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { FAUX_EXTENSION, PI_SUBAGENTS_PACKAGE_DIR, cleanupAll, freshDir, startPiRpc, waitForCondition, writeFauxScript } from "../loop-guard/rpc-test-helpers.ts";
@@ -90,6 +90,12 @@ for (const resumable of [false, true]) test(`installed lifecycle and restart cap
     // Only this fresh scratch run is made eligible. Package guards for resumability/handoff are
     // independently valid; remove their references from scratch metadata, never session or patch files.
     const statusPath = join(asyncDir, "status.json");
+    // pi-subagents 0.85.0 finalizes a finished child's status asynchronously (the changed-files scan
+    // no longer blocks), so the runner may still be writing it after the root closes; wait for it.
+    await waitForCondition(() => {
+      const current = JSON.parse(readFileSync(statusPath, "utf8"));
+      return ["complete", "failed"].includes(current.state) && (!resumable || current.sessionFile) ? true : undefined;
+    }, 60_000);
     const status = JSON.parse(readFileSync(statusPath, "utf8"));
     if (!resumable) delete status.sessionFile;
     // An absolute handoff path would become unreadable after the package's tombstone rename.
@@ -97,7 +103,8 @@ for (const resumable of [false, true]) test(`installed lifecycle and restart cap
     delete status.parallelHandoff;
     if (!resumable) for (const step of status.steps ?? []) delete step.sessionFile;
     writeFileSync(statusPath, JSON.stringify(status));
-    const descriptorPath = join(asyncDir, "recovery-descriptor.json");
+    // pi-subagents 0.85.0 keeps launch records beside the runs root, outside the run folder.
+    const descriptorPath = join(dirname(dirname(asyncDir)), "async-subagent-launches", basename(asyncDir), "recovery-descriptor.json");
     if (existsSync(descriptorPath)) {
       const descriptor = JSON.parse(readFileSync(descriptorPath, "utf8"));
       if (!resumable) delete descriptor.sessionFile;

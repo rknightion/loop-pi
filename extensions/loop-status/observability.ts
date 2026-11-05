@@ -1,7 +1,7 @@
 // Metadata-only views of the pinned native async snapshot and inspection reply.
 import { randomUUID } from "node:crypto";
 import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 type RecordValue = Record<string, any>;
@@ -81,7 +81,12 @@ export function readInspection(runsDir: string, sessionId: string, id: string, c
     let descriptor: RecordValue = {};
     // A single-run descriptor records the original selected route, even after step.model changes.
     if (status.mode === "single" && steps.length === 1 && matches.length === 1) {
-      try { descriptor = readRecord(join(runsDir, id, "recovery-descriptor.json")); } catch { /* old run */ }
+      // pi-subagents 0.85.0 keeps it beside the runs root (runLaunchDir); earlier runs kept it in the run folder.
+      const launchDir = basename(dirname(runsDir)) === "nested-subagent-runs" ? join(runsDir, ".launches", id)
+        : join(dirname(runsDir), "async-subagent-launches", id);
+      for (const dir of [launchDir, join(runsDir, id)]) {
+        try { descriptor = readRecord(join(dir, "recovery-descriptor.json")); break; } catch { /* not here */ }
+      }
       if (descriptor.version !== 1 || descriptor.sourceRunId !== id) descriptor = {};
     }
     const requested = { model: step.launchModel ?? descriptor.model, thinking: descriptor.thinking ?? step.thinking, agent: step.agent };

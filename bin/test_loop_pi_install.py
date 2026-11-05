@@ -42,6 +42,15 @@ def apply(prefix: Path, tgt, node: str = "/usr/bin/node") -> None:
         m.atomic_write(path, data, mode)
 
 
+
+def launch_descriptor(status_path):
+    """A run's recovery descriptor, where pi-subagents 0.85.0 keeps it (runLaunchDir), outside the run folder."""
+    run_dir = status_path.parent
+    runs_root = run_dir.parent
+    if runs_root.parent.name == "nested-subagent-runs":
+        return runs_root / ".launches" / run_dir.name / "recovery-descriptor.json"
+    return runs_root.parent / "async-subagent-launches" / run_dir.name / "recovery-descriptor.json"
+
 class NopushTests(unittest.TestCase):
     def test_wrapper_denies_all_network_push_protocols_but_keeps_local_git(self):
         import sys
@@ -674,7 +683,7 @@ class NopushNativeCanary(unittest.TestCase):
             self.assertTrue(result.get("isError"), result)
             terminal_runs()
             parent_status_path, _ = run_for_session(parent_session)
-            parent_recovery = json.loads((parent_status_path.parent / "recovery-descriptor.json").read_text())
+            parent_recovery = json.loads(launch_descriptor(parent_status_path).read_text())
             self.assertEqual(parent_recovery["agent"], "senior")
             self.assertEqual(parent_recovery["maxSubagentDepth"], 2)
             print("NESTED FOREGROUND: senior async:false worker refused by native producer", flush=True)
@@ -688,7 +697,7 @@ class NopushNativeCanary(unittest.TestCase):
             statuses = terminal_runs()
             self.assertTrue(any(s.get("launcher", {}).get("name") == "nopush" for s in statuses))
             parent_status_path, parent_status = run_for_session(parent_session)
-            parent_recovery = json.loads((parent_status_path.parent / "recovery-descriptor.json").read_text())
+            parent_recovery = json.loads(launch_descriptor(parent_status_path).read_text())
             self.assertEqual(parent_recovery["agent"], "senior")
             self.assertEqual(parent_recovery["maxSubagentDepth"], 2)
             nested_status_path, nested_status = run_for_session(nested_session)
@@ -725,7 +734,7 @@ class NopushNativeCanary(unittest.TestCase):
                 nested_header = json.loads(session_file.readline())
             self.assertEqual(nested_header["type"], "session")
             self.assertEqual(nested_header["parentSession"], str(parent_session))
-            nested_recovery = json.loads((nested_status_path.parent / "recovery-descriptor.json").read_text())
+            nested_recovery = json.loads(launch_descriptor(nested_status_path).read_text())
             self.assertEqual(nested_recovery["maxSubagentDepth"], 2)
             self.assertEqual(nested_recovery["capabilityCeiling"]["allowedAgents"], parent_recovery["allowedAgents"])
             self.assertEqual(nested_status["steps"][0]["agent"], "worker")
@@ -1337,6 +1346,9 @@ class InstallerTests(unittest.TestCase):
         apply(prefix, tgt)
         settings = json.loads((tgt.home / "settings.json").read_text())
         (tgt.home / "settings.json").write_text(json.dumps({**settings, "theme": "dark", "lastChangelogVersion": "0.87.1"}))
+        self.assertEqual(m.drift(prefix, tgt, "/usr/bin/node"), [])
+        # pi 1.5.0 records each package's changelog version on the first interactive launch.
+        (tgt.home / "settings.json").write_text(json.dumps({**settings, "extensionChangelogVersions": {"pi-subagents": "0.85.0"}}))
         self.assertEqual(m.drift(prefix, tgt, "/usr/bin/node"), [])
         (tgt.home / "settings.json").write_text(json.dumps({**settings, "theme": "dark", "h": "hand-edited"}))
         [(path, data, _)] = m.drift(prefix, tgt, "/usr/bin/node")

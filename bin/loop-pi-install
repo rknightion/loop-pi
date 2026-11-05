@@ -45,7 +45,7 @@ from typing import Dict, List, Optional, Tuple
 SRC = Path(__file__).resolve().parents[1]
 USER_HOME = Path.home()
 # pi writes these into settings.json itself; the installer keeps them rather than reporting drift.
-PI_RUNTIME_SETTINGS = ("lastChangelogVersion", "theme")
+PI_RUNTIME_SETTINGS = ("lastChangelogVersion", "extensionChangelogVersions", "theme")
 DEFAULT_DATA = USER_HOME / ".local/share/loop-pi"
 DEFAULT_BIN = USER_HOME / ".local/bin"
 PI_PACKAGE = "@earendil-works/pi-coding-agent"
