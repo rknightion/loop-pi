@@ -150,7 +150,10 @@ public statement of those contracts.
   (`<home>/.loop-pi-managed.json`) when it pins. Before each launch it re-reads the receipt; a new
   label (a managed reinstall, allowed while a root runs) re-pins all five agents from disk, with
   the same `agents/` check. An unchanged label keeps the pin, so an agent file edited by hand is
-  still refused; a missing or unreadable receipt also keeps the pin. The recovery descriptor
+  still refused; a missing or unreadable receipt also keeps the pin. The receipt is not
+  authenticated: this tells a reinstall from an honest hand edit, not from a writer who also
+  changes the label. The installer writes the receipt after the agent files, so a launch between
+  the two is refused and succeeds once the install finishes. The recovery descriptor
   records the requirement and `action: "resume"` carries it forward (0.85.0 #3137/#3163), so a
   resumed lane runs under `nopush` and is refused if the definition changed since.
   `launcher-pin.e2e.test.ts` proves each case on the pinned runtime. Nested lane launches are not
