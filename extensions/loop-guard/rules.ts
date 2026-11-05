@@ -2220,3 +2220,16 @@ export function evaluateWatchProcess(asyncRunActive: boolean): Decision {
 export function evaluateBgWait(): Decision {
   return block("loop-guard: `bg_wait` is blocked; the root waits by push (loop-wait), never a blocking wait tool.");
 }
+
+/** pi-subagents 0.85.0 offers each workflow child start to `tool_call` handlers as a nested
+ *  `subagent_launch` call (src/extension/subagent-launch-tool.js); its only callers are the scripted
+ *  and foreground workflow child launches in subagent-executor.js. Loop-pi runs no workflows, so a
+ *  child start that reaches this tool came from a path the `subagent` rules did not see: refuse it. */
+export const SUBAGENT_LAUNCH_TOOL = "subagent_launch";
+
+export function evaluateSubagentLaunchTool(): Decision {
+  return block(
+    "loop-guard: `subagent_launch` (a workflow child start) is refused; loop-pi runs no workflows. Launch each " +
+      "lane as its own async `subagent` call with {agent, task}.",
+  );
+}

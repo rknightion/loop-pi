@@ -11,7 +11,7 @@ import { hookScriptsToRun, runHookScripts } from "./hooks.ts";
 import { installModelFamily, subagentOverrideBlock } from "./model-family.ts";
 import { hasSubagentField } from "./subagent-view.ts";
 import { installRequestCeiling, installRetryBackoff } from "../request-ceiling/index.ts";
-import { evaluateBashCommand, evaluateSubagentPolicyFields, wrappedGateCommands, bindGateExecution } from "./rules.ts";
+import { SUBAGENT_LAUNCH_TOOL, evaluateBashCommand, evaluateSubagentLaunchTool, evaluateSubagentPolicyFields, wrappedGateCommands, bindGateExecution } from "./rules.ts";
 import { loadGateDeclarations } from "./gates.ts";
 import { parseLaneBinding } from "./push-grant.ts";
 import { bashProtectedPath, isLoopControlToolPath, protoActive, runDirFromEnv, toolWriteRefusal } from "./guard-paths.ts";
@@ -146,6 +146,10 @@ export default function (pi: ExtensionAPI) {
       const policy = evaluateSubagentPolicyFields(event.input);
       if (policy.block) return { block: true, reason: policy.reason };
       return;
+    }
+
+    if (event.toolName === SUBAGENT_LAUNCH_TOOL) {
+      return { block: true, reason: evaluateSubagentLaunchTool().reason };
     }
 
     if (event.toolName === "edit" || event.toolName === "write") {

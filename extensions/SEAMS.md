@@ -138,6 +138,25 @@ public statement of those contracts.
   one background runner must use the same launcher or none. **The name `nopush` is frozen:**
   native resume uses the recorded launcher name (including recorded absence), not the current agent
   file; removing the name refuses resumes, and runs launched before adoption remain unwrapped.
+- **Launcher pin (pi-subagents 0.85.0 `requireLauncher`):** when the root's session starts,
+  loop-guard pins each roster agent to the digest pi-subagents' own preflight
+  (`resolveSubagentLaunchContract`, `contract.agent.definitionDigest`) computes for it; the
+  definition must be a file under the home's `agents/` directory (`launcher-pin.ts`). Every root
+  `{agent, task}` launch then carries `requireLauncher: {name: "nopush", definitionDigest}`,
+  replacing any model-supplied copy at the top level or in `options`; any other launch shape is
+  refused. The package refuses the launch when the agent it resolves names no launcher, another
+  launcher, or a definition whose digest differs (an agent file edited after the root started, or
+  one that shadows the installed file). A reinstall that changes an agent file therefore refuses
+  that agent's launches until the root restarts or reloads its session. The recovery descriptor
+  records the requirement and `action: "resume"` carries it forward (0.85.0 #3137/#3163), so a
+  resumed lane runs under `nopush` and is refused if the definition changed since.
+  `launcher-pin.e2e.test.ts` proves each case on the pinned runtime. Nested lane launches are not
+  pinned; their own agent's `launcher` still applies.
+- **Workflow child starts (`subagent_launch`, pi-subagents 0.85.0):** the package offers each
+  workflow child start to `tool_call` handlers as a nested `subagent_launch` call; its only callers
+  are the scripted and foreground workflow child launches. Loop-pi runs no workflows, so both the
+  root and the lane guard refuse the tool outright. Starts with no tool call behind them (schedule
+  ticks, auto-resume, RPC) are not offered; `scheduledRuns` and `autoResume` stay off.
 - **Lane boot id (pi-subagents 0.85.0):** pi-subagents records a boot id with a run's pid so a pid
   from before a reboot reads as dead (`runs/background/stale-run-reconciler.js`
   `checkRecordedPidLiveness`), but omits it for launcher runs (`async-execution.js:451`), since a

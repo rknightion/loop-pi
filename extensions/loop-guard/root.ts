@@ -16,7 +16,8 @@ import { installModelFamily, subagentOverrideBlock } from "./model-family.ts";
 import { deleteSubagentField, disableSteeringRecovery } from "./subagent-view.ts";
 import { installRequestCeiling, installRetryBackoff } from "../request-ceiling/index.ts";
 import { bindLaneIdentity } from "./push-grant.ts";
-import { C3_AGENTS, evaluateBashCommand, evaluateBgWait, evaluateBriefHeader, evaluateSubagentCall, evaluateWatchProcess, isAsyncSubagentLaunch, wrappedGateCommands, bindGateExecution } from "./rules.ts";
+import { C3_AGENTS, SUBAGENT_LAUNCH_TOOL, evaluateBashCommand, evaluateBgWait, evaluateBriefHeader, evaluateSubagentCall, evaluateSubagentLaunchTool, evaluateWatchProcess, isAsyncSubagentLaunch, isSubagentLaunch, wrappedGateCommands, bindGateExecution } from "./rules.ts";
+import { bindRequiredLauncher, pinLaneDefinitions, unpinnedLaneReason, type LanePin } from "./launcher-pin.ts";
 import { loadGateDeclarations } from "./gates.ts";
 import { isSubagentWakeRun } from "../loop-continuation/state.ts";
 import { bashProtectedPath, protoActive, runDirFromEnv, toolWriteRefusal } from "./guard-paths.ts";
@@ -68,6 +69,12 @@ export default function (pi: ExtensionAPI) {
   // the rest of this session rather than merely logged and allowed through.
   let childRegistrationFailed = false;
 
+  // Each lane agent's definition digest, pinned when the session starts (launcher-pin.ts), or at the
+  // first launch if no session start was seen.
+  let lanePins: Promise<Map<string, LanePin>> | undefined;
+  const pinLanes = (ctx: ExtensionContext) =>
+    pinLaneDefinitions(C3_AGENTS, ctx.cwd, typeof ctx.isProjectTrusted === "function" ? ctx.isProjectTrusted() : undefined);
+
   // Runs `subagent:async-complete` already named, so a late launch result is not tracked as live.
   const completedRuns = new Set<string>();
 
@@ -81,6 +88,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", (_event, ctx: ExtensionContext) => {
     wake();
+    lanePins = pinLanes(ctx);
     const sessionId = ctx.sessionManager.getSessionId();
     try {
       const replacement = registerSubagentCapabilityCeiling({
@@ -309,16 +317,30 @@ export default function (pi: ExtensionAPI) {
         const header = evaluateBriefHeader(input);
         if (header.block) return { block: true, reason: header.reason };
       }
-      if (input.action === undefined && typeof input.agent === "string" && typeof input.task === "string") {
+      const agent = typeof input.agent === "string" ? input.agent : undefined;
+      const singleLaunch = input.action === undefined && agent !== undefined && typeof input.task === "string";
+      if (!singleLaunch && input.action === undefined && isSubagentLaunch(input)) {
+        // Only the top-level single shape is pinned below; any other launch shape would start a lane unpinned.
+        return { block: true, reason: "loop-guard: a root launch must be one top-level {agent, task} call, so it can be pinned to its lane launcher." };
+      }
+      if (singleLaunch && agent !== undefined) {
         // A model-supplied binding inside pi-subagents 0.77.0 `options` would conflict with the bound one.
+        lanePins ??= pinLanes(ctx);
+        const pin = (await lanePins).get(agent) ?? { error: "it is not a lane agent" };
+        if ("error" in pin) return { block: true, reason: unpinnedLaneReason(agent, pin.error) };
+        bindRequiredLauncher(input, pin.digest);
         deleteSubagentField(input, "extensionBindings");
-        bindLaneIdentity(input, input.agent, { runDir });
+        bindLaneIdentity(input, agent, { runDir });
       } else {
         // Only a single launch is bound; a model-supplied binding never reaches any other shape.
         deleteSubagentField(input, "extensionBindings");
         disableSteeringRecovery(input);
       }
       return;
+    }
+
+    if (event.toolName === SUBAGENT_LAUNCH_TOOL) {
+      return { block: true, reason: evaluateSubagentLaunchTool().reason };
     }
 
     if (event.toolName === "watch_process") {

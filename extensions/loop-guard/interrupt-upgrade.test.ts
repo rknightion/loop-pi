@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { cleanupAllAfterExit, expectDetachedRuns, freshDir, startPiRpc, PI_SUBAGENTS_PACKAGE_DIR, ROOT_EXTENSION, waitForCondition, waitForDetachedWriters } from "./rpc-test-helpers.ts";
+import { adoptNopushLauncher } from "../test-support/lane-agents.ts";
 after(async () => { await cleanupAllAfterExit(); });
 
 for (const guarded of [false, true]) for (const emptyRunId of [false, true]) {
@@ -32,6 +33,8 @@ export default function(pi) {
     mkdirSync(join(home, "agents"));
     writeFileSync(join(home, "settings.json"), JSON.stringify({ packages: [PI_SUBAGENTS_PACKAGE_DIR], subagents: { agentExcludeDirs: ["~/.agents"] } }));
     writeFileSync(join(home, "agents/worker.md"), ["---", "name: worker", "description: interrupt fixture", "tools: bash", "extensions: []", `subagentOnlyExtensions: ${probe}`, "model: faux/faux-1", "---", "wait"].join("\n"));
+    // The root guard pins every lane launch to the nopush launcher, as in an installed home.
+    adoptNopushLauncher(home);
     expectDetachedRuns(subRoot, 1);
     const session = startPiRpc({ extensions: [probe, ...(guarded ? [ROOT_EXTENSION] : [])], fauxScriptPath: "", agentDir: home, subagentTempRoot: subRoot, cwd, sessionArgs: [], extraArgs: ["--exclude-tools", "subagents_enable"] });
     let id: string | undefined;

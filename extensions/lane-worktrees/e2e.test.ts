@@ -8,6 +8,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { FAUX_EXTENSION, PI_SUBAGENTS_PACKAGE_DIR, cleanupAll, freshDir, startPiRpc, waitForCondition, writeFauxScript } from "../loop-guard/rpc-test-helpers.ts";
+import { adoptNopushLauncher } from "../test-support/lane-agents.ts";
 
 after(() => cleanupAll());
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -39,6 +40,7 @@ for (const reload of [false, true]) {
       "---", "name: worker", "description: Nested cwd regression", "tools: bash", "extensions: []",
       `subagentOnlyExtensions: ${FAUX_EXTENSION}`, "model: faux/faux-1", "---", "", "worker",
     ].join("\n"));
+    adoptNopushLauncher(agentDir);
     const script = writeFauxScript([
       { match: "SPAWN_NESTED", once: true, toolCalls: [{ name: "subagent", args: { agent: "worker", task: "Lane: L1 · Task: T1 · Tier: guarded\nLanding: returns candidate\nObjective: NESTED_WORK", worktree: true, cwd: join(repo, "sub") } }] },
       { match: "NESTED_WORK", once: true, toolCalls: [{ name: "bash", args: { command: `pwd > '${out}/cwd' && echo NESTED_STARTED` } }] },
@@ -120,6 +122,7 @@ for (const order of ["guard-first", "worktrees-first"] as const) {
         "---", "name: worker", "description: Candidate test lane", "tools: bash", "extensions: []",
         `subagentOnlyExtensions: ${FAUX_EXTENSION}`, "model: faux/faux-1", "---", "", "worker",
       ].join("\n"));
+      adoptNopushLauncher(agentDir);
       const block = '```lane-return\n' + JSON.stringify({ v: 2, lane: "L1", status, sha: null, landed: false, base, check: "test", exit: status === "complete" ? 0 : null, tail: "checkpoint", ci: null, coderabbit: null, questions: [] }) + '\n```';
       const landing = status === "blocked" ? "returns candidate" : "lands-after-green";
       const script = writeFauxScript([

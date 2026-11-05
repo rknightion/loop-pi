@@ -12,6 +12,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
 import { cleanupAllAfterExit, expectDetachedRuns, freshDir, PI_SUBAGENTS_PACKAGE_DIR, ROOT_EXTENSION, startPiRpc, waitForCondition, waitForDetachedWriters, type PiRpcSession } from "./loop-guard/rpc-test-helpers.ts";
+import { adoptNopushLauncher } from "./test-support/lane-agents.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
@@ -131,6 +132,8 @@ async function startRig(childBlockMs: number, opts: { loopGuard?: boolean; child
   writeFileSync(join(home, "extensions/subagent/config.json"), JSON.stringify(config));
   mkdirSync(join(home, "agents"));
   writeFileSync(join(home, "agents/scout.md"), `---\nname: scout\ndescription: Steering probe\ntools: block_sync\nextensions: ${BLOCK_EXTENSION}\nmodel: fixture/fixture\n---\n${CHILD_MARKER}\n`);
+  // Launch as an installed home does: the root guard pins every lane launch to the nopush launcher.
+  adoptNopushLauncher(home);
   const root = startPiRpc({
     extensions: opts.loopGuard ? [ROOT_EXTENSION] : [],
     extraArgs: ["--provider", "fixture", "--model", "fixture"],

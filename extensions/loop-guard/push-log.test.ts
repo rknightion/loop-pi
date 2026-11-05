@@ -21,6 +21,7 @@ import {
   waitForCondition,
   writeFauxScript,
 } from "./rpc-test-helpers.ts";
+import { adoptNopushLauncher } from "../test-support/lane-agents.ts";
 
 after(cleanupAll);
 
@@ -509,6 +510,7 @@ function pushLaneHome(): string {
     join(home, "agents", "worker.md"),
     ["---", "name: worker", "description: Push log test", "tools: bash", "extensions: []", `subagentOnlyExtensions: ${FAUX_EXTENSION}`, "model: faux/faux-1", "---", "Test worker."].join("\n"),
   );
+  adoptNopushLauncher(home);
   return home;
 }
 

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { evaluateBashCommand } from "./rules.ts";
 import { FAUX_EXTENSION, LANE_EXTENSION, PI_SUBAGENTS_PACKAGE_DIR, ROOT_EXTENSION, cleanupAll, freshDir, startPiRpc, waitForCondition, writeFauxScript } from "./rpc-test-helpers.ts";
+import { adoptNopushLauncher } from "../test-support/lane-agents.ts";
 
 after(cleanupAll);
 const git = (cwd: string, ...args: string[]): string => execFileSync("git", args, { cwd, encoding: "utf8", timeout: 10_000, stdio: ["ignore", "pipe", "pipe"] }).trim();
@@ -46,6 +47,7 @@ for (const agent of ["worker", "senior", "senior-escalation"]) {
     const capture = join(freshDir("push-capture-"), "capture.ts");
     writeFileSync(capture, `import {writeFileSync} from 'node:fs'; import {join} from 'node:path'; import {getAgentDir} from '@earendil-works/pi-coding-agent'; export default function(pi){pi.on('before_agent_start',()=>{writeFileSync(join(getAgentDir(),'binding.json'),process.env.PI_SUBAGENT_EXTENSION_BINDINGS||'null');});}`);
     writeFileSync(join(home, "agents", `${agent}.md`), ["---", `name: ${agent}`, "description: Push grant test", "tools: bash", "extensions: []", `subagentOnlyExtensions: ${FAUX_EXTENSION}, ${capture}`, "model: faux/faux-1", "---", "Test worker."].join("\n"));
+    adoptNopushLauncher(home);
     const script = writeFauxScript([
       { match: "SPAWN_PUSH", once: true, toolCalls: [{ name: "subagent", args: { agent, task: "CHILD_PUSH", async: true, extensionBindings: { "loop-pi.guard/1": { agent: agent === "worker" ? "senior" : "worker" }, "spoof/1": { grant: true } } } }] },
       { match: "CHILD_PUSH", once: true, toolCalls: [{ name: "bash", args: { command: "git push origin HEAD:refs/heads/main" } }] },

@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CLI_PATH, FAUX_EXTENSION, ROOT_EXTENSION, PI_SUBAGENTS_PACKAGE_DIR, cleanupAll, freshDir, startPiRpc, waitForCondition } from "./rpc-test-helpers.ts";
+import { adoptNopushLauncher } from "../test-support/lane-agents.ts";
 
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const evidence = process.env.LOOP_PI_POLICY_EVIDENCE;
@@ -35,6 +36,7 @@ test("required native child boundary refuses policy overrides without widening c
       ...(agent === "senior" ? ["allowedAgents: scout"] : []), "extensions: []", `subagentOnlyExtensions: ${FAUX_EXTENSION}, ${capture}`,
       "model: faux/faux-1", "timeoutMs: 60000", "---", "Synthetic fixture only.",
     ].join("\n"));
+    adoptNopushLauncher(home);
     const marker = join(cwd, "leaf-ran");
     const hostMarker = join(cwd, "host-ran");
     const workflow = join(cwd, "workflow.js");

@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
+import { adoptNopushLauncher } from "../test-support/lane-agents.ts";
 import {
   FAUX_EXTENSION,
   PI_SUBAGENTS_PACKAGE_DIR,
@@ -80,6 +81,7 @@ function setupHome(): { agentDir: string; subagentTemp: string; cwd: string } {
     );
   agent("senior", ["tools: bash, subagent", "allowedAgents: scout", "maxSubagentDepth: 2"]);
   agent("scout", ["tools: bash"]);
+  adoptNopushLauncher(agentDir);
   return { agentDir, subagentTemp, cwd };
 }
 

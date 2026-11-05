@@ -28,6 +28,7 @@ import {
   waitForCondition,
   writeFauxScript,
 } from "./rpc-test-helpers.ts";
+import { adoptNopushLauncher } from "../test-support/lane-agents.ts";
 
 after(() => {
   cleanupAll();
@@ -153,6 +154,7 @@ test(
         "You are a test lane worker.",
       ].join("\n"),
     );
+    adoptNopushLauncher(agentDir);
 
     const fauxScript = writeFauxScript([
       {
@@ -309,6 +311,7 @@ test("a required lane guard throwing at session_start refuses the child before i
   symlinkSync(dirname(PI_SUBAGENTS_PACKAGE_DIR), join(fixture, "node_modules"), "dir");
   const startupMarker = join(cwd, "guard-started");
   const taskMarker = join(cwd, "task-ran");
+  const subagentTemp = freshDir("loop-guard-e2e-throw-subtemp-");
   writeFileSync(join(fixture, "extensions", "loop-guard", "lane.ts"), [
     'import { writeFileSync } from "node:fs";',
     'export default function (pi) { pi.on("session_start", () => {',
@@ -326,27 +329,43 @@ test("a required lane guard throwing at session_start refuses the child before i
     "extensions: []", `subagentOnlyExtensions: ${FAUX_EXTENSION}`, "model: faux/faux-1",
     "---", "Test lane worker.",
   ].join("\n"));
+  adoptNopushLauncher(agentDir);
   const session = startPiRpc({
     extensions: [FAUX_EXTENSION, join(fixture, "extensions", "loop-guard", "root.ts")],
     fauxScriptPath: writeFauxScript([
       { match: "SPAWN_FAULTY_GUARD", once: true, toolCalls: [
-        { name: "subagent", args: { agent: "worker", task: "CHILD_TASK_MARKER", async: false } },
+        { name: "subagent", args: { agent: "worker", task: "CHILD_TASK_MARKER" } },
       ] },
       { match: "CHILD_TASK_MARKER", once: true, toolCalls: [
         { name: "bash", args: { command: `touch '${taskMarker}'` } },
       ] },
       { match: ".*", text: "ok" },
     ]),
-    agentDir, cwd, subagentTempRoot: freshDir("loop-guard-e2e-throw-subtemp-"),
+    agentDir, cwd, subagentTempRoot: subagentTemp,
     sessionArgs: [], extraArgs: ["--exclude-tools", "subagents_enable"],
   });
   try {
     session.send({ id: "p1", type: "prompt", message: "SPAWN_FAULTY_GUARD" });
-    const result = await session.waitFor((e) => e.type === "tool_execution_end" && e.toolName === "subagent");
+    // Root launches are pinned to the nopush launcher, which runs lanes in the background only:
+    // the refusal is the background run's terminal failure, not the launch result.
+    const launch = await session.waitFor((e) => e.type === "tool_execution_end" && e.toolName === "subagent");
+    assert.notEqual(launch.isError, true, `the background launch itself starts: ${JSON.stringify(launch)}`);
+    const status = await waitForCondition(() => {
+      const runs = join(subagentTemp, "async-subagent-runs");
+      for (const run of existsSync(runs) ? readdirSync(runs).filter((name) => !name.startsWith(".")) : []) {
+        try {
+          const record = JSON.parse(readTextFile(join(runs, run, "status.json")));
+          if (["failed", "complete", "completed", "stopped"].includes(record.state)) return record;
+        } catch {
+          // not written yet
+        }
+      }
+      return undefined;
+    }, 30_000, 200);
     assert.equal(existsSync(startupMarker), true, "the required guard's startup handler must have run");
-    assert.equal(result.isError, true, `faulty guard must refuse the launch: ${JSON.stringify(result)}`);
-    assert.match(JSON.stringify(result.result), /Required child extension failed during startup/);
-    assert.match(JSON.stringify(result.result), /FAULTY_LANE_GUARD_STARTUP/);
+    assert.equal(status.state, "failed", `faulty guard must refuse the child: ${JSON.stringify(status)}`);
+    assert.match(JSON.stringify(status), /Required child extension failed during startup/);
+    assert.match(JSON.stringify(status), /FAULTY_LANE_GUARD_STARTUP/);
     assert.equal(existsSync(taskMarker), false, "no child task may run after guard startup fails");
   } finally {
     await session.close();

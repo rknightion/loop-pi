@@ -9,6 +9,7 @@ import { after, before, beforeEach, test } from "node:test";
 import rootExtension from "./root.ts";
 import laneExtension from "./lane.ts";
 import { HOOK_TEMPLATES_DIR } from "../test-support/hook-templates.ts";
+import { writeLaneAgents } from "../test-support/lane-agents.ts";
 
 type Handler = (event: any, ctx: any) => any;
 
@@ -30,6 +31,7 @@ before(async () => {
   await mkdir(join(cwd, "codex"), { recursive: true });
   await writeFile(join(runDir, "loop-pi-proto"), "2\n");
   await cp(HOOK_TEMPLATES_DIR, join(agentDir, "scripts"), { recursive: true });
+  writeLaneAgents(agentDir);
   process.env.PI_CODING_AGENT_DIR = agentDir;
 });
 

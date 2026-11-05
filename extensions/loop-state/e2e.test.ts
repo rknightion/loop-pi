@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { adoptNopushLauncher } from "../test-support/lane-agents.ts";
 import {
   FAUX_EXTENSION,
   PI_SUBAGENTS_PACKAGE_DIR,
@@ -384,6 +385,7 @@ test("S6: a 3.37 MB block-first lane return reaches the root as a short preview 
     join(s.agentDir, "agents", "worker.md"),
     ["---", "name: worker", "description: Test lane worker", "tools: bash", "extensions: []", `subagentOnlyExtensions: ${FAUX_EXTENSION}`, "model: faux/faux-1", "---", "", "worker"].join("\n"),
   );
+  adoptNopushLauncher(s.agentDir);
   const block =
     '```lane-return\n{"v":2,"lane":"L9","status":"complete","sha":null,"landed":false,"base":"b","check":"just check","exit":0,"tail":"ok","ci":null,"coderabbit":null,"questions":[]}\n```';
   // Lanes put the block first (pi-subagents 0.77.0 shows the root only the first 2,000 characters

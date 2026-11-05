@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import { after, before, test } from "node:test";
 import rootExtension from "./root.ts";
 import { HOOK_TEMPLATES_DIR } from "../test-support/hook-templates.ts";
+import { writeLaneAgents } from "../test-support/lane-agents.ts";
 
 // The guard scripts to lay out in a scratch <agentDir>/scripts/: this checkout's shared guards
 // when it carries them, else the sample guards in test-support (see hook-templates.ts).
@@ -70,6 +71,7 @@ const previousRunDir = process.env.LOOP_PI_RUN_DIR;
 before(async () => {
   agentDir = await mkdtemp(join(tmpdir(), "loop-guard-root-test-"));
   await cp(TEMPLATES_DIR, join(agentDir, "scripts"), { recursive: true });
+  writeLaneAgents(agentDir);
   process.env.PI_CODING_AGENT_DIR = agentDir;
   // Ordinary fake contexts must not inherit an enclosing armed loop. Armed
   // cases below opt into their own run directory and restore this baseline.
@@ -529,4 +531,71 @@ test("session ceiling contains exactly the root roster, refreshes and disposes",
   assert.deepEqual(resolveCurrentSubagentCapabilityCeiling(second), expected);
   handlers.get("session_shutdown")![0]({}, ctx);
   assert.equal(resolveCurrentSubagentCapabilityCeiling(second), undefined);
+});
+
+// ---------------------------------------------------------------------------
+// Launcher pin: every single launch carries the root's requireLauncher, never the model's.
+// ---------------------------------------------------------------------------
+
+test("root: a single launch carries requireLauncher {nopush, preflight digest}, replacing any model-supplied one", async () => {
+  const { resolveSubagentLaunchContract } = await import("pi-subagents/preflight");
+  const fake = fakeApi();
+  rootExtension(fake.api as any);
+  const { ctx } = fakeCtx(agentDir);
+  await fake.handlers.get("session_start")![0]({}, ctx);
+  const handler = toolCallHandler(fake.handlers);
+  const launch = (input: Record<string, unknown>) => handler({ type: "tool_call", toolCallId: "1", toolName: "subagent", input }, ctx);
+  const forged = { name: "other", definitionDigest: "0".repeat(64) };
+  for (const agent of ["worker", "senior", "senior-escalation", "reviewer", "scout"]) {
+    const contract = await resolveSubagentLaunchContract({ agent, cwd: agentDir });
+    assert.ok(contract.ok, agent);
+    const expected = { name: "nopush", definitionDigest: contract.contract.agent.definitionDigest };
+    const top: Record<string, unknown> = { agent, task: "x", requireLauncher: forged };
+    assert.equal((await launch(top))?.block ?? false, false, agent);
+    assert.deepEqual(top.requireLauncher, expected, agent);
+    const inOptions: Record<string, unknown> = { agent, task: "x", options: { requireLauncher: forged } };
+    assert.equal((await launch(inOptions))?.block ?? false, false, agent);
+    assert.deepEqual(inOptions.requireLauncher, expected, agent);
+    assert.equal((inOptions.options as Record<string, unknown>).requireLauncher, undefined, agent);
+  }
+  // Management calls carry no requirement.
+  const status: Record<string, unknown> = { action: "status", id: "run-a" };
+  assert.equal((await launch(status))?.block ?? false, false);
+  assert.equal(status.requireLauncher, undefined);
+  // A launch the top-level single shape does not describe would start a lane unpinned.
+  const nested = await launch({ agent: "worker", options: { task: "x" } });
+  assert.equal(nested?.block, true);
+  assert.match(nested?.reason ?? "", /one top-level \{agent, task\} call/);
+});
+
+test("root: a lane agent that cannot be pinned is refused, naming the reason", async () => {
+  const home = await mkdtemp(join(tmpdir(), "loop-guard-root-unpinned-"));
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  try {
+    process.env.PI_CODING_AGENT_DIR = home; // no agents/ at all
+    const fake = fakeApi();
+    rootExtension(fake.api as any);
+    const { ctx } = fakeCtx(home);
+    const handler = toolCallHandler(fake.handlers);
+    const result = await handler({ type: "tool_call", toolCallId: "1", toolName: "subagent", input: { agent: "worker", task: "x" } }, ctx);
+    assert.equal(result?.block, true);
+    assert.match(result?.reason ?? "", /lane agent 'worker' could not be pinned to launcher 'nopush'/);
+  } finally {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("root and lane: a subagent_launch call is refused", async () => {
+  const laneExtension = (await import("./lane.ts")).default;
+  for (const extension of [rootExtension, laneExtension]) {
+    const fake = fakeApi();
+    extension(fake.api as any);
+    const { ctx } = fakeCtx(agentDir);
+    const result = await toolCallHandler(fake.handlers)(
+      { type: "tool_call", toolCallId: "1", toolName: "subagent_launch", input: { workflowRunId: "w", key: "k", agent: "worker", task: "x" } }, ctx);
+    assert.equal(result?.block, true);
+    assert.match(result?.reason ?? "", /`subagent_launch` \(a workflow child start\) is refused/);
+  }
 });
