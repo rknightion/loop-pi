@@ -267,6 +267,55 @@ This historical citation refers to the once-unverified shared module instance fo
 `registerRequiredChildExtensions`. It is now verified by `loop-guard/e2e.test.ts` on a real
 pi process with the faux provider, as recorded under "Runtime facts"; it is not an open claim.
 
+## Telemetry
+
+`extensions/telemetry/` exports metadata-only OpenTelemetry spans and logs over OTLP/HTTP (JSON)
+from the root and every lane. It is off unless the home's own `settings.json` has a
+`loopPi.telemetry` block; project `.pi/settings.json` is never read.
+
+```json
+"loopPi": { "telemetry": { "configFile": "{{USER_HOME}}/.config/agento11y/config.env", "context": "personal", "exportTimeoutMs": 2000 } }
+```
+
+- `configFile` (default `~/.config/agento11y/config.env`) is an env-style file (`KEY=value`,
+  `#` comments, optional `export ` and matching quotes) read in process at each `session_start`.
+  Keys used: `AGENTO11Y_OTEL_EXPORTER_OTLP_ENDPOINT` (base; `/v1/traces` and `/v1/logs` are
+  appended), `AGENTO11Y_AUTH_TENANT_ID` with `AGENTO11Y_OTEL_AUTH_TOKEN` (else
+  `AGENTO11Y_AUTH_TOKEN`) as HTTP Basic. The endpoint must be `https:`, or `http:` on loopback;
+  half a credential, userinfo or a query string turns telemetry off. Every other key, including
+  `AGENTO11Y_CONTENT_CAPTURE_MODE`, is ignored: capture is never on. A missing, unreadable or
+  incomplete file leaves telemetry off and the session unaffected.
+- The credential lives only in the exporters' header objects. Nothing is written to
+  `process.env`, so tool subprocesses and lane tool environments never see it. The launcher does
+  not read the file; it unsets every inherited `OTEL_*`, `AGENTO11Y_*`, `SIGIL_*` and `PI_OTEL_*`
+  variable before pi starts, so the SDK's own environment settings and other harnesses' capture
+  switches do not apply.
+- `context` (plain name) becomes resource `loop_pi.context`; the resource also carries
+  `service.name=pi`, `service.version` (pi's) and `host.name`.
+- Spans (GenAI conventions): `invoke_agent <agent>` per run, `chat <model>` per model call
+  (opened at `turn_start`, or a retry's `before_provider_request`, closed at the assistant
+  `message_end`), `execute_tool <tool>`. Logs: `pi.session.start` and `pi.session.end`. Every
+  span and log carries the native `ctx.sessionManager.getSessionId()` as `gen_ai.conversation.id`
+  and `session.id`, plus `loop_pi.role` (`root`/`lane`) and `gen_ai.agent.name` (`loop-pi-root`;
+  a lane's agent from the root guard's `loop-pi.guard/1` binding, else `loop-pi-lane`, which is
+  what a nested lane reports). Attributes are ids, provider and model names, token counts, tool
+  names and call ids, finish reasons, counts and an `error.type` code; message, prompt, tool
+  argument and result text, error text, paths and cwd are never read into one. No metrics.
+- One pipeline per process and configuration (`Symbol.for("loop-pi.telemetry.pipelines.v1")`):
+  a background runner hosts several child sessions. `session_shutdown` force-flushes, bounded by
+  `exportTimeoutMs` (100 to 4000, below pi-subagents' 5 s child shutdown bound), so a session
+  never waits longer than that on an unreachable collector, and a one-shot child exports before
+  its runner exits. Every handler swallows its own errors.
+- **Child seam (allowlist):** the root loads `telemetry/root.ts` by launcher flag. Lanes load
+  `telemetry/lane.ts` because every shipped agent file's `extensions:` names exactly
+  `{{PREFIX}}/extensions/telemetry/lane.ts`. That list still disables all ambient extensions for
+  the child (only an omitted key would load them); loop-guard's required child extensions load
+  regardless. It is deliberately not a required child extension: a failure to load it never
+  fails a lane launch. The installer refuses an agent file whose `extensions:` names anything
+  else (`AGENT_EXTENSIONS`); an empty list stays allowed. `agent-frontmatter.test.ts`,
+  `bin/test_loop_pi_install.py` and `telemetry/e2e.test.ts` (root, lane and nested lane on the
+  pinned runtime) cover it.
+
 ## Root launcher route
 
 The installer's `DEFAULT_ROOT_ROUTE` is

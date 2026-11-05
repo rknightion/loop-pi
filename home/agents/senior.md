@@ -5,7 +5,7 @@ advertise: true
 model: openai/gpt-6.1-sol
 thinking: high
 tools: read, bash, edit, write, grep, find, ls, watch_process, subagent
-extensions:
+extensions: {{PREFIX}}/extensions/telemetry/lane.ts
 systemPromptMode: append
 defaultContext: fresh
 inheritProjectContext: true

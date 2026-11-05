@@ -487,6 +487,7 @@ class NopushNativeCanary(unittest.TestCase):
     """
 
     def test_scratch_installed_native_canary(self):
+        import re
         import sys
         import time
         from bin.test_loop_smoke import Rpc
@@ -521,12 +522,12 @@ class NopushNativeCanary(unittest.TestCase):
         for name in ("worker", "senior"):
             text = (HERE.parent / "home/agents" / f"{name}.md").read_text()
             text = text.replace("model: openai/gpt-6.1-sol", "model: faux/faux-1")
-            text = text.replace("extensions:\n", f"extensions: []\nsubagentOnlyExtensions: {faux}\n")
+            # Keep the shipped `extensions:` allowlist line; the faux provider rides as a child-only extension.
+            text = re.sub(r"(?m)^(extensions:.*)$", lambda match: f"{match.group(1)}\nsubagentOnlyExtensions: {faux}", text, count=1)
             (agents / f"{name}.md").write_text(text)
         # The remaining agents also need to pass the installer's family check, but are never run.
         for path in (HERE.parent / "home/agents").glob("*.md"):
             if not (agents / path.name).exists():
-                import re
                 (agents / path.name).write_text(re.sub(r"(?m)^model: .*", "model: faux/faux-1", path.read_text()))
         (overlay / "home/settings.json").write_text(json.dumps({
             "enabledModels": ["faux/faux-1"], "subagents": {"agentExcludeDirs": ["~/.agents"]},
@@ -1047,7 +1048,7 @@ class InstallerTests(unittest.TestCase):
         self.assertNotIn(entry, m.LANE_EXTENSIONS)
         prefix = fake_prefix(self.tmp)
         self.assertIn(entry, m.missing_extensions(prefix))
-        for rel in m.ROOT_EXTENSIONS + m.LANE_EXTENSIONS:
+        for rel in m.ROOT_EXTENSIONS + m.LANE_EXTENSIONS + m.AGENT_EXTENSIONS:
             stub = prefix / "extensions" / rel
             stub.parent.mkdir(parents=True, exist_ok=True)
             stub.write_text("export default () => {};\n")
@@ -1087,6 +1088,36 @@ class InstallerTests(unittest.TestCase):
         rels = {rel for rel, _ in m.source_files()}
         self.assertIn(f"extensions/{entry}", rels)
         self.assertFalse(any(rel.startswith("extensions/loop-status/") and "test" in rel.rsplit("/", 1)[1] for rel in rels))
+
+    def test_telemetry_loads_in_the_root_by_flag_and_in_lanes_by_the_agent_allowlist(self):
+        self.assertIn("telemetry/root.ts", m.ROOT_EXTENSIONS)
+        # Never a required child extension: its failure must not fail a lane launch.
+        self.assertNotIn("telemetry/lane.ts", m.LANE_EXTENSIONS)
+        self.assertEqual(m.AGENT_EXTENSIONS, ("telemetry/lane.ts",))
+        rels = {rel for rel, _ in m.source_files()}
+        self.assertTrue({"extensions/telemetry/root.ts", "extensions/telemetry/lane.ts", "extensions/telemetry/core.ts"} <= rels)
+        self.assertFalse(any(rel.startswith("extensions/telemetry/") and ".test." in rel for rel in rels))
+        prefix = fake_prefix(self.tmp)
+        self.assertIn("telemetry/lane.ts", m.missing_extensions(prefix))
+        source_agents = m.SRC / "home/agents"
+        (prefix / "home/agents").mkdir()
+        for path in source_agents.glob("*.md"):
+            (prefix / "home/agents" / path.name).write_text(path.read_text())
+            self.assertEqual(m.frontmatter_list(path.read_text(), "extensions"), ["{{PREFIX}}/extensions/telemetry/lane.ts"])
+        m.check_agent_extensions(prefix)
+        rendered = m.home_plan(prefix, self.tmp / "h", {})["agents/worker.md"].decode()
+        self.assertIn(f"extensions: {prefix}/extensions/telemetry/lane.ts\n", rendered)
+        # The allowlist: an empty list is fine, anything else is refused before install.
+        (prefix / "home/agents/scout.md").write_text("---\nname: scout\nextensions: []\n---\n")
+        m.check_agent_extensions(prefix)
+        for listed in ("{{PREFIX}}/extensions/loop-status/index.ts", "/elsewhere/ext.ts",
+                       "{{PREFIX}}/extensions/telemetry/lane.ts, /elsewhere/ext.ts"):
+            (prefix / "home/agents/scout.md").write_text(f"---\nname: scout\nextensions: {listed}\n---\n")
+            with self.assertRaisesRegex(m.InstallError, "scout", msg=listed):
+                m.check_agent_extensions(prefix)
+        (prefix / "home/agents/scout.md").write_text("---\nname: scout\nextensions:\n  - /elsewhere/ext.ts\n---\n")
+        with self.assertRaisesRegex(m.InstallError, "scout"):
+            m.check_agent_extensions(prefix)
 
     def test_the_installed_agent_set_is_the_v3_roster(self):
         self.assertEqual(m.AGENT_SET, {"worker", "senior", "senior-escalation", "reviewer", "scout"})
@@ -1456,6 +1487,57 @@ class LauncherTests(unittest.TestCase):
         (self.tmp / "log").unlink()
         _, log, _ = self.run_launcher(cwd=outside)
         self.assertTrue(log[0].startswith("node run=none"))
+
+    def test_launcher_clears_inherited_telemetry_env_and_embeds_no_credential(self):
+        # Telemetry is configured (settings block plus a 0600 config file holding a credential), and
+        # the invoking shell carries its own exporter, header and content-capture variables.
+        credential = "fixture-" + os.urandom(8).hex()
+        config = self.tmp / "agento11y" / "config.env"
+        config.parent.mkdir()
+        config.write_text(f"AGENTO11Y_OTEL_EXPORTER_OTLP_ENDPOINT=https://otlp.example.com/otlp\n"
+                          f"AGENTO11Y_AUTH_TENANT_ID=1\nAGENTO11Y_AUTH_TOKEN={credential}\n")
+        config.chmod(0o600)
+        settings = {"loopPi": {"telemetry": {"configFile": str(config), "context": "personal"}}}
+        prefix = fake_prefix(self.tmp, settings=settings)
+        home = self.tmp / ".loop-pi-demo"
+        home.mkdir()
+        apply(prefix, target(self.tmp))
+        self.assertEqual(json.loads((home / "settings.json").read_text())["loopPi"]["telemetry"]["configFile"], str(config))
+        dump = self.tmp / "env.json"
+        node = self.tmp / "node"
+        node.write_text(f"#!/bin/sh\nexec {json.dumps(os.environ.get('PYTHON', 'python3'))} -c "
+                        f"'import json, os, sys; json.dump(dict(os.environ), open(sys.argv[1], \"w\"))' {dump}\n")
+        node.chmod(0o755)
+        text = m.launcher_text(prefix, home, str(node), {"label": "x", "missing_extensions": []},
+                               "loop-pi", "loop-pi-install")
+        launcher = self.tmp / "loop-pi"
+        launcher.write_text(text)
+        launcher.chmod(0o755)
+        inherited = {
+            "OTEL_EXPORTER_OTLP_ENDPOINT": "https://elsewhere.example.com",
+            "OTEL_EXPORTER_OTLP_HEADERS": f"Authorization=Basic {credential}",
+            "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT": "true",
+            "OTEL_LOG_USER_PROMPTS": "1",
+            "OTEL_RESOURCE_ATTRIBUTES": "service.name=other",
+            "AGENTO11Y_CONTENT_CAPTURE_MODE": "full",
+            "AGENTO11Y_AUTH_TOKEN": credential,
+            "SIGIL_CONTENT_CAPTURE_MODE": "full",
+            "PI_OTEL_CAPTURE_CONTENT": "true",
+            "MULTILINE_KEEP": "a\nOTEL_FAKE=1",
+            "UNRELATED_KEEP": "1",
+        }
+        proc = subprocess.run([str(launcher), "--plain", "-p", "hi"], cwd=self.tmp, capture_output=True, text=True,
+                              timeout=30, env={**os.environ, **inherited})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        env = json.loads(dump.read_text())
+        leaked = sorted(k for k in env if k.startswith(("OTEL_", "AGENTO11Y_", "SIGIL_", "PI_OTEL_")))
+        self.assertEqual(leaked, [], "inherited telemetry and capture variables reach pi")
+        self.assertFalse(any(credential in value for value in env.values()), "a credential reaches pi's environment")
+        self.assertEqual((env["UNRELATED_KEEP"], env["MULTILINE_KEEP"]), ("1", "a\nOTEL_FAKE=1"))
+        self.assertEqual(env["PI_CODING_AGENT_DIR"], str(home))
+        self.assertIn(f"--extension '{prefix}/extensions/telemetry/root.ts'", text)
+        self.assertNotIn(credential, text)
+        self.assertNotIn(str(config), text, "the launcher never reads the credential file; the extension does")
 
 
 LANE_RETURN_V3 = """```lane-return
