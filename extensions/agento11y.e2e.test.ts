@@ -16,6 +16,7 @@ import {
   waitForCondition, writeFauxScript,
 } from "./loop-guard/rpc-test-helpers.ts";
 import { hermeticPiEnv } from "./test-support/hermetic-env.ts";
+import { adoptNopushLauncher } from "./test-support/lane-agents.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const INSTALLER = readFileSync(join(ROOT, "bin/loop-pi-install"), "utf8");
@@ -105,6 +106,8 @@ test("root, lane and nested lane each export their own generations through the a
     ...(agent === "senior" ? ["allowedAgents: scout"] : []), `extensions: ${EXTENSION}`, `subagentOnlyExtensions: ${FAUX_EXTENSION}`,
     "model: faux/faux-1", "async: true", "timeoutMs: 60000", "---", "Synthetic fixture only.",
   ].join("\n"));
+  // Lanes launch the way the installed home does: under nopush, which the root guard pins.
+  adoptNopushLauncher(home);
   const script = writeFauxScript([
     { match: "ROOT_GO", once: true, toolCalls: [{ name: "subagent", args: { agent: "senior", task: `SENIOR_GO ${MARK}-senior`, async: true } }] },
     { match: "SENIOR_GO", once: true, toolCalls: [{ name: "subagent", args: { agent: "scout", task: `SCOUT_GO ${MARK}-scout`, async: true } }] },
