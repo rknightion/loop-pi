@@ -281,7 +281,13 @@ class LockPathSafetyTests(unittest.TestCase):
         self.patch.start()
         self.addCleanup(self.patch.stop)
         self.directory = self.home / ".local/state/loop-pi/gate-locks"
-        self.directory.mkdir(parents=True, mode=0o700)
+        # Explicit modes: mkdir(parents=True) would create the ancestors under the invoking umask,
+        # and a group-writable ancestor (umask 0002) is correctly refused by the code under test.
+        for directory in (self.home / ".local", self.home / ".local/state", self.home / ".local/state/loop-pi"):
+            directory.mkdir()
+            directory.chmod(0o755)
+        self.directory.mkdir()
+        self.directory.chmod(0o700)
         self.filename = self.directory / (hashlib.sha256(b"safety").hexdigest() + ".lock")
 
     def test_private_regular_account_owned_path_is_accepted(self):
@@ -352,6 +358,15 @@ class LockPathSafetyTests(unittest.TestCase):
         with patch.object(m.os, "fstat", return_value=SimpleNamespace(st_mode=0o40700, st_uid=os.getuid() + 1)):
             with self.assertRaisesRegex(ValueError, "owner"):
                 m.validate_directory(0, account_owned=True)
+
+
+class LockPathSafetyUnderGroupUmaskTests(LockPathSafetyTests):
+    """The same safety cases when the invoking shell has umask 0002 (Ubuntu's default)."""
+
+    def setUp(self):
+        previous = os.umask(0o002)
+        self.addCleanup(os.umask, previous)
+        super().setUp()
 
 
 class GrammarTests(unittest.TestCase):
