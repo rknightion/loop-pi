@@ -311,7 +311,9 @@ telemetry code of its own and adds no configuration on top of the vendor's.
   files and the receipt. Node resolves the vendor's own `@grpc/*` imports from the link's real
   location. Because no agent file names the build, a reinstall leaves every rendered agent file
   byte-identical and its definition digest unchanged, so lanes launched before a reinstall stay
-  resumable under the launcher pin. The receipt lists the link; `--check` reports a missing or
+  resumable under the launcher pin. The link follows the newest install, so a root still running
+  an older build starts its later lanes with the newer build's vendor package (telemetry only;
+  the old builds stay in place). The receipt lists the link; `--check` reports a missing or
   stale link as drift; the installer refuses to replace anything at that path that is not a link,
   and a template or overlay file under it; the scratch-install fence accepts the link without
   descending it, when its absolute target is inside scratch. The list still disables all ambient
