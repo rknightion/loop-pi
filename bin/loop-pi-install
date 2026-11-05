@@ -869,7 +869,9 @@ def check_candidate_destinations(scratch: Path, destinations: Tuple[Path, ...],
     inside scratch; the install repoints them. This preflight is not a defense against concurrent
     same-account filesystem replacement.
     """
-    managed = {path.expanduser().absolute() for path in managed_links}
+    # Canonical parent plus the link's own name (never the link resolved), matching the canonical
+    # paths the walk below yields when a destination is reached through an alias.
+    managed = {Path(os.path.realpath(path.expanduser().absolute().parent)) / path.name for path in managed_links}
     def walk_error(error: OSError) -> None:
         raise error
 

@@ -342,6 +342,32 @@ m.render_policy(prefix, "the loop-pi home templates")
 class ScratchContainmentTests(unittest.TestCase):
     """Public CLI negatives; every escape target still belongs to this disposable fixture."""
 
+    def test_managed_home_link_is_accepted_through_an_aliased_home_and_fenced_to_scratch(self):
+        with tempfile.TemporaryDirectory(prefix="scratch-link-") as raw:
+            parent = Path(raw).resolve()
+            scratch, outside = parent / "scratch", parent / "outside"
+            package = scratch / "data/1.5.0-x/node_modules/@grafana/agento11y-pi"
+            package.mkdir(parents=True)
+            outside.mkdir()
+            home = scratch / "pi"
+            (home / "vendor").mkdir(parents=True)
+            link = home / "vendor/agento11y-pi"
+            os.symlink(package, link)
+            # The same home reached through an alias of scratch (as /tmp is on macOS).
+            alias = parent / "alias"
+            os.symlink(scratch, alias)
+            for reached in (home, alias / "pi"):
+                m.check_candidate_destinations(scratch, (reached,), tuple(reached / rel for rel in m.HOME_LINKS))
+            # Without the exemption the link is a refused directory symlink.
+            with self.assertRaisesRegex(m.InstallError, "must not be a directory symlink"):
+                m.check_candidate_destinations(scratch, (home,))
+            # The exemption never admits a link leaving scratch, or a relative one.
+            for target in (outside, Path("../../data")):
+                link.unlink()
+                os.symlink(target, link)
+                with self.assertRaisesRegex(m.InstallError, "escapes --scratch-root", msg=str(target)):
+                    m.check_candidate_destinations(scratch, (alias / "pi",), tuple(alias / "pi" / rel for rel in m.HOME_LINKS))
+
     def escape_fixture(self, location):
         import hashlib
         import sys
