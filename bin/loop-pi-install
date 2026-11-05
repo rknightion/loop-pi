@@ -62,22 +62,26 @@ ROOT_EXTENSIONS = ("loop-guard/root.ts", "loop-wait/root.ts", "loop-continuation
 LANE_EXTENSIONS = ("loop-guard/lane.ts", "loop-wait/lane.ts", "call-timing/index.ts")
 # The telemetry extension's entry, relative to the build prefix. The root loads it by launcher flag.
 TELEMETRY_EXTENSION = f"node_modules/{TELEMETRY_PACKAGE}/dist/index.js"
-# The only entries an agent file's `extensions:` allowlist may name (as {{PREFIX}}/<entry>).
+# Managed links in the home, to a path in the current build: <home>/<link> -> <prefix>/<target>.
+# Each install repoints them atomically. Agent files name the link, never the build, so a reinstall
+# leaves every agent definition (and the definition digest a pinned or resumed launch checks)
+# unchanged. Kept outside every directory pi scans (extensions/, skills/, prompts/, themes/, ...).
+HOME_LINKS = {"vendor/agento11y-pi": f"node_modules/{TELEMETRY_PACKAGE}"}
+# The only entries an agent file's `extensions:` allowlist may name, as {{HOME}}/<entry>.
 # Optional per child: a failure to load one never fails the lane, unlike a required child extension.
-AGENT_EXTENSIONS = (TELEMETRY_EXTENSION,)
+AGENT_EXTENSIONS = ("vendor/agento11y-pi/dist/index.js",)
 # Inherited variables the launcher unsets before pi starts. The telemetry extension falls back to
 # OTEL_EXPORTER_OTLP_ENDPOINT and lets OTEL_EXPORTER_OTLP_HEADERS replace its auth header, and its
 # bundled OpenTelemetry SDK reads further OTEL_* settings: a calling harness's values would
 # redirect or duplicate export. Its own AGENTO11Y_* settings are left alone.
 CLEARED_ENV_PREFIXES = ("OTEL_",)
-# Export bounds the launcher sets, so a session's exit flush (a lane's included: pi-subagents
-# allows a child 5 s of session_shutdown) cannot wait out the vendor's 30 s request timeout and
-# five retries, or the OpenTelemetry exporters' 10 s, on an unreachable collector. Shutdown can
-# wait for an in-flight metric export and then send a final one, so it takes up to twice the
-# timeout: the ceiling keeps that under 5 s.
+# Request timeouts the launcher sets, so a session's exit flush (a lane's included: pi-subagents
+# allows a child 5 s of session_shutdown) cannot wait out the vendor's 30 s generation request
+# timeout or the OpenTelemetry exporters' 10 s on an unreachable collector. Shutdown aborts
+# in-flight generation requests, so retries do not extend it, but it can wait for an in-flight
+# metric export and then send a final one: about twice the timeout (4.0 s measured at 2000 ms).
 DEFAULT_TELEMETRY_EXPORT_TIMEOUT_MS = 2000
-MAX_TELEMETRY_EXPORT_TIMEOUT_MS = 2400
-TELEMETRY_MAX_RETRIES = 1
+MAX_TELEMETRY_EXPORT_TIMEOUT_MS = 2000
 # Operator and root CLIs from bin/, installed next to the launcher.
 CLI_TOOLS = ("loop-pi-preflight", "loop-pi-audit", "loop-gate-lock")
 # Installed into <home>/bin/ (not next to the launcher) when the source carries it.
@@ -281,7 +285,7 @@ ROOT_ENTRIES = ROOT_EXTENSIONS + (TELEMETRY_EXTENSION,)
 
 
 def missing_extensions(prefix: Path) -> List[str]:
-    return [rel for rel in dict.fromkeys(ROOT_ENTRIES + LANE_EXTENSIONS + AGENT_EXTENSIONS)
+    return [rel for rel in dict.fromkeys(ROOT_ENTRIES + LANE_EXTENSIONS)
             if not extension_path(prefix, rel).is_file()]
 
 
@@ -347,6 +351,8 @@ def home_plan(prefix: Path, home: Path, variables: Dict[str, str]) -> Dict[str, 
         rel = path.relative_to(template).as_posix()
         if rel in NEVER_MANAGED:
             raise InstallError(f"home template must never carry {rel}")
+        if any(rel == link or rel.startswith(link + "/") for link in HOME_LINKS):
+            raise InstallError(f"home template must never carry {rel}: the installer links that path")
         data = path.read_bytes()
         try:
             data = render(data.decode(), values).encode()
@@ -359,6 +365,49 @@ def home_plan(prefix: Path, home: Path, variables: Dict[str, str]) -> Dict[str, 
         if (prefix / "bin" / name).is_file():
             plan[f"bin/{name}"] = (prefix / "bin" / name).read_bytes()
     return plan
+
+
+def managed_files(prefix: Path, home: Path, variables: Dict[str, str]) -> set:
+    """Everything the receipt records as managed: the rendered files and the links."""
+    return set(home_plan(prefix, home, variables)) | set(HOME_LINKS)
+
+
+class HomeLink:
+    """A drift entry for a managed link: replace `path` with a symlink to `target`."""
+
+    def __init__(self, target: Path):
+        self.target = target
+
+
+def link_drift(prefix: Path, home: Path) -> List[Tuple[Path, "HomeLink", int]]:
+    changes = []
+    for rel, target in HOME_LINKS.items():
+        path, dest = home / rel, prefix / target
+        if not path.is_symlink() or os.readlink(path) != str(dest):
+            changes.append((path, HomeLink(dest), 0))
+    return changes
+
+
+def atomic_symlink(path: Path, target: Path) -> None:
+    """Point `path` at `target` in one rename. Refuses to replace anything that is not a link."""
+    if path.exists() and not path.is_symlink():
+        raise InstallError(f"{path} is not a link the installer manages; move it aside and re-run")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.parent / f".{path.name}.{os.getpid()}.tmp"
+    tmp.unlink(missing_ok=True)
+    os.symlink(target, tmp)
+    try:
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def apply_change(path: Path, data, mode: int) -> None:
+    if isinstance(data, HomeLink):
+        atomic_symlink(path, data.target)
+    else:
+        atomic_write(path, data, mode)
 
 
 def loop_pi_settings(prefix: Path) -> dict:
@@ -412,7 +461,7 @@ def launcher_preamble(prefix: Path, home: Path, node: str, generated_by: str) ->
         *node_major_guard(node),
         *clear_env_lines(),
         f"export OTEL_EXPORTER_OTLP_TIMEOUT={telemetry_export_timeout_ms(prefix)}",
-        f"export AGENTO11Y_EXPORT_TIMEOUT_MS={telemetry_export_timeout_ms(prefix)} AGENTO11Y_MAX_RETRIES={TELEMETRY_MAX_RETRIES}",
+        f"export AGENTO11Y_EXPORT_TIMEOUT_MS={telemetry_export_timeout_ms(prefix)}",
         f"export PI_CODING_AGENT_DIR='{home}'",
         f"export PI_SUBAGENTS_TEMP_ROOT='{home}/tmp'",
         "export PI_SKIP_VERSION_CHECK=1",
@@ -506,11 +555,14 @@ def check_model_family(prefix: Path) -> None:
 
 
 def frontmatter_list(text: str, key: str) -> Optional[List[str]]:
-    """A frontmatter list field in either pi-subagents form (comma list or `- item` block), or None."""
+    """A frontmatter list field in either pi-subagents form (comma list or `- item` block), or None.
+    A key given more than once is refused: which copy a parser keeps is not ours to guess."""
     front = re.match(r"---\n(.*?)\n---\n", text, re.DOTALL)
     if not front:
         return None
     lines = front.group(1).split("\n")
+    if sum(1 for line in lines if re.match(rf"{re.escape(key)}:", line)) > 1:
+        raise InstallError(f"frontmatter sets {key}: more than once")
     for index, line in enumerate(lines):
         match = re.fullmatch(rf"{re.escape(key)}:\s*(.*?)\s*", line)
         if not match:
@@ -531,9 +583,12 @@ def frontmatter_list(text: str, key: str) -> Optional[List[str]]:
 def check_agent_extensions(prefix: Path) -> None:
     """Every agent file sets `extensions:` and names only AGENT_EXTENSIONS entries of this build. An
     omitted key would load every ambient extension into the child."""
-    allowed = {f"{form}/{rel}" for rel in AGENT_EXTENSIONS for form in ("{{PREFIX}}", str(prefix))}
+    allowed = {"{{HOME}}/" + rel for rel in AGENT_EXTENSIONS}
     for path in sorted((prefix / "home/agents").glob("*.md")):
-        listed = frontmatter_list(path.read_text(), "extensions")
+        try:
+            listed = frontmatter_list(path.read_text(), "extensions")
+        except InstallError as error:
+            raise InstallError(f"agent {path.stem}: {error}") from None
         if listed is None:
             raise InstallError(f"agent {path.stem} must set extensions: (an omitted key loads every ambient extension)")
         extra = [item for item in listed if item not in allowed]
@@ -611,7 +666,7 @@ def validate(prefix: Path, pin: Dict[str, str], node: str, allow_missing: bool) 
     check_model_family(prefix)
     if not missing:
         smoke_extensions(prefix, node, ROOT_ENTRIES)
-        smoke_extensions(prefix, node, tuple(dict.fromkeys(LANE_EXTENSIONS + AGENT_EXTENSIONS)))
+        smoke_extensions(prefix, node, tuple(dict.fromkeys(LANE_EXTENSIONS + (TELEMETRY_EXTENSION,))))
     return missing
 
 
@@ -686,7 +741,8 @@ def drift(prefix: Path, target: Target, node: str,
           version: Optional[str] = None) -> List[Tuple[Path, bytes, int]]:
     manifest = json.loads((prefix / BUILD_MANIFEST).read_text())
     home = target.home
-    changes = []
+    # Links first: agent files name them, and the receipt (last) marks the install complete.
+    changes: list = list(link_drift(prefix, home))
     plan = home_plan(prefix, home, target.variables)
     for rel, data in plan.items():
         path = home / rel
@@ -698,7 +754,7 @@ def drift(prefix: Path, target: Target, node: str,
         if (not path.is_file() or path.read_bytes() != data
                 or (rel == "bin/loop-pi-nopush" and path.stat().st_mode & 0o777 != mode)):
             changes.append((path, data, mode))
-    receipt = {"label": manifest["label"], "files": sorted(set(plan) | set(target.external))}
+    receipt = {"label": manifest["label"], "files": sorted(set(plan) | set(HOME_LINKS) | set(target.external))}
     if target.variant:
         receipt["variant"] = target.variant
     if version is not None:
@@ -803,13 +859,17 @@ def parse_vars(items: List[str]) -> Dict[str, str]:
     return variables
 
 
-def check_candidate_destinations(scratch: Path, destinations: Tuple[Path, ...]) -> None:
+def check_candidate_destinations(scratch: Path, destinations: Tuple[Path, ...],
+                                 managed_links: Tuple[Path, ...] = ()) -> None:
     """Fence existing topology before any candidate build/home side effects.
 
     Never descend directory symlinks: even contained links could hide another escaping link.
-    Internal file links (notably npm's node_modules/.bin entries) are safe to retain. This
-    preflight is not a defense against concurrent same-account filesystem replacement.
+    Internal file links (notably npm's node_modules/.bin entries) are safe to retain. The home's
+    managed links (HOME_LINKS) may be directory links, never descended, whose absolute target lies
+    inside scratch; the install repoints them. This preflight is not a defense against concurrent
+    same-account filesystem replacement.
     """
+    managed = {path.expanduser().absolute() for path in managed_links}
     def walk_error(error: OSError) -> None:
         raise error
 
@@ -854,6 +914,12 @@ def check_candidate_destinations(scratch: Path, destinations: Tuple[Path, ...]) 
                     path = Path(directory) / name
                     if not stat.S_ISLNK(path.lstat().st_mode):
                         continue
+                    if path.absolute() in managed:
+                        link = Path(os.readlink(path))
+                        landing = Path(os.path.realpath(path))
+                        if not link.is_absolute() or ".." in link.parts or scratch not in landing.parents:
+                            raise InstallError(f"candidate destination {path} escapes --scratch-root")
+                        continue
                     actual = path.resolve(strict=True)
                     if actual == scratch or scratch not in actual.parents:
                         raise InstallError(f"candidate destination {path} escapes --scratch-root")
@@ -895,7 +961,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             scratch = args.scratch_root.expanduser().resolve()
             if not scratch.is_dir() or scratch == Path(scratch.anchor) or scratch != USER_HOME.resolve():
                 raise InstallError("--scratch-root must be an existing throwaway HOME, not the filesystem root")
-            check_candidate_destinations(scratch, (args.home, args.bin, args.data))
+            check_candidate_destinations(scratch, (args.home, args.bin, args.data),
+                                         tuple(args.home / rel for rel in HOME_LINKS))
         if not re.fullmatch(r"[A-Za-z0-9._-]+", args.launcher):
             raise InstallError("--launcher must be a plain file name")
         if args.variant and not re.fullmatch(r"[A-Za-z0-9._-]+", args.variant):
@@ -917,7 +984,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             changes = drift(prefix, target, node, version)
             for path, _, _ in changes:
                 print(f"DRIFT: {path}")
-            plan_files = set(home_plan(prefix, target.home, variables))
+            plan_files = managed_files(prefix, target.home, variables)
             retired = retired_agents(target.home, plan_files, target.external)
             stale = [rel for rel in stale_managed(target.home, plan_files, target.external) if rel not in retired]
             for rel in stale:
@@ -934,14 +1001,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                       "overlay_commit": args.overlay_commit}
         prefix = build(data, label, files, pin, node, args.allow_missing_extensions, args.policy_source, provenance)
         if args.candidate_source:
-            check_candidate_destinations(scratch, (target.home, target.bin_dir, data))
+            check_candidate_destinations(scratch, (target.home, target.bin_dir, data),
+                                         tuple(target.home / rel for rel in HOME_LINKS))
         target.home.mkdir(mode=0o700, parents=True, exist_ok=True)
         (target.home / "tmp").mkdir(mode=0o700, exist_ok=True)
-        plan_files = set(home_plan(prefix, target.home, variables))
+        plan_files = managed_files(prefix, target.home, variables)
         retired = retired_agents(target.home, plan_files, target.external)
         stale = [rel for rel in stale_managed(target.home, plan_files, target.external) if rel not in retired]
         for path, data_bytes, mode in drift(prefix, target, node, version):
-            atomic_write(path, data_bytes, mode)
+            apply_change(path, data_bytes, mode)
             print(f"wrote {path}")
         backup = retire_agents(target.home, retired)
         for rel in retired:

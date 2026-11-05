@@ -149,7 +149,9 @@ public statement of those contracts.
   one that shadows the installed file). The root records the `label` of the installer's receipt
   (`<home>/.loop-pi-managed.json`) when it pins. Before each launch it re-reads the receipt; a new
   label (a managed reinstall, allowed while a root runs) re-pins all five agents from disk, with
-  the same `agents/` check. An unchanged label keeps the pin, so an agent file edited by hand is
+  the same `agents/` check. Shipped agent files name no build path (telemetry reaches lanes through
+  the home's managed link, see "Telemetry"), so a reinstall from the same source re-pins to the same
+  digests and a lane launched before it stays resumable. An unchanged label keeps the pin, so an agent file edited by hand is
   still refused; a missing or unreadable receipt also keeps the pin. The receipt is not
   authenticated: this tells a reinstall from an honest hand edit, not from a writer who also
   changes the label. The installer writes the receipt after the agent files, so a launch between
@@ -290,23 +292,36 @@ telemetry code of its own and adds no configuration on top of the vendor's.
   its bundled OpenTelemetry SDK reads further `OTEL_*` settings, so a calling harness's values
   would redirect or duplicate export. It leaves `AGENTO11Y_*` and `SIGIL_*` alone. It then sets
   `OTEL_EXPORTER_OTLP_TIMEOUT` and `AGENTO11Y_EXPORT_TIMEOUT_MS` to
-  `loopPi.telemetry.exportTimeoutMs` (default 2000, 500 to 2400) and `AGENTO11Y_MAX_RETRIES=1`;
-  these override the same keys in the config file.
+  `loopPi.telemetry.exportTimeoutMs` (default and ceiling 2000, floor 500); these override the
+  same keys in the config file. Retries keep the vendor default.
 - **Exit bound:** the extension's `session_shutdown` awaits its client's shutdown with no limit of
-  its own. Against a collector that never answers, its defaults (30 s per generation request, five
-  retries, 10 s OpenTelemetry exporter timeout) held a one-shot `pi -p` about 40 s at exit, past
+  its own. Against a collector that never answers, its defaults (30 s per generation request,
+  10 s OpenTelemetry exporter timeout) held a one-shot `pi -p` about 40 s at exit, past
   pi-subagents' 5 s bound on a child's shutdown handlers, so a lane's final export would be cut
-  off. With the launcher's bounds the exit flush takes at most about twice the timeout (an
-  in-flight metric export, then the final one), under 5 s. `agento11y.e2e.test.ts` checks it.
-- **Child seam (allowlist):** the root loads the extension by launcher flag. Lanes load it because
-  every shipped agent file's `extensions:` names exactly
-  `{{PREFIX}}/node_modules/@grafana/agento11y-pi/dist/index.js`. That list still disables all
-  ambient extensions for the child (only an omitted key would load them); loop-guard's required
-  child extensions load regardless. It is deliberately not a required child extension: a failure
-  to load it never fails a lane launch. The installer refuses an agent file whose `extensions:`
-  names anything else (`AGENT_EXTENSIONS`); an empty list stays allowed. Covered by
-  `agent-frontmatter.test.ts`, `bin/test_loop_pi_install.py` and `agento11y.e2e.test.ts` (root,
-  lane and nested lane on the pinned runtime, against an in-process sink).
+  off. Shutdown aborts in-flight generation requests, so retries do not lengthen it (measured the
+  same with one retry or the default); the request timeouts and that shutdown race bound it. It
+  can still wait out an in-flight metric export and then send the final one, about twice the
+  timeout: 4.0 s measured at the 2000 ms ceiling, about 1 s under the child bound.
+  `agento11y.e2e.test.ts` checks it at the ceiling.
+- **Child seam (allowlist, stable across builds):** the root loads the extension by launcher flag
+  from the build. Lanes load it because every shipped agent file's `extensions:` names exactly
+  `{{HOME}}/vendor/agento11y-pi/dist/index.js`. `<home>/vendor/agento11y-pi` is a managed link
+  (`HOME_LINKS`) to the current build's `node_modules/@grafana/agento11y-pi`, outside every
+  directory pi scans for extensions. Each install repoints it with one rename, before the agent
+  files and the receipt. Node resolves the vendor's own `@grpc/*` imports from the link's real
+  location. Because no agent file names the build, a reinstall leaves every rendered agent file
+  byte-identical and its definition digest unchanged, so lanes launched before a reinstall stay
+  resumable under the launcher pin. The receipt lists the link; `--check` reports a missing or
+  stale link as drift; the installer refuses to replace anything at that path that is not a link,
+  and a template or overlay file under it; the scratch-install fence accepts the link without
+  descending it, when its absolute target is inside scratch. The list still disables all ambient
+  extensions for the child (only an omitted key would load them); loop-guard's required child
+  extensions load regardless. It is deliberately not a required child extension: a failure to
+  load it never fails a lane launch. The installer refuses an agent file whose `extensions:` is
+  omitted, given twice, or names anything else (`AGENT_EXTENSIONS`); an empty list stays allowed.
+  Covered by `agent-frontmatter.test.ts`, `bin/test_loop_pi_install.py` (two builds render
+  byte-identical agent files) and `agento11y.e2e.test.ts` (root, lane and nested lane through a home
+  link on the pinned runtime, against an in-process sink).
 - The installer's extension smoke drops inherited `AGENTO11Y_*`, `SIGIL_*` and `OTEL_*` and sets
   `XDG_CONFIG_HOME` to its throwaway home, so validating a build never exports.
 

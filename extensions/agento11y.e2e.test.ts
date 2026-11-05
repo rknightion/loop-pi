@@ -5,7 +5,7 @@
 // AGENTO11Y_*, SIGIL_* and OTEL_* variable is dropped and XDG_CONFIG_HOME points at a fixture.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { dirname, join } from "node:path";
@@ -23,7 +23,10 @@ const INSTALLER = readFileSync(join(ROOT, "bin/loop-pi-install"), "utf8");
 const EXTENSION = join(ROOT, "node_modules/@grafana/agento11y-pi/dist/index.js");
 /** The export bounds the shipped launcher sets (bin/loop-pi-install). */
 const BOUND_MS = Number(/^DEFAULT_TELEMETRY_EXPORT_TIMEOUT_MS = (\d+)$/m.exec(INSTALLER)?.[1]);
-const MAX_RETRIES = /^TELEMETRY_MAX_RETRIES = (\d+)$/m.exec(INSTALLER)?.[1];
+/** The highest bound settings may choose; the exit test runs at it. */
+const MAX_BOUND_MS = Number(/^MAX_TELEMETRY_EXPORT_TIMEOUT_MS = (\d+)$/m.exec(INSTALLER)?.[1]);
+/** The managed home link lanes load the extension through (bin/loop-pi-install HOME_LINKS). */
+const HOME_LINK = /^HOME_LINKS = \{"([^"]+)": f"node_modules\/\{TELEMETRY_PACKAGE\}"\}$/m.exec(INSTALLER)?.[1];
 const MARK = "CONTENTMARK";
 after(() => cleanupAllAfterExit());
 
@@ -33,7 +36,7 @@ function isolatedEnv(xdg: string, extra: Record<string, string> = {}): Record<st
   for (const key of Object.keys(process.env)) if (/^(AGENTO11Y|SIGIL|OTEL)_/.test(key)) env[key] = undefined;
   return {
     ...env, XDG_CONFIG_HOME: xdg, OTEL_EXPORTER_OTLP_TIMEOUT: String(BOUND_MS),
-    AGENTO11Y_EXPORT_TIMEOUT_MS: String(BOUND_MS), AGENTO11Y_MAX_RETRIES: String(MAX_RETRIES), ...extra,
+    AGENTO11Y_EXPORT_TIMEOUT_MS: String(BOUND_MS), ...extra,
   };
 }
 
@@ -78,9 +81,10 @@ const generations = (received: Received[]) => received.filter((r) => r.path === 
 test("the shipped launcher bounds and allowlist entry are what this test loads", () => {
   assert.match(INSTALLER, /^TELEMETRY_PACKAGE = "@grafana\/agento11y-pi"$/m);
   assert.match(INSTALLER, /^TELEMETRY_EXTENSION = f"node_modules\/\{TELEMETRY_PACKAGE\}\/dist\/index\.js"$/m);
-  assert.ok(BOUND_MS >= 500 && BOUND_MS <= 2400 && MAX_RETRIES === "1");
+  assert.ok(BOUND_MS >= 500 && BOUND_MS <= MAX_BOUND_MS && MAX_BOUND_MS <= 2000);
+  assert.equal(HOME_LINK, "vendor/agento11y-pi");
   const allowlist = /^extensions: (.*)$/m.exec(readFileSync(join(ROOT, "home/agents/scout.md"), "utf8"))![1];
-  assert.equal(allowlist.replaceAll("{{PREFIX}}", ROOT), EXTENSION);
+  assert.equal(allowlist, `{{HOME}}/${HOME_LINK}/dist/index.js`);
 });
 
 test("root, lane and nested lane each export their own generations through the allowlist seam", { timeout: 180_000 }, async () => {
@@ -100,10 +104,15 @@ test("root, lane and nested lane each export their own generations through the a
   }));
   const config = JSON.parse(readFileSync(join(ROOT, "home/extensions/subagent/config.json"), "utf8").replaceAll("{{HOME}}", home).replaceAll("{{PREFIX}}", ROOT));
   writeFileSync(join(home, "extensions/subagent/config.json"), JSON.stringify(config));
+  // As the installer does: the home links the package, and the agent files name the link, so the
+  // vendor's own imports (@grpc/*) must resolve from the package's real location.
+  mkdirSync(join(home, "vendor"));
+  symlinkSync(dirname(dirname(EXTENSION)), join(home, HOME_LINK!));
+  const laneEntry = join(home, HOME_LINK!, "dist/index.js");
   const envDump = join(fixture, "lane-env.json");
   for (const agent of ["senior", "scout"]) writeFileSync(join(home, "agents", `${agent}.md`), [
     "---", `name: ${agent}`, "description: Telemetry fixture", `tools: ${agent === "senior" ? "bash, subagent" : "bash"}`,
-    ...(agent === "senior" ? ["allowedAgents: scout"] : []), `extensions: ${EXTENSION}`, `subagentOnlyExtensions: ${FAUX_EXTENSION}`,
+    ...(agent === "senior" ? ["allowedAgents: scout"] : []), `extensions: ${laneEntry}`, `subagentOnlyExtensions: ${FAUX_EXTENSION}`,
     "model: faux/faux-1", "async: true", "timeoutMs: 60000", "---", "Synthetic fixture only.",
   ].join("\n"));
   // Lanes launch the way the installed home does: under nopush, which the root guard pins.
@@ -167,7 +176,7 @@ test("root, lane and nested lane each export their own generations through the a
   assert.equal(laneEnv.XDG_CONFIG_HOME, xdg);
 });
 
-test("a one-shot session exits within the launcher's bound when the collector never answers", { timeout: 60_000 }, async () => {
+test("a one-shot session exits within the bound, at the settings ceiling, when the collector never answers", { timeout: 60_000 }, async () => {
   const { server, port, received } = await sink(false);
   const fixture = freshDir("agento11y-bound-");
   const home = join(fixture, "home");
@@ -180,7 +189,7 @@ test("a one-shot session exits within the launcher's bound when the collector ne
       const child = spawn(process.execPath, [CLI_PATH, "--no-session", "--provider", "faux", "--model", "faux-1",
         "--extension", FAUX_EXTENSION, "--extension", EXTENSION, "-p", "hello"], {
         cwd: fixture, stdio: ["ignore", "ignore", "ignore"],
-        env: hermeticPiEnv({ ...isolatedEnv(xdg), PI_CODING_AGENT_DIR: home, PI_OFFLINE: "1", PI_SKIP_VERSION_CHECK: "1",
+        env: hermeticPiEnv({ ...isolatedEnv(xdg, { OTEL_EXPORTER_OTLP_TIMEOUT: String(MAX_BOUND_MS), AGENTO11Y_EXPORT_TIMEOUT_MS: String(MAX_BOUND_MS) }), PI_CODING_AGENT_DIR: home, PI_OFFLINE: "1", PI_SKIP_VERSION_CHECK: "1",
           PI_TELEMETRY: "0", LOOP_PI_FAUX_SCRIPT: script }),
       });
       child.on("exit", (exitCode) => resolve(exitCode));

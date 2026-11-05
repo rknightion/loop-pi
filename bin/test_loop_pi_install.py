@@ -39,7 +39,7 @@ def target(tmp: Path, name: str = ".loop-pi-demo", **kwargs) -> "m.Target":
 
 def apply(prefix: Path, tgt, node: str = "/usr/bin/node") -> None:
     for path, data, mode in m.drift(prefix, tgt, node):
-        m.atomic_write(path, data, mode)
+        m.apply_change(path, data, mode)
 
 
 
@@ -1089,32 +1089,51 @@ class InstallerTests(unittest.TestCase):
         self.assertIn(f"extensions/{entry}", rels)
         self.assertFalse(any(rel.startswith("extensions/loop-status/") and "test" in rel.rsplit("/", 1)[1] for rel in rels))
 
-    def test_telemetry_loads_in_the_root_by_flag_and_in_lanes_by_the_agent_allowlist(self):
+    def test_two_builds_render_byte_identical_agent_files(self):
+        # A pinned or resumed lane launch checks the agent's definition digest (file bytes and the
+        # extensions list included). A reinstall must not change it, or every earlier lane becomes
+        # unresumable.
+        home = self.tmp / ".loop-pi-demo"
+        rendered = []
+        for label in ("1.5.0-aaaaaaaaaa", "1.5.0-bbbbbbbbbb"):
+            prefix = self.tmp / "data" / label
+            (prefix / "home/agents").mkdir(parents=True)
+            for path in (m.SRC / "home/agents").glob("*.md"):
+                (prefix / "home/agents" / path.name).write_text(path.read_text())
+            (prefix / "home/lane-policy.md").write_text((m.SRC / "home/lane-policy.md").read_text())
+            plan = m.home_plan(prefix, home, {})
+            rendered.append({rel: data for rel, data in plan.items() if rel.startswith("agents/")})
+        self.assertEqual(len(rendered[0]), 5)
+        self.assertEqual(rendered[0], rendered[1])
+
+    def test_telemetry_loads_in_the_root_by_flag_and_in_lanes_through_the_home_link(self):
         entry = "node_modules/@grafana/agento11y-pi/dist/index.js"
         self.assertEqual(m.TELEMETRY_EXTENSION, entry)
         self.assertIn(entry, m.ROOT_ENTRIES)
         # Never a required child extension: its failure must not fail a lane launch.
         self.assertNotIn(entry, m.LANE_EXTENSIONS)
-        self.assertEqual(m.AGENT_EXTENSIONS, (entry,))
+        self.assertEqual(m.HOME_LINKS, {"vendor/agento11y-pi": "node_modules/@grafana/agento11y-pi"})
+        self.assertEqual(m.AGENT_EXTENSIONS, ("vendor/agento11y-pi/dist/index.js",))
         self.assertEqual(m.pins()["@grafana/agento11y-pi"], "0.28.0")
         prefix = fake_prefix(self.tmp)
         self.assertEqual(m.missing_extensions(prefix).count(entry), 1)
         text = m.launcher_text(prefix, self.tmp / "h", "/usr/bin/node", {"label": "x", "missing_extensions": []},
                                "loop-pi", "loop-pi-install")
         self.assertIn(f"--extension '{prefix}/{entry}'", text)
-        source_agents = m.SRC / "home/agents"
         (prefix / "home/agents").mkdir()
-        for path in source_agents.glob("*.md"):
+        for path in (m.SRC / "home/agents").glob("*.md"):
             (prefix / "home/agents" / path.name).write_text(path.read_text())
-            self.assertEqual(m.frontmatter_list(path.read_text(), "extensions"), ["{{PREFIX}}/" + entry])
+            self.assertEqual(m.frontmatter_list(path.read_text(), "extensions"), ["{{HOME}}/vendor/agento11y-pi/dist/index.js"])
         m.check_agent_extensions(prefix)
-        rendered = m.home_plan(prefix, self.tmp / "h", {})["agents/worker.md"].decode()
-        self.assertIn(f"extensions: {prefix}/{entry}\n", rendered)
-        # The allowlist: an empty list is fine, anything else is refused before install.
+        home = self.tmp / "h"
+        rendered = m.home_plan(prefix, home, {})["agents/worker.md"].decode()
+        self.assertIn(f"extensions: {home}/vendor/agento11y-pi/dist/index.js\n", rendered)
+        # The allowlist: an empty list is fine; anything else, a build path, an omitted key or a
+        # second key is refused before install.
         (prefix / "home/agents/scout.md").write_text("---\nname: scout\nextensions: []\n---\n")
         m.check_agent_extensions(prefix)
-        for listed in ("{{PREFIX}}/extensions/loop-status/index.ts", "/elsewhere/ext.ts",
-                       "{{PREFIX}}/node_modules/other/dist/index.js", "{{PREFIX}}/" + entry + ", /elsewhere/ext.ts"):
+        for listed in ("{{PREFIX}}/extensions/loop-status/index.ts", "/elsewhere/ext.ts", "{{PREFIX}}/" + entry,
+                       "{{HOME}}/vendor/other/dist/index.js", "{{HOME}}/vendor/agento11y-pi/dist/index.js, /elsewhere/ext.ts"):
             (prefix / "home/agents/scout.md").write_text(f"---\nname: scout\nextensions: {listed}\n---\n")
             with self.assertRaisesRegex(m.InstallError, "scout", msg=listed):
                 m.check_agent_extensions(prefix)
@@ -1124,10 +1143,51 @@ class InstallerTests(unittest.TestCase):
         (prefix / "home/agents/scout.md").write_text("---\nname: scout\ntools: read\n---\n")
         with self.assertRaisesRegex(m.InstallError, "scout must set extensions"):
             m.check_agent_extensions(prefix)
+        (prefix / "home/agents/scout.md").write_text("---\nname: scout\nextensions: []\ntools: read\nextensions: /elsewhere/ext.ts\n---\n")
+        with self.assertRaisesRegex(m.InstallError, "scout: frontmatter sets extensions: more than once"):
+            m.check_agent_extensions(prefix)
+
+    def test_the_home_link_is_installed_repointed_recorded_and_checked(self):
+        first = fake_prefix(self.tmp)
+        tgt = target(self.tmp)
+        link = tgt.home / "vendor/agento11y-pi"
+        apply(first, tgt)
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(os.readlink(link), str(first / "node_modules/@grafana/agento11y-pi"))
+        self.assertIn("vendor/agento11y-pi", json.loads((tgt.home / m.HOME_MANIFEST).read_text())["files"])
+        self.assertEqual(m.drift(first, tgt, "/usr/bin/node"), [])
+        self.assertEqual(m.stale_managed(tgt.home, m.managed_files(first, tgt.home, {})), [])
+        # A second build repoints the link (first in the change list, the receipt last); a missing
+        # link is drift too.
+        second = self.tmp / "data" / "1.5.0-second"
+        second.mkdir()
+        for name in ("home", "bin"):
+            os.symlink(first / name, second / name)
+        (second / m.BUILD_MANIFEST).write_text(json.dumps({"label": "1.5.0-second", "missing_extensions": []}))
+        changes = m.drift(second, tgt, "/usr/bin/node")
+        self.assertEqual(changes[0][0], link)
+        order = [path for path, _, _ in changes]
+        receipt = order.index(tgt.home / m.HOME_MANIFEST)
+        self.assertTrue(all(i < receipt for i, path in enumerate(order) if tgt.home in path.parents and path != order[receipt]))
+        apply(second, tgt)
+        self.assertEqual(os.readlink(link), str(second / "node_modules/@grafana/agento11y-pi"))
+        link.unlink()
+        self.assertIn(link, [path for path, _, _ in m.drift(second, tgt, "/usr/bin/node")])
+        # Anything other than a link at that path is never replaced.
+        link.mkdir()
+        with self.assertRaisesRegex(m.InstallError, "not a link the installer manages"):
+            apply(second, tgt)
+        self.assertTrue(link.is_dir() and not link.is_symlink())
+        # Nor may a template or overlay put files there.
+        (first / "home/vendor/agento11y-pi").mkdir(parents=True)
+        (first / "home/vendor/agento11y-pi/x.js").write_text("")
+        with self.assertRaisesRegex(m.InstallError, "installer links that path"):
+            m.home_plan(first, tgt.home, {})
 
     def test_telemetry_export_bound_comes_from_settings_and_is_range_checked(self):
+        self.assertEqual(m.MAX_TELEMETRY_EXPORT_TIMEOUT_MS, 2000)
         self.assertEqual(m.telemetry_export_timeout_ms(fake_prefix(self.tmp)), 2000)
-        for value, ok in ((500, True), (2400, True), (499, False), (2401, False), ("2000", False), (True, False)):
+        for value, ok in ((500, True), (2000, True), (499, False), (2001, False), ("2000", False), (True, False)):
             prefix = self.tmp / f"case-{value!r}"
             prefix.mkdir()
             (prefix / "home").mkdir()
@@ -1337,7 +1397,7 @@ class InstallerTests(unittest.TestCase):
         record = json.loads((tgt.home / m.HOME_MANIFEST).read_text())
         self.assertIn(".binding.json", record["files"])
         self.assertFalse((tgt.home / ".binding.json").exists(), "the installer never writes an external file")
-        plan = set(m.home_plan(prefix, tgt.home, {}))
+        plan = m.managed_files(prefix, tgt.home, {})
         self.assertEqual(m.stale_managed(tgt.home, plan, tgt.external), [])
         self.assertEqual(m.stale_managed(tgt.home, plan), [".binding.json"])
 
@@ -1545,7 +1605,8 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(otel, {"OTEL_EXPORTER_OTLP_TIMEOUT": "1800"}, "inherited OTEL_* reach pi, or the bound is missing")
         self.assertFalse(any(credential in value for value in env.values()))
         self.assertEqual((env["AGENTO11Y_CONTENT_CAPTURE_MODE"], env["AGENTO11Y_ENDPOINT"]), ("full", "https://agento11y.example.com"))
-        self.assertEqual((env["AGENTO11Y_EXPORT_TIMEOUT_MS"], env["AGENTO11Y_MAX_RETRIES"]), ("1800", "1"))
+        self.assertEqual(env["AGENTO11Y_EXPORT_TIMEOUT_MS"], "1800")
+        self.assertNotIn("AGENTO11Y_MAX_RETRIES", env, "retries do not bound the exit; the vendor default stays")
         self.assertEqual((env["UNRELATED_KEEP"], env["MULTILINE_KEEP"]), ("1", "a\nOTEL_FAKE=1"))
         self.assertEqual(env["PI_CODING_AGENT_DIR"], str(home))
         self.assertIn(f"--extension '{prefix}/node_modules/@grafana/agento11y-pi/dist/index.js'", text)
