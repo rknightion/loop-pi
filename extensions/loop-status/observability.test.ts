@@ -43,7 +43,12 @@ test("native inspection reply supplies only the child's own recorded model; no i
   const write = (mode: string, steps: any[], context = "fresh") => writeFileSync(join(asyncDirRoot, runId, "status.json"), JSON.stringify({ runId, state: "complete", mode, context, sessionId, sessionRoot: root, sessionFile: childFile, steps }));
   const inspect = (childId?: string) => buildInspectReply({ requestId: "proof", asyncId: runId, childId }, { state, asyncDirRoot, resultsDir });
   const requested = { model: "requested/model", thinking: "medium", agent: "worker" };
-  writeFileSync(join(asyncDirRoot, runId, "recovery-descriptor.json"), JSON.stringify({ version: 1, sourceRunId: runId, model: "original/model", thinking: "medium" }));
+  // pi-subagents 0.85.0 keeps the descriptor beside the runs root, out of the run's reach.
+  const launchDir = join(root, "async-subagent-launches", runId);
+  mkdirSync(launchDir, { recursive: true });
+  writeFileSync(join(launchDir, "recovery-descriptor.json"), JSON.stringify({ version: 1, sourceRunId: runId, model: "original/model", thinking: "medium" }));
+  // A copy the run could have written in its own folder is never read.
+  writeFileSync(join(asyncDirRoot, runId, "recovery-descriptor.json"), JSON.stringify({ version: 1, sourceRunId: runId, model: "run-written/model", thinking: "medium" }));
   write("single", [{ ...requested, launchModel: "requested/model", resolvedModel: { provider: "answer-provider", model: "answer-model" } }]);
   const view = () => readInspection(asyncDirRoot, state.currentSessionId, runId);
   assert.match(view(), /Requested model: requested\/model/);
@@ -57,6 +62,7 @@ test("native inspection reply supplies only the child's own recorded model; no i
     assert.match(formatInspection(inspect(), requested), /Answering model: unknown/);
     assert.match(view(), /Answering model: unknown/);
     assert.match(view(), /Requested model: original\/model/);
+    assert.doesNotMatch(view(), /run-written/);
   }
   for (const mode of ["chain", "workflow"]) {
     write(mode, [{ ...requested, resolvedModel: { provider: "one", model: "child" } }, { agent: "reviewer" }]);
@@ -66,12 +72,10 @@ test("native inspection reply supplies only the child's own recorded model; no i
     assert.match(readInspection(asyncDirRoot, sessionId, runId, "step:1"), /Answering model: unknown/);
     assert.match(formatInspection(inspect("step:0"), requested), /Answering model: one\/child/);
   }
-  // pi-subagents 0.85.0 keeps the descriptor beside the runs root; it wins over a run-folder copy.
-  const launchDir = join(root, "async-subagent-launches", runId);
-  mkdirSync(launchDir, { recursive: true });
-  writeFileSync(join(launchDir, "recovery-descriptor.json"), JSON.stringify({ version: 1, sourceRunId: runId, model: "launch-folder/model", thinking: "high" }));
+  // Without the parent-owned record, the run-folder copy still does not supply the route.
+  (await import("node:fs")).rmSync(join(launchDir, "recovery-descriptor.json"));
   write("single", [requested]);
-  assert.match(view(), /Requested model: launch-folder\/model/);
+  assert.doesNotMatch(view(), /run-written/);
   state.currentSessionId = join(root, "foreign.jsonl");
   const before = (await import("node:fs")).readFileSync(join(asyncDirRoot, runId, "status.json"), "utf8");
   assert.match(view(), /unavailable/);

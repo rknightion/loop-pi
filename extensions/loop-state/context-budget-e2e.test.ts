@@ -279,8 +279,8 @@ test("live native child defers without consumption, completion wakes, then the s
 
 // A landed root push is a batch boundary: well below the 80 percent backstop the root compacts, and the
 // state summary it reads afterwards names the context-budget extension as the trigger. The faux
-// provider reports roughly half the large prompt on later turns (its first turn counts new text twice),
-// so the push share is set to 25 percent to sit under the roughly 30 percent the push turn reports.
+// provider reports about a quarter of the prompt characters as tokens, so the push turn reports roughly
+// 60 percent: past the 25 percent push share and below the 80 percent backstop.
 test("a landed root push compacts the root past the configured share and the summary names the extension", { timeout: 90_000 }, async () => {
   const s = loopFixture({ root: "faux/faux-1" });
   writeFileSync(join(s.agentDir, "settings.json"), JSON.stringify({ retry: { enabled: false }, packages: [PI_SUBAGENTS_PACKAGE_DIR], defaultProjectTrust: "never", subagents: { agentExcludeDirs: ["~/.agents"] } }));

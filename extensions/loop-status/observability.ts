@@ -81,12 +81,11 @@ export function readInspection(runsDir: string, sessionId: string, id: string, c
     let descriptor: RecordValue = {};
     // A single-run descriptor records the original selected route, even after step.model changes.
     if (status.mode === "single" && steps.length === 1 && matches.length === 1) {
-      // pi-subagents 0.85.0 keeps it beside the runs root (runLaunchDir); earlier runs kept it in the run folder.
+      // pi-subagents 0.85.0 keeps it beside the runs root (runLaunchDir), where the run cannot write it.
+      // A copy inside the run folder (pre-0.85 runs, or one the run wrote itself) is never trusted.
       const launchDir = basename(dirname(runsDir)) === "nested-subagent-runs" ? join(runsDir, ".launches", id)
         : join(dirname(runsDir), "async-subagent-launches", id);
-      for (const dir of [launchDir, join(runsDir, id)]) {
-        try { descriptor = readRecord(join(dir, "recovery-descriptor.json")); break; } catch { /* not here */ }
-      }
+      try { descriptor = readRecord(join(launchDir, "recovery-descriptor.json")); } catch { /* no launch record */ }
       if (descriptor.version !== 1 || descriptor.sourceRunId !== id) descriptor = {};
     }
     const requested = { model: step.launchModel ?? descriptor.model, thinking: descriptor.thinking ?? step.thinking, agent: step.agent };
