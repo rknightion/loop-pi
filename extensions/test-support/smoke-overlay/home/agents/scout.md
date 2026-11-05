@@ -6,5 +6,6 @@ extensions: []
 subagentOnlyExtensions: {{FAUX_EXTENSION}}
 model: faux/faux-1
 thinking: low
+launcher: nopush
 ---
 Execute the scripted smoke task.
