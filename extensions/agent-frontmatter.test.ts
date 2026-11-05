@@ -24,7 +24,7 @@ for (const [agent, expected] of Object.entries(expectations)) {
     assert.deepEqual(parseFrontmatterList(f.allowedAgents), expected.allowedAgents);
     assert.equal(f.launcher, "nopush");
     assert.equal(f.async, "true");
-    // The child extension allowlist: ambient extensions stay off, the telemetry lane entry loads.
-    assert.deepEqual(parseFrontmatterList(f.extensions), ["{{PREFIX}}/extensions/telemetry/lane.ts"]);
+    // The child extension allowlist: ambient extensions stay off, the telemetry extension loads.
+    assert.deepEqual(parseFrontmatterList(f.extensions), ["{{PREFIX}}/node_modules/@grafana/agento11y-pi/dist/index.js"]);
   });
 }

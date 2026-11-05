@@ -44,11 +44,10 @@ Three pi extensions, a home template and an installer:
   inactivity; active encrypted reasoning may continue past an hour. Either one sends the
   session a follow-up message that starts its next turn, a bounded number of times in a row.
   It also adds jitter to pi's retry wait after a 5xx and holds a 429 retry to a flat 60 s.
-- `extensions/telemetry` exports metadata-only OpenTelemetry spans and logs (GenAI conventions:
-  agent runs, model calls with token counts, tool calls, session start and end) for the root and
-  every lane over OTLP, when `loopPi.telemetry` names a config file with an endpoint. Prompts,
-  replies, tool arguments and results, paths and error text are never exported; the credential
-  stays inside the exporter, and the launcher clears inherited `OTEL_*` and capture variables.
+- Telemetry: the root and every lane load Grafana's Agent Observability pi extension
+  (`@grafana/agento11y-pi`, pinned), configured by its own
+  `~/.config/agento11y/config.env` and any `AGENTO11Y_*` environment; without an endpoint it exports nothing. The launcher
+  clears inherited `OTEL_*` variables and bounds the exit flush (`loopPi.telemetry`).
 - `extensions/loop-status` shows the root's live state in the status bar: lanes over the slot cap,
   timers and watchers, the nudge chain, the heartbeat age and the root's model time as a share of
   wall time since the launch (`root model time 62% of 3h10m`). Taken from the request timing that
@@ -106,7 +105,7 @@ Settings under `loopPi` in `home/settings.json` (or your overlay):
 | `rootRoute` | `{"provider": "openai", "model": "gpt-6.1-sol", "thinking": "high"}` | the root's model, and the fallback when a session selects one outside the family |
 | `requiredHookScripts` | `[]` | guard scripts that must exist; a missing required one blocks every lane tool call |
 | `onIncident` | `[]` | argv of a notifier run, detached, whenever the loop writes an incident file; `{file}` in any element is replaced by the incident's absolute path. Failures are ignored. loop-pi ships no notifier: an overlay sets this to its own command |
-| `telemetry` | absent (off) | `{"configFile": "<path>", "context": "<name>", "exportTimeoutMs": 2000}` turns on metadata-only OTLP spans and logs for the root and every lane, read from that env-style file (default `~/.config/agento11y/config.env`); see `extensions/SEAMS.md` "Telemetry" |
+| `telemetry` | `{"exportTimeoutMs": 2000}` | the export timeout (500 to 2400 ms) the launcher gives the telemetry extension, with one retry, so a session's exit flush stays under pi-subagents' 5 s child shutdown bound; see `extensions/SEAMS.md` "Telemetry" |
 
 The agent files name `openai/gpt-6.1-sol` and `openai/gpt-6-astra`. If you use another family, replace the agent files
 through the overlay and set `modelFamily` and `rootRoute` to match; the installer refuses a build

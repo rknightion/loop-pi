@@ -269,52 +269,46 @@ pi process with the faux provider, as recorded under "Runtime facts"; it is not 
 
 ## Telemetry
 
-`extensions/telemetry/` exports metadata-only OpenTelemetry spans and logs over OTLP/HTTP (JSON)
-from the root and every lane. It is off unless the home's own `settings.json` has a
-`loopPi.telemetry` block; project `.pi/settings.json` is never read.
+The root and every lane load Grafana's Agent Observability extension, `@grafana/agento11y-pi`
+(exact pin in `package.json`; `bin/loop-pi-install` `TELEMETRY_PACKAGE`). loop-pi ships no
+telemetry code of its own and adds no configuration on top of the vendor's.
 
-```json
-"loopPi": { "telemetry": { "configFile": "{{USER_HOME}}/.config/agento11y/config.env", "context": "personal", "exportTimeoutMs": 2000 } }
-```
-
-- `configFile` (default `~/.config/agento11y/config.env`) is an env-style file (`KEY=value`,
-  `#` comments, optional `export ` and matching quotes) read in process at each `session_start`.
-  Keys used: `AGENTO11Y_OTEL_EXPORTER_OTLP_ENDPOINT` (base; `/v1/traces` and `/v1/logs` are
-  appended), `AGENTO11Y_AUTH_TENANT_ID` with `AGENTO11Y_OTEL_AUTH_TOKEN` (else
-  `AGENTO11Y_AUTH_TOKEN`) as HTTP Basic. The endpoint must be `https:`, or `http:` on loopback;
-  half a credential, userinfo or a query string turns telemetry off. Every other key, including
-  `AGENTO11Y_CONTENT_CAPTURE_MODE`, is ignored: capture is never on. A missing, unreadable or
-  incomplete file leaves telemetry off and the session unaffected.
-- The credential lives only in the exporters' header objects. Nothing is written to
-  `process.env`, so tool subprocesses and lane tool environments never see it. The launcher does
-  not read the file; it unsets every inherited `OTEL_*`, `AGENTO11Y_*`, `SIGIL_*` and `PI_OTEL_*`
-  variable before pi starts, so the SDK's own environment settings and other harnesses' capture
-  switches do not apply.
-- `context` (plain name) becomes resource `loop_pi.context`; the resource also carries
-  `service.name=pi`, `service.version` (pi's) and `host.name`.
-- Spans (GenAI conventions): `invoke_agent <agent>` per run, `chat <model>` per model call
-  (opened at `turn_start`, or a retry's `before_provider_request`, closed at the assistant
-  `message_end`), `execute_tool <tool>`. Logs: `pi.session.start` and `pi.session.end`. Every
-  span and log carries the native `ctx.sessionManager.getSessionId()` as `gen_ai.conversation.id`
-  and `session.id`, plus `loop_pi.role` (`root`/`lane`) and `gen_ai.agent.name` (`loop-pi-root`;
-  a lane's agent from the root guard's `loop-pi.guard/1` binding, else `loop-pi-lane`, which is
-  what a nested lane reports). Attributes are ids, provider and model names, token counts, tool
-  names and call ids, finish reasons, counts and an `error.type` code; message, prompt, tool
-  argument and result text, error text, paths and cwd are never read into one. No metrics.
-- One pipeline per process and configuration (`Symbol.for("loop-pi.telemetry.pipelines.v1")`):
-  a background runner hosts several child sessions. `session_shutdown` force-flushes, bounded by
-  `exportTimeoutMs` (100 to 4000, below pi-subagents' 5 s child shutdown bound), so a session
-  never waits longer than that on an unreachable collector, and a one-shot child exports before
-  its runner exits. Every handler swallows its own errors.
-- **Child seam (allowlist):** the root loads `telemetry/root.ts` by launcher flag. Lanes load
-  `telemetry/lane.ts` because every shipped agent file's `extensions:` names exactly
-  `{{PREFIX}}/extensions/telemetry/lane.ts`. That list still disables all ambient extensions for
-  the child (only an omitted key would load them); loop-guard's required child extensions load
-  regardless. It is deliberately not a required child extension: a failure to load it never
-  fails a lane launch. The installer refuses an agent file whose `extensions:` names anything
-  else (`AGENT_EXTENSIONS`); an empty list stays allowed. `agent-frontmatter.test.ts`,
-  `bin/test_loop_pi_install.py` and `telemetry/e2e.test.ts` (root, lane and nested lane on the
-  pinned runtime) cover it.
+- **Configuration is the vendor's:** `$XDG_CONFIG_HOME/agento11y/config.env`, else
+  `~/.config/agento11y/config.env`. Without `AGENTO11Y_ENDPOINT` it exports nothing. Content
+  capture follows `AGENTO11Y_CONTENT_CAPTURE_MODE` there (default `metadata_only`); loop-pi does
+  not override it. The extension loads that file's `AGENTO11Y_*`, `SIGIL_*` and four `OTEL_*` keys
+  into `process.env`, so tool subprocesses and lane tool environments inherit them, credential
+  included. A non-empty inherited value wins over the file (vendor precedence), so a calling
+  shell's `AGENTO11Y_*` (guards included) applies to the loop.
+- **Runtime fit (pi 1.5.0):** the bundle (`dist/index.js`) imports only Node built-ins and
+  `@grpc/grpc-js` / `@grpc/proto-loader` at run time. Its `@mariozechner/pi-*` and typebox peer
+  dependencies are type-only; it names `@earendil-works/pi-coding-agent` only to read pi's
+  version. Every `npm ci` passes `--omit=peer` so the old pi tree those peers name is never
+  installed (it stays in the lockfile as peer-only entries).
+- **Launcher environment:** it unsets every inherited `OTEL_*` variable: the extension falls back
+  to `OTEL_EXPORTER_OTLP_ENDPOINT`, lets `OTEL_EXPORTER_OTLP_HEADERS` replace its auth header, and
+  its bundled OpenTelemetry SDK reads further `OTEL_*` settings, so a calling harness's values
+  would redirect or duplicate export. It leaves `AGENTO11Y_*` and `SIGIL_*` alone. It then sets
+  `OTEL_EXPORTER_OTLP_TIMEOUT` and `AGENTO11Y_EXPORT_TIMEOUT_MS` to
+  `loopPi.telemetry.exportTimeoutMs` (default 2000, 500 to 2400) and `AGENTO11Y_MAX_RETRIES=1`;
+  these override the same keys in the config file.
+- **Exit bound:** the extension's `session_shutdown` awaits its client's shutdown with no limit of
+  its own. Against a collector that never answers, its defaults (30 s per generation request, five
+  retries, 10 s OpenTelemetry exporter timeout) held a one-shot `pi -p` about 40 s at exit, past
+  pi-subagents' 5 s bound on a child's shutdown handlers, so a lane's final export would be cut
+  off. With the launcher's bounds the exit flush takes at most about twice the timeout (an
+  in-flight metric export, then the final one), under 5 s. `agento11y.e2e.test.ts` checks it.
+- **Child seam (allowlist):** the root loads the extension by launcher flag. Lanes load it because
+  every shipped agent file's `extensions:` names exactly
+  `{{PREFIX}}/node_modules/@grafana/agento11y-pi/dist/index.js`. That list still disables all
+  ambient extensions for the child (only an omitted key would load them); loop-guard's required
+  child extensions load regardless. It is deliberately not a required child extension: a failure
+  to load it never fails a lane launch. The installer refuses an agent file whose `extensions:`
+  names anything else (`AGENT_EXTENSIONS`); an empty list stays allowed. Covered by
+  `agent-frontmatter.test.ts`, `bin/test_loop_pi_install.py` and `agento11y.e2e.test.ts` (root,
+  lane and nested lane on the pinned runtime, against an in-process sink).
+- The installer's extension smoke drops inherited `AGENTO11Y_*`, `SIGIL_*` and `OTEL_*` and sets
+  `XDG_CONFIG_HOME` to its throwaway home, so validating a build never exports.
 
 ## Root launcher route
 

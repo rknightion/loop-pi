@@ -5,7 +5,7 @@ advertise: true
 model: openai/gpt-6.1-sol
 thinking: low
 tools: read, grep, find, ls, bash
-extensions: {{PREFIX}}/extensions/telemetry/lane.ts
+extensions: {{PREFIX}}/node_modules/@grafana/agento11y-pi/dist/index.js
 systemPromptMode: append
 defaultContext: fresh
 inheritProjectContext: true

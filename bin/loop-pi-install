@@ -50,20 +50,34 @@ DEFAULT_DATA = USER_HOME / ".local/share/loop-pi"
 DEFAULT_BIN = USER_HOME / ".local/bin"
 PI_PACKAGE = "@earendil-works/pi-coding-agent"
 SUBAGENTS_PACKAGE = "pi-subagents"
+# Grafana's pi extension for Agent Observability (generations, traces, metrics). Pinned exactly.
+TELEMETRY_PACKAGE = "@grafana/agento11y-pi"
 PI_CLI = f"node_modules/{PI_PACKAGE}/dist/bundle/cli.js"
 BUILD_MANIFEST = ".loop-pi-build.json"
 HOME_MANIFEST = ".loop-pi-managed.json"
 # Root-only extensions, loaded by launcher flags, never by settings packages.
 ROOT_EXTENSIONS = ("loop-guard/root.ts", "loop-wait/root.ts", "loop-continuation/index.ts", "loop-state/index.ts",
-                   "lane-worktrees/index.ts", "call-timing/index.ts", "loop-status/index.ts", "telemetry/root.ts")
+                   "lane-worktrees/index.ts", "call-timing/index.ts", "loop-status/index.ts")
 # Lane entries, registered by the root guard as required child extensions.
 LANE_EXTENSIONS = ("loop-guard/lane.ts", "loop-wait/lane.ts", "call-timing/index.ts")
-# The only entries an agent file's `extensions:` allowlist may name (as {{PREFIX}}/extensions/<entry>).
+# The telemetry extension's entry, relative to the build prefix. The root loads it by launcher flag.
+TELEMETRY_EXTENSION = f"node_modules/{TELEMETRY_PACKAGE}/dist/index.js"
+# The only entries an agent file's `extensions:` allowlist may name (as {{PREFIX}}/<entry>).
 # Optional per child: a failure to load one never fails the lane, unlike a required child extension.
-AGENT_EXTENSIONS = ("telemetry/lane.ts",)
-# Inherited variables the launcher unsets before pi starts: OpenTelemetry SDK settings and the
-# exporter and content-capture switches other agent harnesses export. Telemetry reads its own file.
-CLEARED_ENV_PREFIXES = ("OTEL_", "AGENTO11Y_", "SIGIL_", "PI_OTEL_")
+AGENT_EXTENSIONS = (TELEMETRY_EXTENSION,)
+# Inherited variables the launcher unsets before pi starts. The telemetry extension falls back to
+# OTEL_EXPORTER_OTLP_ENDPOINT and lets OTEL_EXPORTER_OTLP_HEADERS replace its auth header, and its
+# bundled OpenTelemetry SDK reads further OTEL_* settings: a calling harness's values would
+# redirect or duplicate export. Its own AGENTO11Y_* settings are left alone.
+CLEARED_ENV_PREFIXES = ("OTEL_",)
+# Export bounds the launcher sets, so a session's exit flush (a lane's included: pi-subagents
+# allows a child 5 s of session_shutdown) cannot wait out the vendor's 30 s request timeout and
+# five retries, or the OpenTelemetry exporters' 10 s, on an unreachable collector. Shutdown can
+# wait for an in-flight metric export and then send a final one, so it takes up to twice the
+# timeout: the ceiling keeps that under 5 s.
+DEFAULT_TELEMETRY_EXPORT_TIMEOUT_MS = 2000
+MAX_TELEMETRY_EXPORT_TIMEOUT_MS = 2400
+TELEMETRY_MAX_RETRIES = 1
 # Operator and root CLIs from bin/, installed next to the launcher.
 CLI_TOOLS = ("loop-pi-preflight", "loop-pi-audit", "loop-gate-lock")
 # Installed into <home>/bin/ (not next to the launcher) when the source carries it.
@@ -92,11 +106,11 @@ class InstallError(Exception):
 
 def pins(src: Path = SRC) -> Dict[str, str]:
     deps = json.loads((src / "package.json").read_text())["dependencies"]
-    for name in (PI_PACKAGE, SUBAGENTS_PACKAGE):
+    for name in (PI_PACKAGE, SUBAGENTS_PACKAGE, TELEMETRY_PACKAGE):
         version = deps.get(name, "")
         if not version or not version[0].isdigit():
             raise InstallError(f"{name} must be pinned to an exact version, found {version!r}")
-    return {PI_PACKAGE: deps[PI_PACKAGE], SUBAGENTS_PACKAGE: deps[SUBAGENTS_PACKAGE]}
+    return {name: deps[name] for name in (PI_PACKAGE, SUBAGENTS_PACKAGE, TELEMETRY_PACKAGE)}
 
 
 def _tree(base: Path, prefix: str) -> List[Tuple[str, Path]]:
@@ -258,9 +272,25 @@ def same_major_keg_link(missing: str, recorded_version: object) -> str:
     return str(link) if current == major else missing
 
 
+def extension_path(prefix: Path, rel: str) -> Path:
+    """An entry under the build's extensions/, or a prefix-relative package entry (node_modules/...)."""
+    return prefix / rel if rel.startswith("node_modules/") else prefix / "extensions" / rel
+
+
+ROOT_ENTRIES = ROOT_EXTENSIONS + (TELEMETRY_EXTENSION,)
+
+
 def missing_extensions(prefix: Path) -> List[str]:
-    return [rel for rel in dict.fromkeys(ROOT_EXTENSIONS + LANE_EXTENSIONS + AGENT_EXTENSIONS)
-            if not (prefix / "extensions" / rel).is_file()]
+    return [rel for rel in dict.fromkeys(ROOT_ENTRIES + LANE_EXTENSIONS + AGENT_EXTENSIONS)
+            if not extension_path(prefix, rel).is_file()]
+
+
+def telemetry_export_timeout_ms(prefix: Path) -> int:
+    value = loop_pi_settings(prefix).get("telemetry", {})
+    value = value.get("exportTimeoutMs", DEFAULT_TELEMETRY_EXPORT_TIMEOUT_MS) if isinstance(value, dict) else value
+    if not isinstance(value, int) or isinstance(value, bool) or not 500 <= value <= MAX_TELEMETRY_EXPORT_TIMEOUT_MS:
+        raise InstallError(f"loopPi.telemetry.exportTimeoutMs must be an integer from 500 to {MAX_TELEMETRY_EXPORT_TIMEOUT_MS}")
+    return value
 
 
 def render(text: str, variables: Dict[str, str]) -> str:
@@ -381,6 +411,8 @@ def launcher_preamble(prefix: Path, home: Path, node: str, generated_by: str) ->
         "set -eu",
         *node_major_guard(node),
         *clear_env_lines(),
+        f"export OTEL_EXPORTER_OTLP_TIMEOUT={telemetry_export_timeout_ms(prefix)}",
+        f"export AGENTO11Y_EXPORT_TIMEOUT_MS={telemetry_export_timeout_ms(prefix)} AGENTO11Y_MAX_RETRIES={TELEMETRY_MAX_RETRIES}",
         f"export PI_CODING_AGENT_DIR='{home}'",
         f"export PI_SUBAGENTS_TEMP_ROOT='{home}/tmp'",
         "export PI_SKIP_VERSION_CHECK=1",
@@ -426,7 +458,7 @@ def launcher_text(prefix: Path, home: Path, node: str, manifest: dict, name: str
     if manifest["missing_extensions"]:
         lines += incomplete_lines(manifest, name)
     else:
-        flags = " ".join(f"--extension '{prefix / 'extensions' / rel}'" for rel in ROOT_EXTENSIONS)
+        flags = " ".join(f"--extension '{extension_path(prefix, rel)}'" for rel in ROOT_ENTRIES)
         provider, model, thinking = root_route(prefix)
         # Inside a git repo every start is a loop run with its own run dir, so concurrent loops
         # never share a before-snapshot. --plain skips it for an ordinary session.
@@ -498,7 +530,7 @@ def frontmatter_list(text: str, key: str) -> Optional[List[str]]:
 
 def check_agent_extensions(prefix: Path) -> None:
     """Every agent file's `extensions:` allowlist names only AGENT_EXTENSIONS entries of this build."""
-    allowed = {form + "/extensions/" + rel for rel in AGENT_EXTENSIONS for form in ("{{PREFIX}}", str(prefix))}
+    allowed = {f"{form}/{rel}" for rel in AGENT_EXTENSIONS for form in ("{{PREFIX}}", str(prefix))}
     for path in sorted((prefix / "home/agents").glob("*.md")):
         extra = [item for item in frontmatter_list(path.read_text(), "extensions") or [] if item not in allowed]
         if extra:
@@ -528,9 +560,13 @@ def check_hook_scripts(prefix: Path) -> None:
 def smoke_extensions(prefix: Path, node: str, entries: Tuple[str, ...]) -> None:
     """Load the entries in a throwaway pi home (RPC mode) and require pi to answer get_commands."""
     with tempfile.TemporaryDirectory(prefix="loop-pi-smoke-") as home:
-        env = {**os.environ, "PI_CODING_AGENT_DIR": home, "PI_SUBAGENTS_TEMP_ROOT": f"{home}/tmp",
-               "PI_OFFLINE": "1", "PI_SKIP_VERSION_CHECK": "1", "PI_TELEMETRY": "0"}
-        flags = [arg for rel in entries for arg in ("--extension", str(prefix / "extensions" / rel))]
+        # Never export from a smoke: drop the caller's telemetry settings and point the telemetry
+        # extension's config lookup (XDG_CONFIG_HOME/agento11y/config.env) at the empty home.
+        inherited = {key: value for key, value in os.environ.items()
+                     if not key.startswith(("AGENTO11Y_", "SIGIL_", "OTEL_"))}
+        env = {**inherited, "PI_CODING_AGENT_DIR": home, "PI_SUBAGENTS_TEMP_ROOT": f"{home}/tmp",
+               "PI_OFFLINE": "1", "PI_SKIP_VERSION_CHECK": "1", "PI_TELEMETRY": "0", "XDG_CONFIG_HOME": home}
+        flags = [arg for rel in entries for arg in ("--extension", str(extension_path(prefix, rel)))]
         proc = subprocess.Popen([node, str(prefix / PI_CLI), "--mode", "rpc", "--no-session", *flags],
                                 cwd=home, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, text=True)
@@ -567,9 +603,10 @@ def validate(prefix: Path, pin: Dict[str, str], node: str, allow_missing: bool) 
     check_hook_scripts(prefix)
     check_agent_set(prefix)
     check_agent_extensions(prefix)
+    telemetry_export_timeout_ms(prefix)
     check_model_family(prefix)
     if not missing:
-        smoke_extensions(prefix, node, ROOT_EXTENSIONS)
+        smoke_extensions(prefix, node, ROOT_ENTRIES)
         smoke_extensions(prefix, node, tuple(dict.fromkeys(LANE_EXTENSIONS + AGENT_EXTENSIONS)))
     return missing
 
@@ -604,7 +641,7 @@ def build(data: Path, label: str, files: List[Tuple[str, Path]], pin: Dict[str, 
         apply_overlay_settings(staging)
         render_policy(staging, policy_source)
         shutil.rmtree(staging / "overlay", ignore_errors=True)
-        run(["npm", "ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"], staging)
+        run(["npm", "ci", "--omit=dev", "--omit=peer", "--ignore-scripts", "--no-audit", "--no-fund"], staging)
         missing = validate(staging, pin, node, allow_missing)
     except BaseException:
         # The staging tree holds only copies of source and overlay files, and npm output.
