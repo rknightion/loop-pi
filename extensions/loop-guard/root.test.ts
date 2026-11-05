@@ -541,7 +541,7 @@ test("root: a single launch carries requireLauncher {nopush, preflight digest}, 
   const { resolveSubagentLaunchContract } = await import("pi-subagents/preflight");
   const fake = fakeApi();
   rootExtension(fake.api as any);
-  const { ctx } = fakeCtx(agentDir);
+  const { ctx } = fakeCtx(agentDir, `pin-${Math.random()}`);
   await fake.handlers.get("session_start")![0]({}, ctx);
   const handler = toolCallHandler(fake.handlers);
   const launch = (input: Record<string, unknown>) => handler({ type: "tool_call", toolCallId: "1", toolName: "subagent", input }, ctx);
@@ -597,5 +597,49 @@ test("root and lane: a subagent_launch call is refused", async () => {
       { type: "tool_call", toolCallId: "1", toolName: "subagent_launch", input: { workflowRunId: "w", key: "k", agent: "worker", task: "x" } }, ctx);
     assert.equal(result?.block, true);
     assert.match(result?.reason ?? "", /`subagent_launch` \(a workflow child start\) is refused/);
+  }
+});
+
+test("root: the pin refreshes only when the managed receipt's label changes", async () => {
+  const { resolveSubagentLaunchContract } = await import("pi-subagents/preflight");
+  const home = await mkdtemp(join(tmpdir(), "loop-guard-root-repin-"));
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  try {
+    process.env.PI_CODING_AGENT_DIR = home;
+    writeLaneAgents(home);
+    const receipt = join(home, ".loop-pi-managed.json");
+    await writeFile(receipt, JSON.stringify({ label: "1.0.0-one", files: ["agents/worker.md"] }));
+    const digest = async () => {
+      const contract = await resolveSubagentLaunchContract({ agent: "worker", cwd: home });
+      assert.ok(contract.ok);
+      return contract.contract.agent.definitionDigest;
+    };
+    const first = await digest();
+    const fake = fakeApi();
+    rootExtension(fake.api as any);
+    const { ctx } = fakeCtx(home, `repin-${Math.random()}`);
+    await fake.handlers.get("session_start")![0]({}, ctx);
+    const handler = toolCallHandler(fake.handlers);
+    const pinned = async () => {
+      const input: Record<string, unknown> = { agent: "worker", task: "x" };
+      const verdict = await handler({ type: "tool_call", toolCallId: "1", toolName: "subagent", input }, ctx);
+      assert.equal(verdict?.block ?? false, false, verdict?.reason);
+      return (input.requireLauncher as { definitionDigest: string }).definitionDigest;
+    };
+    assert.equal(await pinned(), first);
+    await writeFile(join(home, "agents", "worker.md"), "---\nname: worker\ndescription: Edited\ntools: read\nextensions: []\nlauncher: nopush\n---\n\nEdited.\n");
+    const edited = await digest();
+    assert.notEqual(edited, first);
+    assert.equal(await pinned(), first, "a hand edit with the same label keeps the old pin");
+    await rm(receipt);
+    assert.equal(await pinned(), first, "a missing receipt keeps the old pin");
+    await writeFile(receipt, "{not json");
+    assert.equal(await pinned(), first, "an unreadable receipt keeps the old pin");
+    await writeFile(receipt, JSON.stringify({ label: "1.0.0-two", files: ["agents/worker.md"] }));
+    assert.equal(await pinned(), edited, "a new label re-pins from disk");
+  } finally {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+    await rm(home, { recursive: true, force: true });
   }
 });

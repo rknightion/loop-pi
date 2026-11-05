@@ -3,10 +3,10 @@
 // starts, using pi-subagents' own preflight (the digest `requireLauncher` is documented against),
 // and every root launch then carries `requireLauncher: {name: "nopush", definitionDigest}`.
 // pi-subagents refuses the launch unless the agent it resolves runs under that launcher with that
-// exact definition: an agent file edited after the root started, a definition that shadows the
+// exact definition: an agent file edited without a managed reinstall, a definition that shadows the
 // shipped one, or an agent that names no launcher are all refused by the package itself.
 
-import { realpathSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { resolveSubagentLaunchContract } from "pi-subagents/preflight";
@@ -68,4 +68,19 @@ export function unpinnedLaneReason(agent: string, reason: string): string {
     `loop-guard: lane agent '${agent}' could not be pinned to launcher '${LANE_LAUNCHER}' when this root started ` +
     `(${reason}), so it cannot be launched. Fix the installed agent file and restart the root.`
   );
+}
+
+/** The installer's receipt in the home (bin/loop-pi-install HOME_MANIFEST). */
+export const MANAGED_MANIFEST = ".loop-pi-managed.json";
+
+/** The build label of the last managed install into this home, or undefined when the receipt is
+ *  missing, unreadable or carries no label. A changed label means a managed reinstall replaced the
+ *  agent files, so the root re-pins them; an agent file edited without one keeps its old pin. */
+export function readManagedLabel(): string | undefined {
+  try {
+    const receipt = JSON.parse(readFileSync(join(getAgentDir(), MANAGED_MANIFEST), "utf8")) as { label?: unknown } | null;
+    return typeof receipt?.label === "string" && receipt.label !== "" ? receipt.label : undefined;
+  } catch {
+    return undefined;
+  }
 }

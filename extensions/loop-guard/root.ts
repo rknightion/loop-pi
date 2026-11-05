@@ -17,7 +17,7 @@ import { deleteSubagentField, disableSteeringRecovery } from "./subagent-view.ts
 import { installRequestCeiling, installRetryBackoff } from "../request-ceiling/index.ts";
 import { bindLaneIdentity } from "./push-grant.ts";
 import { C3_AGENTS, SUBAGENT_LAUNCH_TOOL, evaluateBashCommand, evaluateBgWait, evaluateBriefHeader, evaluateSubagentCall, evaluateSubagentLaunchTool, evaluateWatchProcess, isAsyncSubagentLaunch, isSubagentLaunch, wrappedGateCommands, bindGateExecution } from "./rules.ts";
-import { bindRequiredLauncher, pinLaneDefinitions, unpinnedLaneReason, type LanePin } from "./launcher-pin.ts";
+import { bindRequiredLauncher, pinLaneDefinitions, readManagedLabel, unpinnedLaneReason, type LanePin } from "./launcher-pin.ts";
 import { loadGateDeclarations } from "./gates.ts";
 import { isSubagentWakeRun } from "../loop-continuation/state.ts";
 import { bashProtectedPath, protoActive, runDirFromEnv, toolWriteRefusal } from "./guard-paths.ts";
@@ -71,9 +71,15 @@ export default function (pi: ExtensionAPI) {
 
   // Each lane agent's definition digest, pinned when the session starts (launcher-pin.ts), or at the
   // first launch if no session start was seen.
+  // The pin is refreshed only when the installer's receipt names a new build label (a managed
+  // reinstall); an agent file edited without one keeps the old pin and is refused by the package.
   let lanePins: Promise<Map<string, LanePin>> | undefined;
-  const pinLanes = (ctx: ExtensionContext) =>
-    pinLaneDefinitions(C3_AGENTS, ctx.cwd, typeof ctx.isProjectTrusted === "function" ? ctx.isProjectTrusted() : undefined);
+  let pinnedLabel: string | undefined;
+  const pinLanes = (ctx: ExtensionContext) => {
+    // Read the label before the files, so an install that lands mid-pin is seen at the next launch.
+    pinnedLabel = readManagedLabel();
+    return pinLaneDefinitions(C3_AGENTS, ctx.cwd, typeof ctx.isProjectTrusted === "function" ? ctx.isProjectTrusted() : undefined);
+  };
 
   // Runs `subagent:async-complete` already named, so a late launch result is not tracked as live.
   const completedRuns = new Set<string>();
@@ -325,7 +331,9 @@ export default function (pi: ExtensionAPI) {
       }
       if (singleLaunch && agent !== undefined) {
         // A model-supplied binding inside pi-subagents 0.77.0 `options` would conflict with the bound one.
-        lanePins ??= pinLanes(ctx);
+        const label = readManagedLabel();
+        // A missing or unreadable receipt is no reason to re-pin.
+        if (lanePins === undefined || (label !== undefined && label !== pinnedLabel)) lanePins = pinLanes(ctx);
         const pin = (await lanePins).get(agent) ?? { error: "it is not a lane agent" };
         if ("error" in pin) return { block: true, reason: unpinnedLaneReason(agent, pin.error) };
         bindRequiredLauncher(input, pin.digest);

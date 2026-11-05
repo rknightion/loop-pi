@@ -146,8 +146,11 @@ public statement of those contracts.
   replacing any model-supplied copy at the top level or in `options`; any other launch shape is
   refused. The package refuses the launch when the agent it resolves names no launcher, another
   launcher, or a definition whose digest differs (an agent file edited after the root started, or
-  one that shadows the installed file). A reinstall that changes an agent file therefore refuses
-  that agent's launches until the root restarts or reloads its session. The recovery descriptor
+  one that shadows the installed file). The root records the `label` of the installer's receipt
+  (`<home>/.loop-pi-managed.json`) when it pins. Before each launch it re-reads the receipt; a new
+  label (a managed reinstall, allowed while a root runs) re-pins all five agents from disk, with
+  the same `agents/` check. An unchanged label keeps the pin, so an agent file edited by hand is
+  still refused; a missing or unreadable receipt also keeps the pin. The recovery descriptor
   records the requirement and `action: "resume"` carries it forward (0.85.0 #3137/#3163), so a
   resumed lane runs under `nopush` and is refused if the definition changed since.
   `launcher-pin.e2e.test.ts` proves each case on the pinned runtime. Nested lane launches are not

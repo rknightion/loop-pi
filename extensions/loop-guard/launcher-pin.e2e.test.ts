@@ -53,7 +53,13 @@ function nopushHome(agents: Record<string, boolean>): Fixture {
   }));
   writeFileSync(join(agentDir, "extensions", "subagent", "config.json"), JSON.stringify({ runnerLaunchers: { nopush: [NOPUSH] } }));
   for (const [name, launcher] of Object.entries(agents)) writeFileSync(join(agentDir, "agents", `${name}.md`), agentFile(name, launcher));
+  writeManagedReceipt(agentDir, "0.0.0-fixture-one", Object.keys(agents));
   return { agentDir, subagentTemp: freshDir("launcher-pin-sub-"), cwd: freshDir("launcher-pin-cwd-") };
+}
+
+/** The installer's receipt (`.loop-pi-managed.json`): a new label is a managed reinstall. */
+function writeManagedReceipt(agentDir: string, label: string, agents: string[]): void {
+  writeFileSync(join(agentDir, ".loop-pi-managed.json"), JSON.stringify({ label, files: agents.map((name) => `agents/${name}.md`) }));
 }
 
 /** The digest pi-subagents' preflight computes for `agent` in this home, from a separate process. */
@@ -139,7 +145,7 @@ for (const role of ["root", "lane"] as const) {
   });
 }
 
-test("root: a lane launch is pinned to nopush and its definition digest; a resume keeps nopush; a changed definition is refused", { timeout: 150_000 }, async () => {
+test("root: a lane launch is pinned to nopush and its definition digest; a resume keeps nopush; a hand-edited definition is refused; a managed reinstall re-pins", { timeout: 150_000 }, async () => {
   const f = nopushHome({ worker: true });
   const latest = join(freshDir("launcher-pin-stub-"), "latest-run.ts");
   writeFileSync(latest, `export default function (pi) {
@@ -156,6 +162,7 @@ test("root: a lane launch is pinned to nopush and its definition digest; a resum
       { match: "LAUNCH_ONE", once: true, toolCalls: [{ name: "subagent", args: { agent: "worker", task: "PIN_CHILD_ONE", async: true, options: { requireLauncher: forged } } }] },
       { match: "RESUME_ONE", once: true, toolCalls: [{ name: "subagent", args: { action: "resume", id: "LATEST_TEST_RUN", message: "RESUME_MSG" } }] },
       { match: "LAUNCH_CHANGED", once: true, toolCalls: [{ name: "subagent", args: { agent: "worker", task: "PIN_CHILD_CHANGED", async: true } }] },
+      { match: "LAUNCH_REINSTALLED", once: true, toolCalls: [{ name: "subagent", args: { agent: "worker", task: "PIN_CHILD_REINSTALLED", async: true } }] },
       { match: ".*", text: "ok" },
     ]),
     agentDir: f.agentDir, subagentTempRoot: f.subagentTemp, cwd: f.cwd,
@@ -203,6 +210,20 @@ test("root: a lane launch is pinned to nopush and its definition digest; a resum
     assert.equal(changed.isError, true, `a changed definition must be refused: ${text(changed)}`);
     assert.match(text(changed), new RegExp(`definition digest is [0-9a-f]{64}, but the call requires ${shipped}`));
     assert.equal(runs(f).length, before, "the refused launch started no run");
+
+    // A managed reinstall (a new build label in the installer's receipt) re-pins from disk: the same
+    // edited definition now launches, carrying its new digest.
+    const reinstalled = preflightDigest(f, "worker");
+    writeManagedReceipt(f.agentDir, "0.0.0-fixture-two", ["worker"]);
+    from = session.events.length;
+    session.send({ id: "reinstalled", type: "prompt", message: "LAUNCH_REINSTALLED", streamingBehavior: "followUp" });
+    const relaunch = await toolEndFor(session, "subagent", from);
+    assert.notEqual(relaunch.isError, true, `a reinstalled definition must launch: ${text(relaunch)}`);
+    const third = runIdOf(relaunch);
+    expectDetachedRuns(f.subagentTemp, 3);
+    assert.equal((await completedStatus(f, third)).launcher?.name, "nopush");
+    assert.deepEqual(recoveryDescriptor(f, third).requiredLauncher, { name: "nopush", definitionDigest: reinstalled },
+      "the re-pinned requirement carries the reinstalled digest");
   } finally {
     await session.close();
   }
