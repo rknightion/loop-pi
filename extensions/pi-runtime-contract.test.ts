@@ -1,7 +1,7 @@
 // Pinned pi runtime behaviour loop-pi relies on, proved through the real CLI over RPC with the
 // public faux provider: no live homes, credentials or model calls.
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { cleanupAll, FAUX_EXTENSION, freshDir, startPiRpc, writeFauxScript } from "./loop-guard/rpc-test-helpers.ts";
@@ -47,7 +47,8 @@ test("setActiveTools treats the active tools as a set: reordering the same names
 test("a saved do-not-trust decision is honoured for a folder with no trust-requiring resources", async () => {
   const facts = join(freshDir("pi-contract-facts-"), "facts.jsonl");
   const agentDir = freshDir("pi-contract-home-");
-  const repo = freshDir("pi-contract-repo-");
+  // pi keys trust by the canonical path (macOS temp dirs sit behind the /var -> /private/var link).
+  const repo = realpathSync(freshDir("pi-contract-repo-"));
   writeFileSync(join(repo, "AGENTS.md"), "# Fixture\n");
   writeFileSync(join(agentDir, "trust.json"), JSON.stringify({ [repo]: false }));
   const extension = probe(facts, `pi.on("session_start", (_e, ctx) => record({ trusted: ctx.isProjectTrusted() }));`);
