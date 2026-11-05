@@ -148,10 +148,13 @@ test("root, lane and nested lane each export their own generations through the a
   assert.ok(received.some((r) => r.path === "/otlp/v1/traces"), "OTLP traces reach the sink");
   const all = generations(received);
   const byMarker = (marker: string) => new Set(all.filter((g) => g.raw.includes(marker)).map((g) => g.conversation));
-  const [root, senior, scout] = [byMarker(`${MARK}-root`), byMarker(`${MARK}-senior`), byMarker(`${MARK}-scout`)];
+  // A parent's tool call carries its child's brief, so each child's own conversation is the one
+  // its marker reaches that is not an ancestor's.
+  const root = byMarker(`${MARK}-root`);
+  const senior = new Set([...byMarker(`${MARK}-senior`)].filter((id) => !root.has(id)));
+  const scout = new Set([...byMarker(`${MARK}-scout`)].filter((id) => !root.has(id) && !senior.has(id)));
   // Content capture follows the config file (full here): each brief's text is in its own generation.
-  assert.ok(root.size && senior.size && scout.size, `generations per session: ${JSON.stringify([...root, ...senior, ...scout])}`);
-  assert.equal(new Set([...root, ...senior, ...scout]).size, 3, "root, lane and nested lane are separate conversations");
+  assert.deepEqual([root.size, senior.size, scout.size], [1, 1, 1], `conversations per session: ${JSON.stringify([...root, ...senior, ...scout])}`);
   // Lanes flush during their own session_shutdown, before the runner exits.
   const laneGenerations = all.filter((g) => senior.has(g.conversation) || scout.has(g.conversation));
   assert.ok(laneGenerations.length > 0 && laneGenerations.every((g) => g.at <= terminal), "lane generations arrived before the lane run was terminal");

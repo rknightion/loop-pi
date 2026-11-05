@@ -1121,6 +1121,9 @@ class InstallerTests(unittest.TestCase):
         (prefix / "home/agents/scout.md").write_text("---\nname: scout\nextensions:\n  - /elsewhere/ext.ts\n---\n")
         with self.assertRaisesRegex(m.InstallError, "scout"):
             m.check_agent_extensions(prefix)
+        (prefix / "home/agents/scout.md").write_text("---\nname: scout\ntools: read\n---\n")
+        with self.assertRaisesRegex(m.InstallError, "scout must set extensions"):
+            m.check_agent_extensions(prefix)
 
     def test_telemetry_export_bound_comes_from_settings_and_is_range_checked(self):
         self.assertEqual(m.telemetry_export_timeout_ms(fake_prefix(self.tmp)), 2000)

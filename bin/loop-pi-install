@@ -529,10 +529,14 @@ def frontmatter_list(text: str, key: str) -> Optional[List[str]]:
 
 
 def check_agent_extensions(prefix: Path) -> None:
-    """Every agent file's `extensions:` allowlist names only AGENT_EXTENSIONS entries of this build."""
+    """Every agent file sets `extensions:` and names only AGENT_EXTENSIONS entries of this build. An
+    omitted key would load every ambient extension into the child."""
     allowed = {f"{form}/{rel}" for rel in AGENT_EXTENSIONS for form in ("{{PREFIX}}", str(prefix))}
     for path in sorted((prefix / "home/agents").glob("*.md")):
-        extra = [item for item in frontmatter_list(path.read_text(), "extensions") or [] if item not in allowed]
+        listed = frontmatter_list(path.read_text(), "extensions")
+        if listed is None:
+            raise InstallError(f"agent {path.stem} must set extensions: (an omitted key loads every ambient extension)")
+        extra = [item for item in listed if item not in allowed]
         if extra:
             raise InstallError(f"agent {path.stem} lists extensions outside the allowlist: {', '.join(extra)}")
 
