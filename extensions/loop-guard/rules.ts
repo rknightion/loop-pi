@@ -55,7 +55,7 @@ function block(reason: string): Decision {
 // re-freezing SEAMS.md first. `senior` is the only parent (depth 2); the rest are leaves. The
 // export keeps its C3 name for the callers that import it.
 // ---------------------------------------------------------------------------
-export const C3_AGENTS: ReadonlySet<string> = new Set(["worker", "senior", "senior-escalation", "reviewer", "scout"]);
+export const C3_AGENTS: ReadonlySet<string> = new Set(["worker", "composer", "senior", "senior-escalation", "reviewer", "scout"]);
 
 // ---------------------------------------------------------------------------
 // Lexer

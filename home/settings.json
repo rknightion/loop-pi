@@ -3,6 +3,7 @@
   "enableInstallTelemetry": false,
   "enabledModels": [
     "openai/gpt-6.1-sol",
+    "openai/gpt-6.1-terra",
     "openai/gpt-6-astra"
   ],
   "httpIdleTimeoutMs": 300000,

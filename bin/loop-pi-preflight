@@ -23,6 +23,7 @@ import sys
 
 C3_AGENTS = {
     "worker",
+    "composer",
     "senior",
     "senior-escalation",
     "reviewer",

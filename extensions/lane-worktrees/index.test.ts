@@ -852,7 +852,7 @@ test("native naming never repairs malformed lane metadata or changes explicit sh
 
 // A governed implementation lane that is not retained runs in the shared checkout (or a package
 // worktree deleted on completion), so the root's own `cd <tree> && gate` is refused mid-lane.
-const IMPLEMENTATION_AGENTS = ["worker", "senior", "senior-escalation"] as const;
+const IMPLEMENTATION_AGENTS = ["worker", "composer", "senior", "senior-escalation"] as const;
 
 test("a governed implementation lane without a retained worktree is refused with the fix spelled out", async () => {
   const s = setup();

@@ -547,7 +547,7 @@ class NopushNativeCanary(unittest.TestCase):
         agents.mkdir(parents=True)
         for name in ("worker", "senior"):
             text = (HERE.parent / "home/agents" / f"{name}.md").read_text()
-            text = text.replace("model: openai/gpt-6.1-sol", "model: faux/faux-1")
+            text = re.sub(r"(?m)^model: openai/.*$", "model: faux/faux-1", text)
             # Keep the shipped `extensions:` allowlist line; the faux provider rides as a child-only extension.
             text = re.sub(r"(?m)^(extensions:.*)$", lambda match: f"{match.group(1)}\nsubagentOnlyExtensions: {faux}", text, count=1)
             (agents / f"{name}.md").write_text(text)
@@ -1129,7 +1129,7 @@ class InstallerTests(unittest.TestCase):
             (prefix / "home/lane-policy.md").write_text((m.SRC / "home/lane-policy.md").read_text())
             plan = m.home_plan(prefix, home, {})
             rendered.append({rel: data for rel, data in plan.items() if rel.startswith("agents/")})
-        self.assertEqual(len(rendered[0]), 5)
+        self.assertEqual(len(rendered[0]), 6)
         self.assertEqual(rendered[0], rendered[1])
 
     def test_telemetry_loads_in_the_root_by_flag_and_in_lanes_through_the_home_link(self):
@@ -1225,7 +1225,7 @@ class InstallerTests(unittest.TestCase):
                     m.telemetry_export_timeout_ms(prefix)
 
     def test_the_installed_agent_set_is_the_v3_roster(self):
-        self.assertEqual(m.AGENT_SET, {"worker", "senior", "senior-escalation", "reviewer", "scout"})
+        self.assertEqual(m.AGENT_SET, {"worker", "composer", "senior", "senior-escalation", "reviewer", "scout"})
         prefix = fake_prefix(self.tmp)
         agents = prefix / "home/agents"
         agents.mkdir(parents=True)
@@ -1297,11 +1297,12 @@ class InstallerTests(unittest.TestCase):
         apply(prefix, tgt)
         # SEAMS S4: model and thinking per role, in the source file and in the installed copy.
         for name, model, thinking in (
-            ("worker", "gpt-6.1-sol", "medium"),
+            ("worker", "gpt-6.1-terra", "high"),
+            ("composer", "gpt-6.1-terra", "high"),
             ("senior", "gpt-6.1-sol", "high"),
             ("senior-escalation", "gpt-6-astra", "high"),
             ("reviewer", "gpt-6.1-sol", "high"),
-            ("scout", "gpt-6.1-sol", "low"),
+            ("scout", "gpt-6.1-terra", "medium"),
         ):
             source = (m.SRC / "home/agents" / f"{name}.md").read_text()
             installed = (tgt.home / "agents" / f"{name}.md").read_text()
@@ -1324,6 +1325,7 @@ class InstallerTests(unittest.TestCase):
         read = "read, grep, find, ls, bash"
         expected = {
             "worker": (write, "14400000"),
+            "composer": (write, "14400000"),
             "senior": (write + ", subagent", "14400000"),
             "senior-escalation": (write, "14400000"),
             "reviewer": (read, "7200000"),
@@ -1463,6 +1465,8 @@ class InstallerTests(unittest.TestCase):
         (prefix / "home/agents").mkdir()
         for name in m.AGENT_SET:
             (prefix / "home/agents" / f"{name}.md").write_text("---\nname: x\nmodel: openai/gpt-6-astra\n---\n")
+        m.check_model_family(prefix)
+        (prefix / "home/agents/scout.md").write_text("---\nname: scout\nmodel: openai/gpt-6.1-terra\n---\n")
         m.check_model_family(prefix)
         (prefix / "home/agents/scout.md").write_text("---\nname: scout\nmodel: openai/gpt-5.6-luna\n---\n")
         with self.assertRaisesRegex(m.InstallError, "scout"):
@@ -1644,6 +1648,8 @@ LANE_RETURN_V3 = """```lane-return
  "check":"<exact command>","exit":<int>|null,"tail":"<last lines, at most 40>",
  "questions":["<short; details in return.md>"]}
 ```"""
+# A composer always returns its local commit, so its block carries "sha" in place of the patch fields.
+LANE_RETURN_V3_SHA = LANE_RETURN_V3.replace('"patch":"<abs path>","patch_sha256":"<hex>",', '"sha":"<full SHA>",')
 
 
 class AgentReturnContractTests(unittest.TestCase):
@@ -1657,7 +1663,8 @@ class AgentReturnContractTests(unittest.TestCase):
         for path in agents:
             text = path.read_text()
             self.assertNotIn("Return exactly:", text, path.name)
-            self.assertEqual(text.count(LANE_RETURN_V3), 1, f"{path.name} lacks the exact lane-return v3 block")
+            block = LANE_RETURN_V3_SHA if path.stem == "composer" else LANE_RETURN_V3
+            self.assertEqual(text.count(block), 1, f"{path.name} lacks the exact lane-return v3 block")
             self.assertNotIn('"v":2', text, path.name)
             self.assertNotIn("coderabbit", text.lower(), path.name)
             # loop-state's return cap reads these sentences: the whole serialized block must fit the

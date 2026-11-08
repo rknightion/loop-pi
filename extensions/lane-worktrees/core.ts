@@ -25,7 +25,7 @@ export function parseLaneBrief(task: unknown): LaneBrief | null {
 }
 
 /** Agents whose governed launches write code and so must run in a retained lane tree. */
-export const IMPLEMENTATION_AGENTS: ReadonlySet<string> = new Set(["worker", "senior", "senior-escalation"]);
+export const IMPLEMENTATION_AGENTS: ReadonlySet<string> = new Set(["worker", "composer", "senior", "senior-escalation"]);
 
 /** The refusal for a governed implementation launch that would not run in a retained lane tree. */
 export function unretainedLaneReason(agent: string, lane: string): string {

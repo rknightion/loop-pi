@@ -497,7 +497,7 @@ test("root: a launch whose first line fails the brief header parse is refused wi
 
   await writeFile(join(runDir, "loop-pi-proto"), "2\n", "utf8");
   const armed = make();
-  for (const agent of ["worker", "senior", "senior-escalation", "reviewer", "scout"]) {
+  for (const agent of ["worker", "composer", "senior", "senior-escalation", "reviewer", "scout"]) {
     for (const task of drifted) {
       const result = await armed({ agent, task });
       assert.equal(result?.block, true, `${agent}: ${task}`);
@@ -520,7 +520,7 @@ test("session ceiling contains exactly the root roster, refreshes and disposes",
   const { ctx, notifications } = fakeCtx(agentDir, first);
   const start = handlers.get("session_start")![0];
   await start({}, ctx);
-  const expected = { version: 1, allowedAgents: ["reviewer", "scout", "senior", "senior-escalation", "worker"], denyExtensions: false, sources: ["loop-guard"] };
+  const expected = { version: 1, allowedAgents: ["composer", "reviewer", "scout", "senior", "senior-escalation", "worker"], denyExtensions: false, sources: ["loop-guard"] };
   assert.deepEqual(resolveCurrentSubagentCapabilityCeiling(first), expected);
   await start({}, ctx);
   assert.deepEqual(resolveCurrentSubagentCapabilityCeiling(first), expected);
@@ -546,7 +546,7 @@ test("root: a single launch carries requireLauncher {nopush, preflight digest}, 
   const handler = toolCallHandler(fake.handlers);
   const launch = (input: Record<string, unknown>) => handler({ type: "tool_call", toolCallId: "1", toolName: "subagent", input }, ctx);
   const forged = { name: "other", definitionDigest: "0".repeat(64) };
-  for (const agent of ["worker", "senior", "senior-escalation", "reviewer", "scout"]) {
+  for (const agent of ["worker", "composer", "senior", "senior-escalation", "reviewer", "scout"]) {
     const contract = await resolveSubagentLaunchContract({ agent, cwd: agentDir });
     assert.ok(contract.ok, agent);
     const expected = { name: "nopush", definitionDigest: contract.contract.agent.definitionDigest };

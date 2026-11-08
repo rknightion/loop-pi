@@ -68,6 +68,9 @@ blocked):
     git add -N -- <each new file> && git diff --binary <base> > <run dir>/<lane>/candidate.patch
     shasum -a 256 <run dir>/<lane>/candidate.patch
 
+A `composer`, or a senior on a compose or board brief, commits locally instead and returns the full
+commit SHA as `"sha"`, with no patch fields.
+
 Put full logs, findings and questions in `<run dir>/<lane>/return.md`. Your final message starts
 with the `lane-return` block (compact JSON, at most 1,800 characters), then at most a few prose
 lines. Nothing comes before it: no progress notes.

@@ -7,7 +7,7 @@
 // Retention touches `cwd`, `isolation` and `worktree`. Governed native/default allocations instead
 // bind an opaque `lane.key` through the pinned package's public naming seam, keeping the original
 // lane/task/run mapping in extension state. Brief text and guard-owned `extensionBindings` stay intact.
-// Governed `worker`, `senior` and `senior-escalation` launches never take the native path: they are
+// Governed `worker`, `composer`, `senior` and `senior-escalation` launches never take the native path: they are
 // refused unless retained (worktree:true plus a Landing line, or a cwd inside the lane's kept tree).
 //
 // A worktree with uncommitted changes (`git status --porcelain` not empty) is never removed: it is

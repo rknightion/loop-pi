@@ -1,9 +1,9 @@
 ---
 name: worker
-description: WORKER lane: implements one task in its own worktree and hands back an uncommitted candidate.
+description: WORKER lane: the default route for every task, guarded paths included. One task in its own worktree, proven red then green, handed back as an uncommitted candidate.
 advertise: true
-model: openai/gpt-6.1-sol
-thinking: medium
+model: openai/gpt-6.1-terra
+thinking: high
 tools: read, bash, edit, write, grep, find, ls, watch_process
 extensions: {{HOME}}/vendor/agento11y-pi/dist/index.js
 systemPromptMode: append

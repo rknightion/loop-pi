@@ -808,7 +808,7 @@ test("hasUnextractedSubstitution: true for a raw backtick", () => {
 // ---------------------------------------------------------------------------
 
 test("C3_AGENTS is the v3 roster exactly", () => {
-  assert.deepEqual([...C3_AGENTS].sort(), ["reviewer", "scout", "senior", "senior-escalation", "worker"]);
+  assert.deepEqual([...C3_AGENTS].sort(), ["composer", "reviewer", "scout", "senior", "senior-escalation", "worker"]);
 });
 
 for (const agent of C3_AGENTS) {

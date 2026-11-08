@@ -96,10 +96,10 @@ RETIRED_LAUNCHER_MARKER = b"--provider loop-dispatch "
 MIN_NODE = (22, 19, 0)
 # Fixed discovery order, independent of the installing shell (Homebrew first).
 NODE_CANDIDATES = ("/opt/homebrew/bin/node", "/usr/local/bin/node", "/usr/bin/node")
-AGENT_SET = {"worker", "senior", "senior-escalation", "reviewer", "scout"}
+AGENT_SET = {"worker", "composer", "senior", "senior-escalation", "reviewer", "scout"}
 SMOKE_COMMAND = "loop-closeout"
 # Defaults for settings.json `loopPi`; the extensions use the same ones (model-family.ts).
-DEFAULT_FAMILY = {"provider": "openai", "pattern": r"^(gpt-6\.1-sol|gpt-6-astra)$", "name": "gpt-6"}
+DEFAULT_FAMILY = {"provider": "openai", "pattern": r"^(gpt-6\.1-sol|gpt-6\.1-terra|gpt-6-astra)$", "name": "gpt-6"}
 DEFAULT_ROOT_ROUTE = {"provider": "openai", "model": "gpt-6.1-sol", "thinking": "high"}
 EXCLUDED_PARTS = {"node_modules", "__tests__", "test-support", "fixtures"}
 

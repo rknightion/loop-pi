@@ -33,7 +33,7 @@ for (const resumable of [false, true]) test(`installed lifecycle and restart cap
   mkdirSync(join(agentDir, "agents"));
   writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [PI_SUBAGENTS_PACKAGE_DIR], subagents: { agentExcludeDirs: ["~/.agents"] } }));
   // The package-native allocation path (no Landing the extension retains for) is no longer open to
-  // worker, senior or senior-escalation launches, which lane-worktrees refuses unless retained; scout
+  // worker, composer, senior or senior-escalation launches, which lane-worktrees refuses unless retained; scout
   // still reaches it, so this fixture drives the native patch lifecycle through a scout.
   writeFileSync(join(agentDir, "agents", "scout.md"), [
     "---", "name: scout", "description: Patch lifecycle fixture", "tools: bash", "extensions: []",

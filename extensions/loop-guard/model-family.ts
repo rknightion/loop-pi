@@ -1,4 +1,4 @@
-// loop-pi runs one model family only: by default exactly gpt-6.1-sol and gpt-6-astra on the
+// loop-pi runs one model family only: by default exactly gpt-6.1-sol, gpt-6.1-terra and gpt-6-astra on the
 // `openai` provider, or whatever settings.json `loopPi.modelFamily` names. Loaded by both loop-guard entries, so the
 // root and every lane refuse a model outside the family three ways: a `subagent` call carrying a
 // model (or run-deadline) override is blocked by subagentOverrideBlock in each entry's tool_call
@@ -17,7 +17,7 @@ type ModelRef = { provider: string; id: string };
 
 /** The allowed family and the route to fall back to, from the home's settings.json `loopPi` block:
  *  `modelFamily: {provider, pattern, name, members}` and `rootRoute: {provider, model, thinking}`.
- *  Every field defaults to gpt-6.1-sol and gpt-6-astra on the `openai` provider. */
+ *  Every field defaults to gpt-6.1-sol, gpt-6.1-terra and gpt-6-astra on the `openai` provider. */
 export interface ModelFamilyConfig {
   provider: string;
   pattern: RegExp;
@@ -28,9 +28,9 @@ export interface ModelFamilyConfig {
 
 const DEFAULT_FAMILY = {
   provider: "openai",
-  pattern: "^(gpt-6\\.1-sol|gpt-6-astra)$",
+  pattern: "^(gpt-6\\.1-sol|gpt-6\\.1-terra|gpt-6-astra)$",
   name: "gpt-6",
-  members: ["gpt-6.1-sol", "gpt-6-astra"],
+  members: ["gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra"],
 };
 const DEFAULT_ROOT_ROUTE = { provider: "openai", model: "gpt-6.1-sol" };
 
@@ -46,9 +46,10 @@ export function modelFamilyConfig(settings: unknown): ModelFamilyConfig {
   } catch {
     return modelFamilyConfig({});
   }
+  // A pattern-only overlay reports the default members it actually admits.
   const members = Array.isArray(family.members) && family.members.every((m: unknown) => typeof m === "string")
     ? family.members
-    : DEFAULT_FAMILY.members;
+    : DEFAULT_FAMILY.members.filter((m) => pattern.test(m));
   return {
     provider: text(family.provider, DEFAULT_FAMILY.provider),
     pattern,
@@ -149,7 +150,7 @@ export function subagentOverrideBlock(
       block: true,
       reason:
         `loop-guard: pass no model override to subagent; agent files pin the ${config.name} family route ` +
-        `(${config.members.join(", ")}). Refused: ${models.join(", ")}`,
+        `(${config.members.length ? config.members.join(", ") : config.pattern.source}). Refused: ${models.join(", ")}`,
     };
   }
   const deadlines = deadlineOverrides(input);

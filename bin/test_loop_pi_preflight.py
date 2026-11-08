@@ -18,6 +18,7 @@ SCRIPT = os.path.join(HERE, "loop-pi-preflight")
 
 C3_AGENTS = [
     "worker",
+    "composer",
     "senior",
     "senior-escalation",
     "reviewer",

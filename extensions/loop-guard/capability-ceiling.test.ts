@@ -6,7 +6,7 @@ import { after, test } from "node:test";
 import { cleanupAll, freshDir, startPiRpc, PI_SUBAGENTS_PACKAGE_DIR, ROOT_EXTENSION, FAUX_EXTENSION, waitForCondition, writeFauxScript } from "./rpc-test-helpers.ts";
 after(cleanupAll);
 
-for (const agent of ["outside-fixture", "worker", "senior", "senior-escalation", "reviewer", "scout"]) test(`session ceiling checks exported delegation without a tool_call: ${agent}`, { timeout: 60000 }, async () => {
+for (const agent of ["outside-fixture", "worker", "composer", "senior", "senior-escalation", "reviewer", "scout"]) test(`session ceiling checks exported delegation without a tool_call: ${agent}`, { timeout: 60000 }, async () => {
   const home=freshDir("ceiling-home-"); const cwd=freshDir("ceiling-cwd-");
   mkdirSync(join(home,"agents"));
   writeFileSync(join(home,"settings.json"),JSON.stringify({packages:[PI_SUBAGENTS_PACKAGE_DIR],subagents:{agentExcludeDirs:["~/.agents"]}}));

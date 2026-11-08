@@ -9,7 +9,7 @@ mention Codex- or Claude-only tools, use the pi equivalent.
   with `WAITING: <what> until <deadline>`. Never background a process with `&`, `nohup`, `disown`
   or `setsid`.
 - Models: only the model family this home's settings allow (`loopPi.modelFamily`, by default
-  `gpt-6.1-sol` and `gpt-6-astra`). Never pass a `model` override to `subagent`.
+  `gpt-6.1-sol`, `gpt-6.1-terra` and `gpt-6-astra`). Never pass a `model` override to `subagent`.
 - Delegation rights are fixed per agent file: `senior` is the only agent that spawns children
   (`scout`, `worker`, `reviewer`). No lane pushes; only the root runs `git push`. Spawn only the
   agents this home defines.

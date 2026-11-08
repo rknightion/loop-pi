@@ -62,6 +62,9 @@ test("live v3 returns validate patch evidence and complete exit without restrict
       { name: "reviewer", extra: { patch: null, patch_sha256: null, exit: null }, status: "complete" },
       { name: "scout", extra: { patch: null, patch_sha256: null, exit: 0 }, status: "complete" },
       { name: "senior", extra: { patch: undefined, patch_sha256: undefined, sha: "a".repeat(40) }, status: "complete" },
+      { name: "composer", extra: { patch: undefined, patch_sha256: undefined, sha: "b".repeat(40) }, status: "complete" },
+      { name: "short-sha", extra: { patch: undefined, patch_sha256: undefined, sha: "b".repeat(12) }, status: "failed", diagnostic: /sha.*full commit/i },
+      { name: "sha-and-patch", extra: { sha: "b".repeat(40) }, status: "failed", diagnostic: /sha replaces patch/i },
     ];
     for (const [i, c] of cases.entries()) {
       await t.test(c.name, async () => {
@@ -83,6 +86,7 @@ test("live v3 returns validate patch evidence and complete exit without restrict
       assert.equal(row.status, c.status, c.name);
       if (c.diagnostic) assert.match(notes.slice(before).join("\n"), c.diagnostic, c.name);
       if (c.name === "senior") assert.equal(row.sha, "a".repeat(40));
+      if (c.name === "composer") assert.equal(row.sha, "b".repeat(40));
       if ("landed" in c.extra && c.extra.landed) {
         assert.equal(row.landed, true, "rejected evidence must not re-admit potentially landed work");
         assert.equal(row.sha, c.extra.sha);

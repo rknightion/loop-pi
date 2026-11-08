@@ -64,7 +64,7 @@ public statement of those contracts.
   all fails the launch ("Required child extension failed to load") instead of starting the child
   without it (`src/runs/shared/child-session.js:492-496`).
 - **Root capability ceiling:** at every `session_start`, loop-guard registers a session-id-keyed
-  `loop-guard` ceiling containing only the five root roster `allowedAgents`; it sets neither
+  `loop-guard` ceiling containing only the six root roster `allowedAgents`; it sets neither
   `allowedTools` nor `denyExtensions`. This covers package delegation as well as model tool calls,
   filters the advertised agent catalogue and propagates monotonically into nested/recovered runs.
   Scheduled runs are refused while a ceiling is active (scheduling is already disabled here).
@@ -148,7 +148,7 @@ public statement of those contracts.
   launcher, or a definition whose digest differs (an agent file edited after the root started, or
   one that shadows the installed file). The root records the `label` of the installer's receipt
   (`<home>/.loop-pi-managed.json`) when it pins. Before each launch it re-reads the receipt; a new
-  label (a managed reinstall, allowed while a root runs) re-pins all five agents from disk, with
+  label (a managed reinstall, allowed while a root runs) re-pins all six agents from disk, with
   the same `agents/` check. Shipped agent files name no build path (telemetry reaches lanes through
   the home's managed link, see "Telemetry"), so a reinstall from the same source re-pins to the same
   digests and a lane launched before it stays resumable. An unchanged label keeps the pin, so an agent file edited by hand is
@@ -830,8 +830,10 @@ before any `await`. A missing reply means the provider extension is not loaded; 
   loop-continuation in lanes: the root's ticker uploads their transcripts. pi homes are Mac-only; without lockf,
   uploads are not serialised across processes.
   Ignore failures. The installer lays the script out only when an overlay provides it.
-- The agent set (the only names the root may spawn): `worker`, `senior`, `senior-escalation`,
-  `reviewer`, `scout`. The installer moves any other agent file in an installed home to
+- The agent set (the only names the root may spawn): `worker`, `composer`, `senior`,
+  `senior-escalation`, `reviewer`, `scout`. `composer` is a leaf with the lane capabilities of a
+  `senior` compose or board lane: its own worktree, a local commit and a `"sha"` return. It has no
+  `subagent` tool and is not in `senior`'s `allowedAgents`. The installer moves any other agent file in an installed home to
   `<home>/backups/agents-<UTC>/`.
 - Every agent file sets `inheritGlobalContext: false`; the installer appends the home's
   `lane-policy.md` after a `<!-- lane-policy -->` marker instead. An overlay may replace
@@ -888,8 +890,8 @@ before any `await`. A missing reply means the provider extension is not loaded; 
   for `subagent` calls whose brief starts `Lane: <id> · Task: <id> [(<title>)] · Tier: ...`, and injects the
   recovery digest (`loop-state-digest`, no turn) after compaction and at session start.
   Because only that exact header is recorded, the root's loop-guard entry refuses, in a run with the
-  `loop-pi-proto` marker, a `subagent` launch (any roster agent: worker, senior, senior-escalation,
-  reviewer, scout) whose `task` first non-empty line fails `parseBrief`. The refusal gives the exact
+  `loop-pi-proto` marker, a `subagent` launch (any roster agent: worker, composer, senior,
+  senior-escalation, reviewer, scout) whose `task` first non-empty line fails `parseBrief`. The refusal gives the exact
   form `Lane: <id> · Task: <ID> (<title>) · Tier: routine|guarded` and the offending line; a header
   with a missing colon (`Lane x · Task Y · Tier: routine`) is refused, never parsed leniently, so
   the guard, `parseBrief` and `laneIdFromBrief` keep one grammar. Resume, status and other
@@ -1175,7 +1177,7 @@ source sends a `loop-*` custom message type the set does not name.
   the recorded allocation base. After session start, earlier runs remain live
   until their async `status.json` is terminal; absent status keeps them. Merged branches may be
   removed on authorised release, unmerged branches retained. State entry: `lane-worktrees-state`.
-  While the marker exists, a new governed (header-parsed) single-agent launch of `worker`, `senior` or
+  While the marker exists, a new governed (header-parsed) single-agent launch of `worker`, `composer`, `senior` or
   `senior-escalation` is refused unless it is retained: `worktree: true` (or `isolation: "worktree"`,
   with no conflicting `worktree: false` or other isolation) together with a parseable `Landing:` line,
   or an explicit `cwd` that is, or is inside, the tree retained for that lane id and task (checked first;

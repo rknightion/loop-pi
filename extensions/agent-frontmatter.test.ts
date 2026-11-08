@@ -8,6 +8,7 @@ const { parseFrontmatter, parseFrontmatterList } = await import(bundledModuleUrl
 const writerTools = ["read", "bash", "edit", "write", "grep", "find", "ls", "watch_process"];
 const expectations: Record<string, { tools: string[]; allowedAgents?: string[] }> = {
   worker: { tools: writerTools },
+  composer: { tools: writerTools },
   senior: { tools: [...writerTools, "subagent"], allowedAgents: ["scout", "worker", "reviewer"] },
   "senior-escalation": { tools: writerTools },
   reviewer: { tools: ["read", "grep", "find", "ls", "bash"] },

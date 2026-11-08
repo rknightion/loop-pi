@@ -1,11 +1,11 @@
-// Test-only: lay out the five roster agents in a scratch home, each naming `launcher: nopush` like
+// Test-only: lay out the six roster agents in a scratch home, each naming `launcher: nopush` like
 // the shipped home/agents/*.md, so the root guard can pin them (loop-guard/launcher-pin.ts). Not
 // itself a test file.
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const LANE_AGENT_NAMES = ["worker", "senior", "senior-escalation", "reviewer", "scout"] as const;
+export const LANE_AGENT_NAMES = ["worker", "composer", "senior", "senior-escalation", "reviewer", "scout"] as const;
 
 export function writeLaneAgents(agentDir: string): void {
   mkdirSync(join(agentDir, "agents"), { recursive: true });

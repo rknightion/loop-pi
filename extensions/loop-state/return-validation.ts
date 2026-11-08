@@ -15,7 +15,14 @@ export function laneReturnError(block: Record<string, unknown> | null, cwd: stri
   if (block.status === "complete" && typeof block.exit === "number" && block.exit !== 0) {
     return `exit ${block.exit} is inconsistent with status complete`;
   }
-  // Read-only roles and senior commit-SHA returns need no candidate patch.
+  // A commit-SHA return (composer, or a senior on a compose or board brief) replaces the patch.
+  if (block.sha !== undefined && block.sha !== null) {
+    if (typeof block.sha !== "string" || !/^([a-fA-F0-9]{40}|[a-fA-F0-9]{64})$/.test(block.sha)) {
+      return "sha must be a full commit SHA";
+    }
+    if (block.patch !== null && block.patch !== undefined) return "sha replaces patch; do not supply both";
+  }
+  // Read-only roles and commit-SHA returns need no candidate patch.
   if (block.patch === null || block.patch === undefined) return null;
   if (typeof block.patch !== "string" || !block.patch || block.patch.includes("\0")) {
     return "patch must name a readable regular file";

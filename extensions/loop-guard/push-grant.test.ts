@@ -29,7 +29,7 @@ function bashResult(dir: string): Record<string, unknown> | undefined {
   return undefined;
 }
 
-for (const agent of ["worker", "senior", "senior-escalation"]) {
+for (const agent of ["worker", "composer", "senior", "senior-escalation"]) {
   test(`lanes never push: ${agent}, spoofed bindings replaced, real local push denied`, { timeout: 60_000 }, async () => {
     const home = freshDir("push-home-");
     const cwd = freshDir("push-repo-");
