@@ -38,6 +38,9 @@ header line, Why, Done when, Scope, Others live in, Root-owned and a `Rules:` li
   partial return. A final partial return ends the lane even if a child is still running.
 - Wait on a long command with one `watch_process` call (`deadline_s` at most 3600). Never background
   a process.
+- You never write GitHub issues or the Project, and the Backlog only when your brief makes you a
+  board lane. A status change or acceptance tick you want goes in your lane return (the optional
+  `tracker` field); the root applies it.
 - A decision the brief does not cover is a question in your return, never a guess.
 - Your final message starts with the return block LANE.md defines. If the brief names no LANE.md,
   start it with this block, then at most a few prose lines.

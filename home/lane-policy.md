@@ -4,17 +4,18 @@ You are a lane in a larger run. This policy holds the generic rules and applies 
 do. Your brief is the task. The file its `Rules:` line names is the run's LANE.md: it carries the
 run facts (repository, worktree root, run dir, gate and gate route, guarded paths) and any rule
 specific to this run. The read-only roles (`reviewer`, `scout`) skip what needs a worktree or a
-candidate.
+candidate, and write no `return.md`, logs or other file: their final message is the return.
 
 ## Your job
 
 You own one task in your own worktree. Implement it, prove it, and hand back an uncommitted
-candidate. You never push, never merge, never edit the Backlog unless your brief makes you a board
-lane, and never touch credentials or live systems. The guard refuses `git push` from every lane; a
-refused push is not a reason to look for another route.
+candidate. You never push, never merge and never touch credentials or live systems. Tracker writes
+are not yours: the Backlog only when your brief makes you a board lane; GitHub issues and Projects
+never. A status change or acceptance tick you want goes in your lane return. The guard refuses
+`git push` from every lane; a refused push is not a reason to look for another route.
 
 - Work in the worktree LANE.md or the brief names, and only there. Put evidence and logs under
-  `<run dir>/<lane>/`.
+  `<run dir>/<lane>/` (a reviewer or scout writes none).
 - Stay inside the brief's Scope. Another live lane may be in the files listed under "Others live
   in": keep your change inside your own functions there. For a root-owned file, write the hunk to
   `<run dir>/<lane>/<file>.hunk.patch`, say so, and do not apply it.
@@ -71,6 +72,7 @@ blocked):
 A `composer`, or a senior on a compose or board brief, commits locally instead and returns the full
 commit SHA as `"sha"`, with no patch fields.
 
-Put full logs, findings and questions in `<run dir>/<lane>/return.md`. Your final message starts
-with the `lane-return` block (compact JSON, at most 1,800 characters), then at most a few prose
-lines. Nothing comes before it: no progress notes.
+Put full logs, findings and questions in `<run dir>/<lane>/return.md`; a reviewer or scout writes
+no file here, its final message is the return. Your final message starts with the `lane-return`
+block (compact JSON, at most 1,800 characters), then at most a few prose lines. Nothing comes
+before it: no progress notes.

@@ -15,6 +15,14 @@ export function laneReturnError(block: Record<string, unknown> | null, cwd: stri
   if (block.status === "complete" && typeof block.exit === "number" && block.exit !== 0) {
     return `exit ${block.exit} is inconsistent with status complete`;
   }
+  // The optional `tracker` field (the lane's tracker status and ticks, for the root to apply) keeps the
+  // block at version 3. It is evidence for the root, never a path or a command, so only its shape is
+  // checked: a string or an object, or omitted. null, an array, a number or a boolean is malformed.
+  if (block.tracker !== undefined &&
+      typeof block.tracker !== "string" &&
+      (block.tracker === null || typeof block.tracker !== "object" || Array.isArray(block.tracker))) {
+    return "tracker must be a string or an object when present";
+  }
   // A commit-SHA return (composer, or a senior on a compose or board brief) replaces the patch.
   if (block.sha !== undefined && block.sha !== null) {
     if (typeof block.sha !== "string" || !/^([a-fA-F0-9]{40}|[a-fA-F0-9]{64})$/.test(block.sha)) {

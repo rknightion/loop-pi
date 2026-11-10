@@ -64,6 +64,12 @@ test("live v3 returns validate patch evidence and complete exit without restrict
       { name: "senior", extra: { patch: undefined, patch_sha256: undefined, sha: "a".repeat(40) }, status: "complete" },
       { name: "composer", extra: { patch: undefined, patch_sha256: undefined, sha: "b".repeat(40) }, status: "complete" },
       { name: "short-sha", extra: { patch: undefined, patch_sha256: undefined, sha: "b".repeat(12) }, status: "failed", diagnostic: /sha.*full commit/i },
+      ...["status line", "", { status: "Done", ticks: [1, 2] }, undefined].map((tracker, i) => ({
+        name: `tracker-${i}`, extra: { tracker }, status: "complete", diagnostic: undefined })),
+      ...[7, 0, true, false, null, [1], ["done"], []].map(tracker => ({
+        name: `malformed-tracker-${JSON.stringify(tracker)}`, extra: { tracker, landed: true, sha: "e".repeat(40) }, status: "failed", diagnostic: /tracker must be a string or an object/i,
+      })),
+      { name: "tracker-on-sha-return", extra: { patch: undefined, patch_sha256: undefined, sha: "f".repeat(40), tracker: "closed" }, status: "complete" },
       { name: "sha-and-patch", extra: { sha: "b".repeat(40) }, status: "failed", diagnostic: /sha replaces patch/i },
     ];
     for (const [i, c] of cases.entries()) {
@@ -164,6 +170,17 @@ test("exit and status combinations: complete with nonzero exit fails, honest non
   for (const status of ["partial", "blocked", "failed"]) {
     assert.equal(laneReturnError({ v: 3, status, exit: 1, sha }, "/"), null, status);
   }
+});
+
+test("the optional tracker field is accepted as a string, an object or omitted and rejects the rest, before artifact I/O", () => {
+  const base = { v: 3, status: "partial", exit: 1, patch: "/missing/fixture.patch", patch_sha256: "a".repeat(64) };
+  for (const tracker of ["status", { status: "x" }, undefined]) {
+    assert.match(laneReturnError({ ...base, tracker }, "/") ?? "", /patch.*unreadable/, `${JSON.stringify(tracker)} reaches the patch check`);
+  }
+  for (const tracker of [0, 1.5, false, true, null, [], ["x"]]) {
+    assert.match(laneReturnError({ ...base, tracker }, "/") ?? "", /tracker must be a string or an object/, JSON.stringify(tracker));
+  }
+  assert.equal(laneReturnError({ v: 2, tracker: 7 }, "/"), null, "only a v3 block is validated");
 });
 
 test("compose and board returns carry sha, not a patch, and skip the patch hash check", () => {

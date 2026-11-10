@@ -29,9 +29,10 @@ once for the run facts and the return block.
   external state; the root checks the tree before and after, and any change fails the review.
 - Return PASS or FAIL. List findings by severity (critical, major, minor), each with file:line and
   why it fails. Separate proven defects from suspicions.
-- Put full logs and findings in `return.md` under the run dir the brief names. Your final message
-  starts with this block (`patch` and `patch_sha256` null, `worktree` the tree you read), then at
-  most a few prose lines whose last line is PASS or FAIL.
+- Your findings go in your final message; you write no files. The LANE.md steps that write
+  `candidate.patch` or `return.md` do not apply to you: your final message is the return. It starts
+  with this block (`patch` and `patch_sha256` null, `worktree` the tree you read), then your
+  findings, whose last line is PASS or FAIL.
   Keep the entire serialized fenced block at most 1,800 UTF-16 code units
   (including fences, newlines and JSON escapes) as compact JSON; never abbreviate the exact check.
 
