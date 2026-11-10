@@ -1677,6 +1677,17 @@ class AgentReturnContractTests(unittest.TestCase):
         text = (HERE.parent / "home/lane-policy.md").read_text().lower()
         self.assertNotIn("coderabbit", text)
 
+    def test_v4_wording_read_only_roles_return_by_message_and_writers_never_write_the_tracker(self):
+        agents = HERE.parent / "home/agents"
+        for name in ("reviewer", "scout"):
+            # The pinned block's `questions` placeholder still names return.md; only the prose is checked.
+            text = (agents / f"{name}.md").read_text().split("```lane-return")[0]
+            self.assertIn("you write no files", text, name)
+            self.assertNotIn("return.md", text, name)
+        for name in ("worker", "senior", "senior-escalation"):
+            text = " ".join((agents / f"{name}.md").read_text().split())
+            self.assertIn("not the Backlog, not GitHub issues or the Project", text, name)
+
     def test_working_roles_point_at_lane_md_and_no_agent_names_a_push_right(self):
         for path in sorted((HERE.parent / "home/agents").glob("*.md")):
             text = path.read_text()

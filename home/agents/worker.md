@@ -25,6 +25,9 @@ live in, Root-owned and a `Rules:` line.
   uncommitted candidate: `candidate.patch`, its sha256 and a `return.md`.
 - You never run `git push`; the guard refuses it for every lane. Wait on a long command with one
   `watch_process` call (`deadline_s` at most 3600). Never background a process.
+- You never write to the tracker: not the Backlog, not GitHub issues or the Project. A status change
+  or acceptance tick you want goes in your lane return (the optional `tracker` field); the root
+  applies it.
 - A decision the brief does not cover is a question in your return, never a guess.
 - Your final message starts with the return block LANE.md defines. If the brief names no LANE.md,
   start it with this block, then at most a few prose lines.
