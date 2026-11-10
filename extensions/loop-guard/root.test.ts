@@ -65,10 +65,19 @@ function fakeCtx(cwd: string, sessionId = "test-session") {
 }
 
 let agentDir: string;
+let fakeHome: string;
 const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 const previousRunDir = process.env.LOOP_PI_RUN_DIR;
+const previousHome = process.env.HOME;
+const previousUserProfile = process.env.USERPROFILE;
 
 before(async () => {
+  // pi-subagents discovers user agents under the home directory's `.agents` as well as <agentDir>/agents,
+  // so a real home that carries agent copies (a plugin cache, a checkout) would shadow the fixture's
+  // installed agents. Point the home at an empty scratch directory for the whole file.
+  fakeHome = await mkdtemp(join(tmpdir(), "loop-guard-root-home-"));
+  process.env.HOME = fakeHome;
+  process.env.USERPROFILE = fakeHome;
   agentDir = await mkdtemp(join(tmpdir(), "loop-guard-root-test-"));
   await cp(TEMPLATES_DIR, join(agentDir, "scripts"), { recursive: true });
   writeLaneAgents(agentDir);
@@ -83,7 +92,12 @@ after(async () => {
   else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
   if (previousRunDir === undefined) delete process.env.LOOP_PI_RUN_DIR;
   else process.env.LOOP_PI_RUN_DIR = previousRunDir;
+  if (previousHome === undefined) delete process.env.HOME;
+  else process.env.HOME = previousHome;
+  if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+  else process.env.USERPROFILE = previousUserProfile;
   await rm(agentDir, { recursive: true, force: true });
+  await rm(fakeHome, { recursive: true, force: true });
 });
 
 function toolCallHandler(handlers: Map<string, Handler[]>): Handler {
