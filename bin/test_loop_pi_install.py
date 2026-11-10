@@ -1683,10 +1683,12 @@ class AgentReturnContractTests(unittest.TestCase):
             # The pinned block's `questions` placeholder still names return.md; only the prose is checked.
             text = (agents / f"{name}.md").read_text().split("```lane-return")[0]
             self.assertIn("you write no files", text, name)
-            self.assertNotIn("return.md", text, name)
+            self.assertIn("steps that write `candidate.patch` or `return.md` do not apply to you", " ".join(text.split()), name)
         for name in ("worker", "senior", "senior-escalation"):
             text = " ".join((agents / f"{name}.md").read_text().split())
             self.assertIn("not the Backlog, not GitHub issues or the Project", text, name)
+        policy = " ".join((HERE.parent / "home/lane-policy.md").read_text().split())
+        self.assertIn("not the Backlog, not GitHub issues or the Project", policy)
 
     def test_working_roles_point_at_lane_md_and_no_agent_names_a_push_right(self):
         for path in sorted((HERE.parent / "home/agents").glob("*.md")):

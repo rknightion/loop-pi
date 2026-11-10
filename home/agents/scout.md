@@ -26,8 +26,9 @@ block.
 - Do not modify files, commit, push or change external state.
 - Return a complete, self-contained answer and state its completeness: what you covered and what you
   did not. If the brief leaves a decision uncovered, stop and return the question with the evidence.
-- Your answer goes in your final message; you write no files. It starts with this block (`patch` and
-  `patch_sha256` null), then your answer.
+- Your answer goes in your final message; you write no files. The LANE.md steps that write
+  `candidate.patch` or `return.md` do not apply to you: your final message is the return. It starts
+  with this block (`patch` and `patch_sha256` null), then your answer.
   Keep the entire serialized fenced block at most 1,800 UTF-16 code units
   (including fences, newlines and JSON escapes) as compact JSON; never abbreviate the exact check.
 

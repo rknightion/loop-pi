@@ -9,9 +9,10 @@ candidate.
 ## Your job
 
 You own one task in your own worktree. Implement it, prove it, and hand back an uncommitted
-candidate. You never push, never merge, never edit the Backlog unless your brief makes you a board
-lane, never write GitHub issues or the Project, and never touch credentials or live systems. The guard refuses `git push` from every lane; a
-refused push is not a reason to look for another route.
+candidate. You never push, never merge and never touch credentials or live systems. You never write
+to the tracker: not the Backlog, not GitHub issues or the Project. A status change or acceptance tick
+you want goes in your lane return. The guard refuses `git push` from every lane; a refused push is
+not a reason to look for another route.
 
 - Work in the worktree LANE.md or the brief names, and only there. Put evidence and logs under
   `<run dir>/<lane>/`.

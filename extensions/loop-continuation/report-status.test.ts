@@ -4,7 +4,8 @@
 
 import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { reportCounts, reportStatus, finalMarker, waitingDeadline } from "./report-status.ts";
@@ -223,13 +224,13 @@ describe("reportStatus: the landing ledger rule", () => {
 
   test("a ledger that cannot be parsed does not count", () => {
     const rows: Array<[string, RegExp]> = [
-      ["not json\n", /line 1 is not JSON/],
-      [`${ready()}\n[1]\n`, /line 2 is not an object/],
-      [`${JSON.stringify({ ts: "2026-09-25T10:00:00Z" })}\n`, /no known event/],
-      [`${JSON.stringify({ event: "ready" })}\n`, /no known event and time/],
-      [`${JSON.stringify({ event: "ready", ts: "yesterday" })}\n`, /no known event and time/],
-      [`${JSON.stringify({ event: "shipped", ts: "2026-09-25T10:00:00Z" })}\n`, /no known event/],
-      [`${ready()}\n${check()}\n{"event":`, /line 3 is not JSON/],
+      ["not json\n", /line 1 is not valid JSON/],
+      [`${ready()}\n[1]\n`, /line 2 is not a JSON object/],
+      [`${JSON.stringify({ ts: "2026-09-25T10:00:00Z" })}\n`, /unknown event/],
+      [`${JSON.stringify({ event: "ready" })}\n`, /no readable ts/],
+      [`${JSON.stringify({ event: "ready", ts: "yesterday" })}\n`, /no readable ts/],
+      [`${JSON.stringify({ event: "shipped", ts: "2026-09-25T10:00:00Z" })}\n`, /unknown event/],
+      [`${ready()}\n${check()}\n{"event":`, /line 3 is not valid JSON/],
     ];
     for (const [text, why] of rows) {
       writeFileSync(ledgerPath, text);
@@ -241,13 +242,13 @@ describe("reportStatus: the landing ledger rule", () => {
 
   test("a ledger path that is a directory cannot be read and does not count", () => {
     mkdirSync(ledgerPath);
-    assert.match(status().whyNot!, /cannot be read/);
+    assert.match(status().whyNot!, /not a regular file/);
   });
 
   test("a direct-mode landing with no pull request is tracked by its head", () => {
     const sha = "c".repeat(40);
     writeLedger(ev("ready", { outcome: "go", pr: null, head: sha }), check());
-    assert.match(status().whyNot!, new RegExp(`head ${sha} at ready`));
+    assert.match(status().whyNot!, /head cccccccccccc at ready/);
     writeLedger(ev("ready", { outcome: "go", pr: null, head: sha }), ev("merged", { pr: null, head: sha }, "2026-09-25T10:05:00Z"),
       ev("verified", { pr: null, head: sha, main: "green", deploy: "n/a" }, "2026-09-25T10:10:00Z"), check());
     assert.equal(status().counts, true);
@@ -407,7 +408,7 @@ describe("reportStatus: the landing ledger rule", () => {
     assert.equal(refuses(), true, "the first loop-land line is the one read");
   });
 
-  test("with several charters for a loop number the last by name wins, and an unreadable one means the v3 rule", () => {
+  test("with several charters for a loop number the last by name wins, falling back past one that is not a file", () => {
     writeLedger(ready());
     charterAt("charter-a-loop3.md", "protocol: v4\n");
     charterAt("charter-x-loop3.md", "protocol: v3\n");
@@ -416,7 +417,136 @@ describe("reportStatus: the landing ledger rule", () => {
     charterAt("charter-b-loop3.md", "protocol: v4\n");
     assert.equal(refuses(), true, "the last of the v4 charters");
     mkdirSync(join(tmp, "charter-z-loop3.md"));
-    assert.equal(status().counts, true, "the last charter cannot be read, so v3");
+    assert.equal(refuses(), true, "a directory is skipped, so the previous charter is the run's");
+  });
+
+  test("a charter that cannot be read means the v3 rule", { skip: process.getuid?.() === 0 }, () => {
+    writeLedger(ready());
+    charterAt("charter-x-loop3.md", "protocol: v4\n");
+    chmodSync(join(tmp, "charter-x-loop3.md"), 0);
+    try {
+      assert.equal(status().counts, true);
+    } finally {
+      chmodSync(join(tmp, "charter-x-loop3.md"), 0o644);
+    }
+  });
+
+  test("a verified event without a valid main and deploy makes the ledger unparsable", () => {
+    const bad: Array<Record<string, unknown>> = [
+      { main: undefined }, { deploy: undefined }, { main: null }, { deploy: null }, { main: "bogus" }, { deploy: "bogus" }, { main: "n/a" }, { deploy: "green" },
+    ];
+    for (const fields of bad) {
+      writeLedger(ready(), merged(), verified(fields), check());
+      const { counts, whyNot } = status();
+      assert.equal(counts, false, JSON.stringify(fields));
+      assert.match(whyNot!, /cannot be parsed .*verified event without a valid main and deploy/, JSON.stringify(fields));
+    }
+    for (const [main, deploy] of [["green", "synced"], ["red", "failed"], ["unread", "n/a"]]) {
+      writeLedger(ready(), merged(), verified({ main, deploy: deploy === "n/a" ? "synced" : deploy }), check());
+      assert.match(status().whyNot ?? "counts", main === "unread" ? /unread/ : /counts/, main);
+    }
+  });
+
+  test("a landing event with no pull request and no usable head makes the ledger unparsable", () => {
+    for (const fields of [{ pr: null, head: null }, { pr: null, head: undefined }, { pr: null, head: "" }, { pr: null, head: "   " }, { pr: undefined, head: undefined }]) {
+      writeLedger(ev("ready", fields), ev("abandoned", fields), check());
+      const { counts, whyNot } = status();
+      assert.equal(counts, false, JSON.stringify(fields));
+      assert.match(whyNot!, /names neither a pull request nor a head/, JSON.stringify(fields));
+    }
+  });
+
+  test("a pull request that is not an integer falls back to the head, and a head is keyed by its first 12 characters", () => {
+    const head = "abc123def4567890aaaa";
+    writeLedger(ev("ready", { pr: true, head }), ev("abandoned", { pr: true, head }), check());
+    assert.equal(status().counts, true);
+    writeLedger(ev("ready", { pr: 1.5, head }), check());
+    assert.match(status().whyNot!, /head abc123def456 at ready/);
+    writeLedger(ev("ready", { pr: null, head }), ev("merged", { pr: null, head }, "2026-09-25T10:05:00Z"),
+      ev("verified", { pr: null, head: "abc123def456", main: "green", deploy: "n/a" }, "2026-09-25T10:10:00Z"), check());
+    assert.deepEqual(status(), { counts: true, whyNot: null });
+  });
+
+  test("a check older than the newest merge anywhere in the ledger is stale, as is one listed before the last merge", () => {
+    writeLedger(check("ok", "2026-09-25T12:00:00Z"), ready(1, "2026-09-25T11:00:00Z"), merged(1, "2026-09-25T11:00:00Z"), verified({}, 1, "2026-09-25T11:00:00Z"));
+    assert.match(status().whyNot!, /older than the last merge/);
+    writeLedger(ready(1, "2026-09-25T12:00:00Z"), merged(1, "2026-09-25T12:00:00Z"), verified({}, 1, "2026-09-25T12:00:00Z"),
+      ready(2, "2026-09-25T10:00:00Z"), merged(2, "2026-09-25T10:00:00Z"), verified({}, 2, "2026-09-25T10:00:00Z"), check("ok", "2026-09-25T11:00:00Z"));
+    const { counts, whyNot } = status();
+    assert.equal(counts, false);
+    assert.match(whyNot!, /older than the last merge/);
+  });
+
+  test("a ts is accepted only in an ISO 8601 form, not whatever Date.parse takes", () => {
+    for (const ts of ["1", "Nov 10 2026", "2026/11/10 10:00", "10:00:00", "", "2026-11-31T10:00:00Z", "2026-11-10T25:00:00Z", "2026-11-10T10:00:00+24:00", "yesterday"]) {
+      writeLedger(ev("ready", { ts }), abandoned(7), check());
+      const { counts, whyNot } = status();
+      assert.equal(counts, false, ts);
+      assert.match(whyNot!, /no readable ts/, ts);
+    }
+    for (const ts of ["2026-09-25T10:00:00Z", "2026-09-25", "20260925T100000Z", "2026-09-25 10:00:00+01:00", "2026-09-25T10:00:00.250Z", "2026-W39-5T10:00:00Z", "2026-09-25T10:00"]) {
+      writeLedger(ev("ready", { ts }), abandoned(7), check());
+      assert.deepEqual(status(), { counts: true, whyNot: null }, ts);
+    }
+  });
+
+  test("a ledger that is not valid UTF-8 makes the closeout not count", () => {
+    writeFileSync(ledgerPath, Buffer.concat([Buffer.from(`${ready()}\n`), Buffer.from([0xff, 0xfe, 0x0a]), Buffer.from(`${check()}\n`)]));
+    const { counts, whyNot } = status();
+    assert.equal(counts, false);
+    assert.match(whyNot!, /UTF-8/);
+  });
+
+  test("a ledger or charter that is a FIFO is never opened for a blocking read", () => {
+    execFileSync("mkfifo", [join(tmp, "fifo-ledger")]);
+    rmSync(join(tmp, "loop3"), { recursive: true });
+    mkdirSync(join(tmp, "loop3"));
+    execFileSync("mkfifo", [ledgerPath]);
+    assert.match(status().whyNot!, /not a regular file/);
+    rmSync(ledgerPath);
+    symlinkSync(join(tmp, "fifo-ledger"), ledgerPath);
+    assert.match(status().whyNot!, /not a regular file/, "a symlink to a FIFO");
+    rmSync(ledgerPath);
+    writeLedger(ready(), check());
+    rmSync(join(tmp, "charter-x-loop3.md"));
+    execFileSync("mkfifo", [join(tmp, "charter-x-loop3.md")]);
+    assert.deepEqual(status(), { counts: true, whyNot: null }, "a charter that is not a regular file is skipped: the v3 rule");
+    charterAt("charter-a-loop3.md", "protocol: v4\n");
+    assert.equal(refuses(), true, "the next candidate by name applies");
+  });
+
+  test("a v3 closeout with a FIFO charter beside it is not held up", () => {
+    rmSync(join(tmp, "charter-x-loop3.md"));
+    execFileSync("mkfifo", [join(tmp, "charter-x-loop3.md")]);
+    assert.deepEqual(status(), { counts: true, whyNot: null });
+  });
+
+  test("a landing never merged whose verified has main unread counts once it is abandoned", () => {
+    writeLedger(ready(1), verified(unreadBoth, 1), abandoned(1), check());
+    assert.deepEqual(status(), { counts: true, whyNot: null });
+  });
+
+  test("a charter value may be backticked, only its first token is compared, and an empty first value wins", () => {
+    writeLedger(ready());
+    charterAt("charter-x-loop3.md", "protocol: `v4`\n");
+    assert.equal(refuses(), true, "backticked");
+    charterAt("charter-x-loop3.md", 'protocol: "v4 (the new protocol)"\n');
+    assert.equal(refuses(), true, "the first token of a quoted value, quote removed");
+    charterAt("charter-x-loop3.md", "protocol: v4 and the rest\n");
+    assert.equal(refuses(), true, "first token");
+    charterAt("charter-x-loop3.md", "protocol:\nprotocol: v4\n");
+    assert.equal(status().counts, true, "the empty first value wins");
+    charterAt("charter-x-loop3.md", "protocol: v4\nloop-land:\nloop-land: off\n");
+    assert.equal(refuses(), true, "an empty first loop-land is not off");
+  });
+
+  test("a closeout name with leading zeros in its loop number names the same run", () => {
+    writeLedger(ready());
+    const named = join(tmp, "closeout-x-loop003.md");
+    writeFileSync(named, VALID_REPORT);
+    assert.equal(reportStatus({ ...launch, report: named }, tmp).counts, false);
+    charterAt("charter-y-loop3.md", "protocol: v3\n");
+    assert.equal(reportStatus({ ...launch, report: named }, tmp).counts, true, "the charter for loop 3 is the one read");
   });
 
   test("a closeout whose name carries no loop number is judged by the v3 rule", () => {
