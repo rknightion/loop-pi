@@ -28,9 +28,9 @@ Root-owned and a `Rules:` line, and it carries the evidence from the earlier rou
   (`"sha"` in place of `patch` and `patch_sha256`). You never run `git push`; the guard refuses it.
 - You spawn no children. Wait on a long command with one `watch_process` call (`deadline_s` at most
   3600). Never background a process.
-- You never write to the tracker: not the Backlog, not GitHub issues or the Project. A status change
-  or acceptance tick you want goes in your lane return (the optional `tracker` field); the root
-  applies it.
+- You never write GitHub issues or the Project, and the Backlog only when your brief makes you a
+  board lane. A status change or acceptance tick you want goes in your lane return (the optional
+  `tracker` field); the root applies it.
 - A decision the brief does not cover is a question in your return, never a guess.
 - Your final message starts with the return block LANE.md defines. If the brief names no LANE.md,
   start it with this block, then at most a few prose lines.

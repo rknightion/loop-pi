@@ -268,12 +268,27 @@ export function ledgerEpoch(raw: string): number | null {
   return seconds;
 }
 
-/** The landing a ledger event belongs to: its pull request, else the first 12 characters of its head. */
-function landingKey(row: Record<string, unknown>): string | null {
-  if (typeof row.pr === "number" && Number.isInteger(row.pr)) return `pull request ${row.pr}`;
+/** The landing a ledger event belongs to: its pull request when `pr` is a plain JSON integer, else the first
+ *  12 characters of its head. */
+function landingKey(row: Record<string, unknown>, prIsInteger: boolean): string | null {
+  if (prIsInteger && typeof row.pr === "number" && Number.isInteger(row.pr)) return `pull request ${row.pr}`;
   if (typeof row.head === "string" && row.head.trim() !== "") return `head ${Array.from(row.head).slice(0, 12).join("")}`;
   return null;
 }
+
+/** Parses one ledger line and says whether its own `pr` was written as a plain integer (`1`, not `1.0` or
+ *  `1e0`), which a JSON reader cannot tell from the value alone: it reads the source text of the number. */
+function parseLedgerLine(line: string): { value: unknown; prSource: string | null } {
+  const sources: Array<{ holder: unknown; source: string }> = [];
+  const value = JSON.parse(line, function (this: unknown, key: string, val: unknown, context?: { source?: string }) {
+    if (key === "pr" && typeof val === "number" && context?.source !== undefined) sources.push({ holder: this, source: context.source });
+    return val;
+  } as never);
+  return { value, prSource: sources.find((entry) => entry.holder === value)?.source ?? null };
+}
+
+/** Blank as the landing rule's `str.strip` sees it: whitespace, but not a byte-order mark. */
+const BLANK_RE = /^[^\S\ufeff]*$/;
 
 /** Every event in `<run dir>/landings.jsonl`, or why the ledger blocks a closeout. */
 function readLedger(path: string): { events: LedgerEvent[] } | { error: string } {
@@ -284,11 +299,12 @@ function readLedger(path: string): { events: LedgerEvent[] } | { error: string }
   const events: LedgerEvent[] = [];
   const lines = read.text.split(LINE_BREAK_RE);
   for (let i = 0; i < lines.length; i++) {
-    if (!lines[i].trim()) continue;
+    if (BLANK_RE.test(lines[i])) continue;
     const bad = (why: string) => ({ error: `cannot be parsed (line ${i + 1} ${why})` });
     let value: unknown;
+    let prSource: string | null;
     try {
-      value = JSON.parse(lines[i]);
+      ({ value, prSource } = parseLedgerLine(lines[i]));
     } catch {
       // Includes a line nested too deeply for the parser (a RangeError).
       return bad("is not valid JSON");
@@ -298,7 +314,11 @@ function readLedger(path: string): { events: LedgerEvent[] } | { error: string }
     if (typeof row.event !== "string" || !LEDGER_EVENTS.has(row.event)) return bad("has an unknown event");
     const ts = typeof row.ts === "string" ? ledgerEpoch(row.ts) : null;
     if (ts === null) return bad("has no readable ts");
-    const key = LANDING_EVENTS.has(row.event) ? landingKey(row) : null;
+    const prIsInteger = prSource === null || /^-?\d+$/.test(prSource);
+    if (LANDING_EVENTS.has(row.event) && prIsInteger && typeof row.pr === "number" && !Number.isSafeInteger(row.pr)) {
+      return bad("has a pull request number outside the safe integer range");
+    }
+    const key = LANDING_EVENTS.has(row.event) ? landingKey(row, prIsInteger) : null;
     if (LANDING_EVENTS.has(row.event) && key === null) return bad("names neither a pull request nor a head");
     if (row.event === "verified" && !(MAIN_STATES.has(row.main as string) && DEPLOY_STATES.has(row.deploy as string))) {
       return bad("is a verified event without a valid main and deploy");

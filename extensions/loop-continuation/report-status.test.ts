@@ -549,6 +549,47 @@ describe("reportStatus: the landing ledger rule", () => {
     assert.equal(reportStatus({ ...launch, report: named }, tmp).counts, true, "the charter for loop 3 is the one read");
   });
 
+  const rawLine = (fields: string, event = "ready", ts = "2026-09-25T10:00:00Z") => `{"ts":"${ts}","event":"${event}",${fields}}`;
+
+  test("a line holding only a byte-order mark is not blank and makes the ledger unparsable", () => {
+    writeFileSync(ledgerPath, `\ufeff\n${check()}\n`);
+    const { counts, whyNot } = status();
+    assert.equal(counts, false);
+    assert.match(whyNot!, /cannot be parsed \(line 1 is not valid JSON\)/);
+    writeFileSync(ledgerPath, `${ready()}\n  \t \n${abandoned(7)}\n${check()}\n`);
+    assert.equal(status().counts, true, "ordinary blank lines are still skipped");
+  });
+
+  test("a pr not written as a plain JSON integer is not a pull request number", () => {
+    // 1.0 and 1e0 are numbers to a JSON reader but not integers to the landing rule: the head keys the landing.
+    writeFileSync(ledgerPath, [rawLine('"pr":1e0'), rawLine('"pr":1e0', "abandoned"), check()].join("\n") + "\n");
+    assert.match(status().whyNot!, /names neither a pull request nor a head/);
+    writeFileSync(ledgerPath, [rawLine('"pr":1.0,"head":"hhhh"'), check()].join("\n") + "\n");
+    assert.match(status().whyNot!, /head hhhh at ready/);
+    writeFileSync(ledgerPath, [
+      rawLine('"pr":1.0,"head":"hhhh"'), rawLine('"pr":1,"head":"hhhh"', "merged", "2026-09-25T10:01:00Z"),
+      rawLine('"pr":1.0,"head":"hhhh","main":"green","deploy":"n/a"', "verified", "2026-09-25T10:02:00Z"), check(),
+    ].join("\n") + "\n");
+    const { counts, whyNot } = status();
+    assert.equal(counts, false, "the merged event is for pull request 1, whose own landing was never verified");
+    assert.match(whyNot!, /pull request 1 merged and not verified/);
+    writeFileSync(ledgerPath, [rawLine('"pr":1.0,"head":"hhhh"'), rawLine('"pr":1.0,"head":"hhhh"', "abandoned"), check()].join("\n") + "\n");
+    assert.equal(status().counts, true);
+  });
+
+  test("a pr outside the safe integer range makes the ledger unparsable, an extreme safe one does not", () => {
+    for (const pr of ["9007199254740993", "-9007199254740993", "100000000000000000000"]) {
+      writeFileSync(ledgerPath, [rawLine(`"pr":${pr},"head":"hhhh"`), check()].join("\n") + "\n");
+      const { counts, whyNot } = status();
+      assert.equal(counts, false, pr);
+      assert.match(whyNot!, /pull request number outside the safe integer range/, pr);
+    }
+    writeFileSync(ledgerPath, [rawLine('"pr":9007199254740991'), rawLine('"pr":9007199254740991', "abandoned"), check()].join("\n") + "\n");
+    assert.equal(status().counts, true);
+    writeFileSync(ledgerPath, [rawLine('"pr":9007199254740993', "closeout-check").replace('"event":"closeout-check"', '"event":"closeout-check","outcome":"ok"')].join("\n") + "\n");
+    assert.equal(status().counts, true, "only a landing event's pr is read");
+  });
+
   test("a closeout whose name carries no loop number is judged by the v3 rule", () => {
     const named = join(tmp, "closeout-x.md");
     writeFileSync(named, VALID_REPORT);

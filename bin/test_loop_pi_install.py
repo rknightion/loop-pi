@@ -1677,18 +1677,36 @@ class AgentReturnContractTests(unittest.TestCase):
         text = (HERE.parent / "home/lane-policy.md").read_text().lower()
         self.assertNotIn("coderabbit", text)
 
-    def test_v4_wording_read_only_roles_return_by_message_and_writers_never_write_the_tracker(self):
+    def test_v4_wording_read_only_roles_return_by_message_and_the_tracker_rule_keeps_the_board_lane(self):
         agents = HERE.parent / "home/agents"
+        policy = (HERE.parent / "home/lane-policy.md").read_text()
+        flat = lambda text: " ".join(text.split())
+
+        def installed(name: str) -> str:
+            return flat(m.append_lane_policy((agents / f"{name}.md").read_text(), policy))
+
         for name in ("reviewer", "scout"):
-            # The pinned block's `questions` placeholder still names return.md; only the prose is checked.
-            text = (agents / f"{name}.md").read_text().split("```lane-return")[0]
-            self.assertIn("you write no files", text, name)
-            self.assertIn("steps that write `candidate.patch` or `return.md` do not apply to you", " ".join(text.split()), name)
-        for name in ("worker", "senior", "senior-escalation"):
-            text = " ".join((agents / f"{name}.md").read_text().split())
-            self.assertIn("not the Backlog, not GitHub issues or the Project", text, name)
-        policy = " ".join((HERE.parent / "home/lane-policy.md").read_text().split())
-        self.assertIn("not the Backlog, not GitHub issues or the Project", policy)
+            # The pinned block's `questions` placeholder still names return.md; the source prose is checked
+            # first, then the installed text, whose appended policy also speaks of return.md and logs.
+            source = flat((agents / f"{name}.md").read_text().split("```lane-return")[0])
+            self.assertIn("you write no files", source, name)
+            self.assertIn("steps that write `candidate.patch` or `return.md` do not apply to you", source, name)
+            text = installed(name)
+            self.assertIn("write no `return.md`, logs or other file: their final message is the return", text, name)
+            self.assertIn("a reviewer or scout writes no file here", text, name)
+        for name in ("worker",):
+            self.assertIn("not the Backlog, not GitHub issues or the Project", flat((agents / f"{name}.md").read_text()), name)
+        for name in ("senior", "senior-escalation"):
+            text = flat((agents / f"{name}.md").read_text())
+            self.assertIn("You never write GitHub issues or the Project, and the Backlog only when your brief makes you a board lane", text, name)
+            self.assertIn("the Backlog only when your brief makes you a board lane", text, name)
+            self.assertNotIn("not the Backlog, not GitHub", text, name)
+        flat_policy = flat(policy)
+        self.assertIn("the Backlog only when your brief makes you a board lane; GitHub issues and Projects never", flat_policy)
+        self.assertNotIn("not the Backlog, not GitHub", flat_policy)
+        composer = installed("composer")
+        self.assertNotIn("not the Backlog", composer, "the composer writes board batches")
+        self.assertIn("the Backlog only when your brief makes you a board lane", composer)
 
     def test_working_roles_point_at_lane_md_and_no_agent_names_a_push_right(self):
         for path in sorted((HERE.parent / "home/agents").glob("*.md")):
