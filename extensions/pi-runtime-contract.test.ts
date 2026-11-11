@@ -94,13 +94,15 @@ test("bash: a shell that exits 0 while a quiet descendant holds the output pipes
 });
 
 test("bash: a shell that exits 0 while a descendant keeps writing times out and reports the shell exit code", { timeout: 90_000 }, async () => {
-  // The writer never ends on its own; the deadline's process-group kill stops it. One process writes
-  // every 10 ms: a shell loop that forks `sleep` per tick can stall past pi's 100 ms post-exit grace on
-  // a loaded runner, and pi then rightly returns the exit instead of timing out.
-  const writer = `${JSON.stringify(process.execPath)} -e 'setInterval(() => console.log("tick"), 10)'`;
-  const { isError, text } = await runBash(`echo shell_done; ${writer} & exit 0`, 1);
+  // The writer never ends on its own; the deadline's process-group kill stops it. pi finishes 100 ms
+  // after the shell exits unless output keeps arriving, so the writer must already be writing when the
+  // shell exits: one process writes every 5 ms (no fork per tick), and the shell waits 0.5 s for it to
+  // start before exiting. Without that wait, process startup alone can outlast the grace on a loaded runner.
+  const writer = `${JSON.stringify(process.execPath)} -e 'setInterval(() => console.log("tick"), 5)'`;
+  const { isError, text } = await runBash(`echo shell_done; ${writer} & sleep 0.5; exit 0`, 2);
   assert.equal(isError, true, `a descendant that keeps writing past the deadline is still a timeout: ${text}`);
   assert.match(text, /shell_done/);
-  assert.match(text, /Command timed out after 1 seconds\. The shell exited with code 0 after \d+(\.\d+)? seconds, but background processes it started kept writing output until the timeout\./);
+  assert.match(text, /tick/, "the writer was writing before the deadline");
+  assert.match(text, /Command timed out after 2 seconds\. The shell exited with code 0 after \d+(\.\d+)? seconds, but background processes it started kept writing output until the timeout\./);
   assert.doesNotMatch(text, /Command exited with code/);
 });
