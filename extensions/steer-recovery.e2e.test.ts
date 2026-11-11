@@ -17,6 +17,7 @@ import { adoptNopushLauncher } from "./test-support/lane-agents.ts";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
 const BLOCK_EXTENSION = join(HERE, "test-support/block-sync-extension.ts");
+const HOLD_EXTENSION = join(HERE, "test-support/hold-after-reply-extension.ts");
 const CHILD_MARKER = "STEER_PROBE_CHILD_PROMPT";
 after(() => cleanupAllAfterExit(60_000));
 
@@ -30,10 +31,14 @@ interface Peer {
   /** Root replies: the next root user prompt decides the tool call. */
   childBlockMs: number;
   childFirstDelayMs: number;
+  /** The child's first reply is a malformed acceptance-report instead of a `block_sync` call. */
+  childReport: boolean;
   holdNextWake: boolean;
   wakeHeld: boolean;
   releaseWake(): void;
 }
+
+const ACCEPTANCE_REPORT_REPLY = "CHILD_REPORTED\n```acceptance-report\nnot json\n```";
 
 function inputText(input: any[]): string {
   return JSON.stringify(input);
@@ -47,8 +52,8 @@ function lastUserText(input: any[]): string {
   return "";
 }
 
-async function startPeer(childBlockMs: number, childFirstDelayMs = 0): Promise<Peer> {
-  const peer = { rootOutputs: [], childInputs: [], childBlockMs, childFirstDelayMs } as unknown as Peer;
+async function startPeer(childBlockMs: number, childFirstDelayMs = 0, childReport = false): Promise<Peer> {
+  const peer = { rootOutputs: [], childInputs: [], childBlockMs, childFirstDelayMs, childReport } as unknown as Peer;
   peer.holdNextWake = false;
   peer.wakeHeld = false;
   peer.releaseWake = () => {};
@@ -75,7 +80,10 @@ async function startPeer(childBlockMs: number, childFirstDelayMs = 0): Promise<P
       const resumeSeen = inputText(input).includes("RESUME_MSG");
       if (last?.type === "function_call_output") item = text(`CHILD_DONE steer_seen=${steerSeen}`);
       else if (steerSeen || resumeSeen) item = text(`CHILD_RESUMED steer_seen=${steerSeen} resume_seen=${resumeSeen}`);
-      else {
+      else if (peer.childReport) {
+        // Any acceptance-report fence locks the child's queue, a malformed body included.
+        item = text(ACCEPTANCE_REPORT_REPLY);
+      } else {
         send({ type: "response.created", response: { id, status: "in_progress", output: [] } });
         if (peer.childFirstDelayMs) await new Promise((r) => setTimeout(r, peer.childFirstDelayMs));
         item = call("block_sync", { ms: peer.childBlockMs });
@@ -116,8 +124,8 @@ async function startPeer(childBlockMs: number, childFirstDelayMs = 0): Promise<P
 
 interface Rig { peer: Peer; root: PiRpcSession; runsDir: string; tempRoot: string; expectedRuns: number; cwd: string; close(): Promise<void> }
 
-async function startRig(childBlockMs: number, opts: { loopGuard?: boolean; childFirstDelayMs?: number } = {}): Promise<Rig> {
-  const peer = await startPeer(childBlockMs, opts.childFirstDelayMs);
+async function startRig(childBlockMs: number, opts: { loopGuard?: boolean; childFirstDelayMs?: number; childReport?: boolean } = {}): Promise<Rig> {
+  const peer = await startPeer(childBlockMs, opts.childFirstDelayMs, opts.childReport);
   const home = freshDir("steer-home-");
   const cwd = freshDir("steer-work-");
   const tempRoot = freshDir("steer-sub-");
@@ -131,7 +139,7 @@ async function startRig(childBlockMs: number, opts: { loopGuard?: boolean; child
   delete config.runnerLaunchers;
   writeFileSync(join(home, "extensions/subagent/config.json"), JSON.stringify(config));
   mkdirSync(join(home, "agents"));
-  writeFileSync(join(home, "agents/scout.md"), `---\nname: scout\ndescription: Steering probe\ntools: block_sync\nextensions: ${BLOCK_EXTENSION}\nmodel: fixture/fixture\n---\n${CHILD_MARKER}\n`);
+  writeFileSync(join(home, "agents/scout.md"), `---\nname: scout\ndescription: Steering probe\ntools: block_sync\nextensions: ${BLOCK_EXTENSION}${opts.childReport ? `, ${HOLD_EXTENSION}` : ""}\nmodel: fixture/fixture\n---\n${CHILD_MARKER}\n`);
   // Launch as an installed home does: the root guard pins every lane launch to the nopush launcher.
   adoptNopushLauncher(home);
   const root = startPiRpc({
@@ -213,6 +221,20 @@ async function launchBlockedChild(rig: Rig): Promise<string> {
   // The child is inside block_sync once its saved-work file exists.
   await waitForCondition(() => (existsSync(join(rig.cwd, "saved-work.txt")) ? true : undefined), 30_000, 50);
   return id;
+}
+
+/** The runner's event log for the run holds the child's completed assistant reply carrying the fence. */
+function childReplied(rig: Rig, id: string): boolean {
+  const events = join(rig.runsDir, id, "events.jsonl");
+  if (!existsSync(events)) return false;
+  return readFileSync(events, "utf8").split("\n").some((line) => {
+    if (!line.includes('"message_end"')) return false;
+    try {
+      const event = JSON.parse(line);
+      return event.type === "message_end" && event.message?.role === "assistant" && event.message.stopReason === "stop"
+        && JSON.stringify(event.message.content).includes("```acceptance-report");
+    } catch { return false; }
+  });
 }
 
 const claimPath = (rig: Rig, id: string) => join(rig.runsDir, id, "control", "steer-recovery", "claim.json");
@@ -352,6 +374,48 @@ test("RESUME queued behind a native completion wake waits for its own tool resul
     assert.ok(existsSync(join(rig.cwd, "saved-work.txt")));
   } finally {
     rig.peer.releaseWake();
+    await rig.close();
+  }
+});
+
+// pi-subagents 0.88.0 locks a child's queue once its final reply (stopReason "stop") carries an
+// `acceptance-report` fence, a malformed one included: the queue is cleared and steer/followUp throw.
+// The child here answers with a malformed fence and then stays live for a few seconds (the
+// hold-after-reply extension), the window in which the root can still steer it.
+test("acceptance-report lock: a steer to a reported child is rejected without a restart, and resume of the lane works", { timeout: 120_000 }, async () => {
+  const rig = await startRig(0, { childReport: true });
+  try {
+    await prompt(rig, "LAUNCH");
+    const id = await waitForCondition(() => runIds(rig)[0], 30_000);
+    // Ready once the runner has recorded the child's completed reply, not when the provider sent it.
+    await waitForCondition(() => (childReplied(rig, id) ? true : undefined), 30_000, 20);
+    // The default steer asks for steering recovery (an interrupt plus a restart on a failed
+    // acknowledgement), so a restart here would show up as a second run or a recovery claim.
+    const out = await prompt(rig, `STEER ${id}`);
+    console.log(`[report-lock] steer: ${out}`);
+    assert.match(out, /Steering failed for async run/);
+    const rejected = await waitForCondition(() => {
+      const target = status(rig, id).steering?.recent?.[0]?.targets?.[0];
+      return target?.state === "failed" ? target : undefined;
+    }, 30_000, 50);
+    console.log(`[report-lock] target: ${JSON.stringify(rejected)}`);
+    assert.equal(rejected.failureKind, "rejected");
+    assert.match(rejected.reason, /Child completed its acceptance report; resume it for further guidance\./);
+    await waitForCondition(() => (status(rig, id).state === "complete" ? true : undefined), 60_000);
+    assert.equal(status(rig, id).steering.recent[0].targets[0].failureKind, "rejected", "settling keeps the rejection");
+    assert.ok(!rig.peer.childInputs.some((text) => text.includes("STEER_MSG")), "the steer never reached the child");
+    assert.equal(existsSync(claimPath(rig, id)), false, "no recovery claim");
+    assert.equal(existsSync(join(rig.runsDir, id, "control", "interrupt.json")), false, "no interrupt");
+    assert.equal(runIds(rig).length, 1, "the run was not restarted");
+
+    // The lock is on that live session only: resuming the same lane starts a fresh child.
+    const resumed = await prompt(rig, `RESUME ${id}`);
+    assert.match(resumed, /Revived async subagent/);
+    const revivedId = runIds(rig).find((runId) => runId !== id)!;
+    await waitForCondition(() => (status(rig, revivedId).state === "complete" ? true : undefined), 60_000);
+    assert.ok(rig.peer.childInputs.some((text) => text.includes("RESUME_MSG")), "the resumed child received the repair");
+    assert.equal(runIds(rig).length, 2);
+  } finally {
     await rig.close();
   }
 });

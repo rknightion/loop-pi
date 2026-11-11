@@ -1,4 +1,4 @@
-// Lane launcher pin (pi-subagents 0.85.0 `requireLauncher`). Every shipped lane agent names
+// Lane launcher pin (pi-subagents 0.88.0 `requireLauncher`). Every shipped lane agent names
 // `launcher: nopush`. The root pins each lane agent's definition digest once, when its session
 // starts, using pi-subagents' own preflight (the digest `requireLauncher` is documented against),
 // and every root launch then carries `requireLauncher: {name: "nopush", definitionDigest}`.

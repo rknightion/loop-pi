@@ -55,3 +55,54 @@ test("a saved do-not-trust decision is honoured for a folder with no trust-requi
   await runOnce({ agentDir, cwd: repo, extension });
   assert.deepEqual(read(facts), [{ trusted: false }]);
 });
+
+// A bash call whose shell exits at once while a backgrounded descendant keeps the inherited
+// stdout/stderr pipes open. pi waits for the pipes to fall idle (100 ms after the last chunk), so a
+// quiet descendant never delays the call and the shell's own exit code is its result. A descendant
+// that keeps writing holds the call to its deadline: that is a timeout, and since pi 1.5.1 the
+// timeout message also reports the shell's exit code (the code is reported, never the call's result).
+async function runBash(command: string, timeoutSeconds: number): Promise<{ isError: boolean; text: string; elapsedMs: number }> {
+  const session = startPiRpc({
+    extensions: [FAUX_EXTENSION], agentDir: freshDir("pi-contract-home-"), cwd: freshDir("pi-contract-repo-"),
+    subagentTempRoot: freshDir("pi-contract-sub-"),
+    fauxScriptPath: writeFauxScript([
+      { match: "RUN_BASH", once: true, toolCalls: [{ name: "bash", args: { command, timeout: timeoutSeconds } }] },
+      { match: ".*", text: "done" },
+    ]),
+  });
+  try {
+    session.send({ type: "prompt", id: "go", message: "RUN_BASH" });
+    // Time the tool call itself, not pi's startup or the model turns around it.
+    await session.waitFor(e => e.type === "tool_execution_start" && e.toolName === "bash", 60_000);
+    const startedAt = Date.now();
+    const ended = await session.waitFor(e => e.type === "tool_execution_end" && e.toolName === "bash", 60_000);
+    const elapsedMs = Date.now() - startedAt;
+    await session.waitFor(e => e.type === "agent_settled", 30_000);
+    const content = (ended.result as { content?: { type: string; text?: string }[] }).content ?? [];
+    return { isError: ended.isError === true, text: content.map(item => item.text ?? "").join("\n"), elapsedMs };
+  } finally { await session.close(); }
+}
+
+test("bash: a shell that exits 0 while a quiet descendant holds the output pipes is a success, not a timeout", { timeout: 90_000 }, async () => {
+  // The descendant outlives the 2 s deadline (and is itself bounded at 5 s, so a failed assertion
+  // leaves nothing running): a pi that waited for the pipes to close would time out instead.
+  const { isError, text, elapsedMs } = await runBash("sleep 5 & echo shell_done", 2);
+  assert.equal(isError, false, text);
+  assert.match(text, /shell_done/);
+  assert.doesNotMatch(text, /timed out/);
+  assert.ok(elapsedMs < 2_000, `the call must end on the shell's exit plus pi's idle grace, not wait for the descendant: ${elapsedMs} ms`);
+});
+
+test("bash: a shell that exits 0 while a descendant keeps writing times out and reports the shell exit code", { timeout: 90_000 }, async () => {
+  // The writer never ends on its own; the deadline's process-group kill stops it. pi finishes 100 ms
+  // after the shell exits unless output keeps arriving, so the writer must already be writing when the
+  // shell exits: one process writes every 5 ms (no fork per tick), and the shell waits 0.5 s for it to
+  // start before exiting. Without that wait, process startup alone can outlast the grace on a loaded runner.
+  const writer = `${JSON.stringify(process.execPath)} -e 'setInterval(() => console.log("tick"), 5)'`;
+  const { isError, text } = await runBash(`echo shell_done; ${writer} & sleep 0.5; exit 0`, 2);
+  assert.equal(isError, true, `a descendant that keeps writing past the deadline is still a timeout: ${text}`);
+  assert.match(text, /shell_done/);
+  assert.match(text, /tick/, "the writer was writing before the deadline");
+  assert.match(text, /Command timed out after 2 seconds\. The shell exited with code 0 after \d+(\.\d+)? seconds, but background processes it started kept writing output until the timeout\./);
+  assert.doesNotMatch(text, /Command exited with code/);
+});

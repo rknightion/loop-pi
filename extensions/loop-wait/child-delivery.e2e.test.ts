@@ -114,6 +114,25 @@ const SHAPES = [
     last: `SENIOR_GOT ${SEED}`,
   },
   {
+    // pi-subagents 0.88.0 locks a child's queue once its final reply carries an `acceptance-report`
+    // fence (malformed included): `agent.steer`/`followUp` throw. The boundary draft is appended to the
+    // session and the run continued through pi's boundary, not through that queue, so delivery holds.
+    // The root's completion notice is still the fence-bearing reply: pi-subagents' getFinalOutput prefers
+    // the latest message that carries a report over later plain text (the senior prompt therefore keeps
+    // acceptance-report blocks out of its interim waiting turns).
+    name: "the senior's waiting reply carries an acceptance-report fence, which locks its steer queue",
+    order: "senior-first",
+    senior: [
+      { match: `loop-pi: child run .*${SEED}`, text: `SENIOR_GOT ${SEED}` },
+      { match: "Async: scout", text: "WAITING_FOR_SCOUT\n```acceptance-report\nnot json\n```" },
+      LAUNCH_SCOUT,
+    ],
+    scoutMs: 4000,
+    marker: "WAITING_FOR_SCOUT",
+    last: `SENIOR_GOT ${SEED}`,
+    rootNotice: "WAITING_FOR_SCOUT",
+  },
+  {
     // The senior works on while the child runs and writes its return before settling: the result is
     // recorded but the run is not continued, so the root still receives that return.
     name: "the senior already wrote its return when the child result arrives",
@@ -181,7 +200,9 @@ for (const shape of SHAPES) {
       assert.ok(scoutPath, "the scout really finished, or this test proves nothing about delivery");
       const texts = assistantTexts(seniorPath!);
       assert.equal(texts.at(-1), shape.last, `the senior's last word: ${JSON.stringify(texts)}`);
-      assert.ok(notice!.includes(JSON.stringify(shape.last).slice(1, -1)), `the root received that last word: ${notice!.slice(0, 800)}`);
+      const rootWord = (shape as { rootNotice?: string }).rootNotice ?? shape.last;
+      assert.ok(notice!.includes(JSON.stringify(rootWord).slice(1, -1)), `the root received ${rootWord}: ${notice!.slice(0, 800)}`);
+      if (rootWord !== shape.last) assert.ok(!notice!.includes(shape.last), "the root's notice is the earlier reply, not the continued one");
       // The timing each shape claims actually happened.
       const scoutDone = assistantRows(scoutPath!).find((r) => r.text.trim() === SEED)!.at;
       const seniorMarker = assistantRows(seniorPath!).find((r) => r.text.includes(shape.marker))!.at;
