@@ -234,6 +234,8 @@ test("proto root: loop-land under watch_start, watch_process and bash names a ru
     `loop-land summary --repo ${cwd} --run-dir ${contractRunDir} --check`,
     // The guard's own protected directory named as an argument is a read, not a write.
     `loop-land summary --repo ${cwd} --run-dir ${runDir}`,
+    `cat ${runDir}/push-log.jsonl`,
+    `ls -l ${runDir}`,
   ];
   for (const tool of ["watch_start", "watch_process", "bash"]) {
     for (const command of landing) {

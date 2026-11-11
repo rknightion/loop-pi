@@ -33,8 +33,6 @@ interface Peer {
   childFirstDelayMs: number;
   /** The child's first reply is a malformed acceptance-report instead of a `block_sync` call. */
   childReport: boolean;
-  /** Set once that reply has been sent. */
-  reportSent: boolean;
   holdNextWake: boolean;
   wakeHeld: boolean;
   releaseWake(): void;
@@ -55,7 +53,7 @@ function lastUserText(input: any[]): string {
 }
 
 async function startPeer(childBlockMs: number, childFirstDelayMs = 0, childReport = false): Promise<Peer> {
-  const peer = { rootOutputs: [], childInputs: [], childBlockMs, childFirstDelayMs, childReport, reportSent: false } as unknown as Peer;
+  const peer = { rootOutputs: [], childInputs: [], childBlockMs, childFirstDelayMs, childReport } as unknown as Peer;
   peer.holdNextWake = false;
   peer.wakeHeld = false;
   peer.releaseWake = () => {};
@@ -85,7 +83,6 @@ async function startPeer(childBlockMs: number, childFirstDelayMs = 0, childRepor
       else if (peer.childReport) {
         // Any acceptance-report fence locks the child's queue, a malformed body included.
         item = text(ACCEPTANCE_REPORT_REPLY);
-        peer.reportSent = true;
       } else {
         send({ type: "response.created", response: { id, status: "in_progress", output: [] } });
         if (peer.childFirstDelayMs) await new Promise((r) => setTimeout(r, peer.childFirstDelayMs));
@@ -224,6 +221,20 @@ async function launchBlockedChild(rig: Rig): Promise<string> {
   // The child is inside block_sync once its saved-work file exists.
   await waitForCondition(() => (existsSync(join(rig.cwd, "saved-work.txt")) ? true : undefined), 30_000, 50);
   return id;
+}
+
+/** The runner's event log for the run holds the child's completed assistant reply carrying the fence. */
+function childReplied(rig: Rig, id: string): boolean {
+  const events = join(rig.runsDir, id, "events.jsonl");
+  if (!existsSync(events)) return false;
+  return readFileSync(events, "utf8").split("\n").some((line) => {
+    if (!line.includes('"message_end"')) return false;
+    try {
+      const event = JSON.parse(line);
+      return event.type === "message_end" && event.message?.role === "assistant" && event.message.stopReason === "stop"
+        && JSON.stringify(event.message.content).includes("```acceptance-report");
+    } catch { return false; }
+  });
 }
 
 const claimPath = (rig: Rig, id: string) => join(rig.runsDir, id, "control", "steer-recovery", "claim.json");
@@ -376,7 +387,8 @@ test("acceptance-report lock: a steer to a reported child is rejected without a 
   try {
     await prompt(rig, "LAUNCH");
     const id = await waitForCondition(() => runIds(rig)[0], 30_000);
-    await waitForCondition(() => (rig.peer.reportSent ? true : undefined), 30_000, 50);
+    // Ready once the runner has recorded the child's completed reply, not when the provider sent it.
+    await waitForCondition(() => (childReplied(rig, id) ? true : undefined), 30_000, 20);
     // The default steer asks for steering recovery (an interrupt plus a restart on a failed
     // acknowledgement), so a restart here would show up as a second run or a recovery claim.
     const out = await prompt(rig, `STEER ${id}`);

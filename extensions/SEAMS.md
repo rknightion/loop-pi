@@ -1182,16 +1182,20 @@ source sends a `loop-*` custom message type the set does not name.
     v3 rules.
   - The ledger is `<run dir>/landings.jsonl`, one JSON object per line, appended by the landing tool.
     Keys read: `event` (`ready`, `refused`, `merged`, `verified`, `abandoned`, `closeout-check` or
-    `error`), `ts`, `pr` (an integer; the landing's key, else the first 12 characters of `head`),
-    `outcome` (`ok` on a `closeout-check`), and `main` (`green`, `red`, `unread`) and `deploy`
-    (`synced`, `failed`, `unread`, `n/a`) on `verified`. The closeout does not count when the ledger
-    is missing, is not a regular file, is not UTF-8, or has a line that is not a JSON object with a
-    known event and a readable `ts`, a landing event with neither `pr` nor `head`, or a `verified`
-    event with an invalid `main` or `deploy`; when a landing's last event is `ready` or its last
-    `merged` has no later `verified`, or its last `verified` has main or the deploy `unread`; or when
-    there is no `closeout-check`, the last one is not `ok`, or it comes before the last `merged`
-    event or carries an older `ts`. A ledger with no landing events and an `ok` check counts. An
-    `error` event changes no landing's state, and main `red` or a deploy `failed` does not block.
+    `error`), `ts`, `pr` (a plain JSON integer, else the landing is keyed by the first 12 characters
+    of `head`), `outcome` (`ok` on a `closeout-check`), and `main` (`green`, `red`, `unread`) and
+    `deploy` (`synced`, `failed`, `unread`, `n/a`) on `verified`. The closeout does not count when
+    the ledger is missing, is not a regular file, is larger than 16 MiB or is not UTF-8 (unreadable),
+    or has a line that is not a JSON object with a known event and a readable `ts`, a landing event
+    with neither a usable `pr` nor `head`, a landing event whose integer `pr` is outside the safe
+    integer range, or a `verified` event with an invalid `main` or `deploy`. A landing that was
+    merged is settled only by a `verified` event after its last `merged`, whatever event follows,
+    and that latest `verified` must not have main or the deploy `unread`; a landing never merged
+    blocks only when its last event is `ready`, and a `verified` with `unread` on such a landing
+    blocks nothing. The closeout also does not count when there is no `closeout-check`, the last one
+    is not `ok`, or it comes before the last `merged` event or carries an older `ts`. A ledger with
+    no landing events and an `ok` check counts. An `error` event changes no landing's state, and
+    main `red` or a deploy `failed` does not block.
   - Reading is bounded (a 16 MiB ledger, a 1 MiB charter header) and never blocks on a special file.
     The re-prompt chain is unchanged: after the third idle nudge the stop is released with the
     `loop-continuation-chain-exhausted` incident and the run has no counting closeout.
