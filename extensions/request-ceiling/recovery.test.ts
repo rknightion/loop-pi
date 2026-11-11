@@ -685,8 +685,8 @@ export default function(pi) {
 test("real pi recovers a structured no-output anchor refusal with stable affinity and distinct attempts", { timeout: 20000 }, async () => {
   const { seen, events } = await runScenario("anchor");
   assert.equal(seen.length, 2);
-  assert.equal(typeof seen[0].headers.session_id, "string");
-  assert.equal(seen[0].headers.session_id, seen[1].headers.session_id);
+  assert.equal(typeof seen[0].headers["session-id"], "string");
+  assert.equal(seen[0].headers["session-id"], seen[1].headers["session-id"]);
   assert.equal(typeof seen[0].headers["x-client-request-id"], "string");
   assert.equal(typeof seen[1].headers["x-client-request-id"], "string");
   assert.notEqual(seen[0].headers["x-client-request-id"], seen[1].headers["x-client-request-id"]);
