@@ -221,6 +221,40 @@ test("proto root: bash loop-state with --by ext and a redirect into the run dir 
   assert.equal(blocked(await root().call("bash", { command: "loop-state append codex/state-repo-loop1.jsonl land task=T-1 --by ext" })), false);
 });
 
+test("proto root: loop-land under watch_start, watch_process and bash names a run dir without a protected-path refusal", async () => {
+  const r = root();
+  const head = "a".repeat(40);
+  const contractRunDir = join(cwd, "codex", "loop3");
+  const landing = [
+    `loop-land ready --repo ${cwd} --run-dir ${contractRunDir} --pr 7 --head ${head} --issues 1,2`,
+    `loop-land ready --repo ${cwd} --run-dir codex/loop3 --pr 7 --head ${head} --issues 1 --fix-forward "main is red"`,
+    `loop-land verify --repo ${cwd} --run-dir ${contractRunDir} --pr 7`,
+    `loop-land ready --repo ${cwd} --run-dir ${contractRunDir} --sha ${head} --issues 1`,
+    `loop-land abandon --repo ${cwd} --run-dir ${contractRunDir} --pr 7 --reason "not merging"`,
+    `loop-land summary --repo ${cwd} --run-dir ${contractRunDir} --check`,
+    // The guard's own protected directory named as an argument is a read, not a write.
+    `loop-land summary --repo ${cwd} --run-dir ${runDir}`,
+  ];
+  for (const tool of ["watch_start", "watch_process", "bash"]) {
+    for (const command of landing) {
+      const result = await r.call(tool, { command, deadline_s: 3600, interval_s: 30, label: "land" });
+      assert.equal(blocked(result), false, `${tool}: ${command}: ${result?.reason}`);
+    }
+  }
+  // A write into the run dir stays refused through the same entries, however the command is wrapped.
+  for (const tool of ["watch_start", "watch_process", "bash"]) {
+    for (const command of [
+      `echo x >> ${runDir}/push-log.jsonl`,
+      `loop-land summary --repo ${cwd} --run-dir ${contractRunDir} > ${runDir}/summary.txt`,
+      `cp table.txt $LOOP_PI_RUN_DIR/standing.md`,
+    ]) {
+      const result = await r.call(tool, { command, deadline_s: 3600, interval_s: 30, label: "land" });
+      assert.equal(blocked(result), true, `${tool}: ${command}`);
+      assert.match(result.reason, /run dir/, `${tool}: ${command}`);
+    }
+  }
+});
+
 // --- root: subagent status polling ---------------------------------------------------------------
 
 test("proto root: a repeated subagent status with no wake since the last one is refused", async () => {

@@ -27,7 +27,9 @@ Three pi extensions, a home template and an installer:
 - `extensions/loop-continuation` arms the root on a v3 launch ("You are the root" plus one
   `codex/closeout-<name>-loop<N>.md` path, or a bare `launch-*` file path), checks it against the
   run's `codex/charter-*` file and appends the state log's `open` itself. It re-prompts a root that
-  stops before the loop is finished (a counted closeout or `PAUSED:` ends that; a root with no live
+  stops before the loop is finished (a counted closeout or `PAUSED:` ends that; under a charter that says
+  `protocol: v4` a closeout counts only once the run's landing ledger is settled and its last
+  `closeout-check` is `ok`; a root with no live
   lane and nothing armed to wake it is told to dispatch ready work or close out), and triggers an
   optional transcript sync script.
 - Recovery is automatic for an armed root: when a provider error, a stalled request or a

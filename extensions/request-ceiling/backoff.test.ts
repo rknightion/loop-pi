@@ -40,6 +40,8 @@ test("retryable errors are classified by status: 429 first, then 5xx, else other
     ["The stream was interrupted", "server"],
     ["HTTP/2 stream failed", "server"],
     ["stream disconnected before completion: stream closed before response.completed", "server"],
+    // pi-ai 1.5.2 retries a Claude Code stream cut mid-reply (utils/retry.js, #11879).
+    ["Claude Code's stream from Anthropic was cut short after the reply had begun", "server"],
     ["request to https://oauth2.example.test/token failed, reason: ", "other"],
     ["fetch failed", "other"],
     ["Request timed out after 300000ms", "other"],

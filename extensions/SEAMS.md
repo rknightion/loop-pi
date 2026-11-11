@@ -85,6 +85,15 @@ public statement of those contracts.
   final reply carries an `acceptance-report` fence (a malformed one included), the child clears its
   queue and `agent.steer`/`followUp` throw (`src/runs/shared/child-session.js`); a steer it cannot
   deliver is recorded as rejected and is not restarted, so a repair resumes the lane instead.
+  Boundary drafts from `loop-wait/lane-children.ts` go through pi's session boundary, not that queue,
+  so a senior's child results still arrive after the lock; the root's completion notice, though, is
+  the latest fence-bearing reply (`getFinalOutput`), which is why interim waiting turns carry no
+  `acceptance-report` block. `steer-recovery.e2e.test.ts` and `loop-wait/child-delivery.e2e.test.ts` pin both.
+- **Bash timeout with a descendant on the pipes (pi 1.5.2):** a shell that exits while a quiet
+  background process holds stdout/stderr returns its own exit code after pi's 100 ms idle grace, with no
+  timeout. Only a descendant that keeps writing holds the call to its deadline: that is a timeout, and
+  the message now also reports the shell's exit code (`core/tools/bash.js`); the call is still an error.
+  `pi-runtime-contract.test.ts` pins both.
 - **Custom-message runs (pi 1.5.2):** `before_agent_start` also fires for runs started by
   `pi.sendMessage(..., { triggerTurn: true })` (loop-wait wakes, request-ceiling incidents, recovery
   and continuation nudges). The event is a union on `messageType`: `"user"` carries `prompt`,
@@ -1155,6 +1164,39 @@ source sends a `loop-*` custom message type the set does not name.
 
 ## Closeout and root fences
 
+- **Closeout counting** (seam S2, `loop-continuation/report-status.ts`; loop-wait and loop-continuation
+  ask it through `reportStatus`/`reportCounts`, and the `agent_before_settle` and settle paths treat
+  a counted closeout as the end of the run). This was a frozen v3 seam; the landing-ledger rule below
+  is a deliberate, additive change to it, and a charter that does not say `protocol: v4` is still
+  judged by the v3 rules alone.
+  - v3 rules, every run: the closeout is a regular file (not a link) written after the launch, line 1
+    is `# Closeout: <repo> loop<N> · Charter: <64 hex>` with the launch's loop number, and each of
+    `## Landed`, `## Parked`, `## For ratification` and `## Notes` is a line of its own.
+  - v4 ledger rule, applied only after those pass. From the closeout's path by the contract's file
+    naming (`<dir>/closeout-<name>-loop<N>.md`): the run directory is `<dir>/loop<N>/` (the contract
+    run directory, never `$LOOP_PI_RUN_DIR`) and the charter is the last regular file by name of
+    `<dir>/charter-*-loop<N>.md`. The rule applies when the charter's header (`key: value` lines
+    before its first `## ` heading, outside code fences, the first line of each key winning, the
+    first token compared with quotes removed and case folded) says `protocol: v4` and does not say
+    `loop-land: off`. A closeout name with no loop number, no charter or an unreadable one means the
+    v3 rules.
+  - The ledger is `<run dir>/landings.jsonl`, one JSON object per line, appended by the landing tool.
+    Keys read: `event` (`ready`, `refused`, `merged`, `verified`, `abandoned`, `closeout-check` or
+    `error`), `ts`, `pr` (an integer; the landing's key, else the first 12 characters of `head`),
+    `outcome` (`ok` on a `closeout-check`), and `main` (`green`, `red`, `unread`) and `deploy`
+    (`synced`, `failed`, `unread`, `n/a`) on `verified`. The closeout does not count when the ledger
+    is missing, is not a regular file, is not UTF-8, or has a line that is not a JSON object with a
+    known event and a readable `ts`, a landing event with neither `pr` nor `head`, or a `verified`
+    event with an invalid `main` or `deploy`; when a landing's last event is `ready` or its last
+    `merged` has no later `verified`, or its last `verified` has main or the deploy `unread`; or when
+    there is no `closeout-check`, the last one is not `ok`, or it comes before the last `merged`
+    event or carries an older `ts`. A ledger with no landing events and an `ok` check counts. An
+    `error` event changes no landing's state, and main `red` or a deploy `failed` does not block.
+  - Reading is bounded (a 16 MiB ledger, a 1 MiB charter header) and never blocks on a special file.
+    The re-prompt chain is unchanged: after the third idle nudge the stop is released with the
+    `loop-continuation-chain-exhausted` incident and the run has no counting closeout.
+  - The Claude Code and Codex stop hook applies the same rule from the same files; the two
+    implementations must stay in step.
 - **Closeout**: `/loop-closeout` (loop-wait) emits `pi.events.emit("loop-closeout", {lines, pending})`
   after its sweep; loop-continuation runs
   `loop-pi-audit closeout --run-dir <rd> --push-log <rd>/push-log.jsonl` plus, for a root armed with a
