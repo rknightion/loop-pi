@@ -425,6 +425,9 @@ export function installRecovery(pi: ExtensionAPI, loadSettings: (ctx?: Extension
     // A deadline can expire while the refusal response is arriving. Preserve that
     // refusal before attributing the stop to this episode's exhausted budget.
     else if (failed && expired) reason = exhaustionCause ?? "episode-expired";
+    // A turn started while halted is aborted by recovery; pi reports an abort during
+    // provider setup as "aborted", so repeat the held stop instead of leaving it unclassified.
+    else if (halted && !operatorCancelled && message.stopReason === "aborted") reason = stopReason ?? "recovery-halted";
     else if (failed && !responses && isContextOverflow(message, ctx.model?.contextWindow)) reason = "summary-route-not-established";
     else if (failed && !ownedRecovery && (message.stopReason === "error" || timedOut)) {
       if (!portable) reason = "protected-request";
