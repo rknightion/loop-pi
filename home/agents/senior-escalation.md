@@ -2,7 +2,7 @@
 name: senior-escalation
 description: ESCALATION lane (tripwire or owner-named): judgement and execution after earlier rounds failed.
 advertise: true
-model: openai/gpt-6-astra
+model: openai/gpt-6.2-astra
 thinking: high
 tools: read, bash, edit, write, grep, find, ls, watch_process
 extensions: {{HOME}}/vendor/agento11y-pi/dist/index.js

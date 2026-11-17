@@ -99,8 +99,8 @@ NODE_CANDIDATES = ("/opt/homebrew/bin/node", "/usr/local/bin/node", "/usr/bin/no
 AGENT_SET = {"worker", "composer", "senior", "senior-escalation", "reviewer", "scout"}
 SMOKE_COMMAND = "loop-closeout"
 # Defaults for settings.json `loopPi`; the extensions use the same ones (model-family.ts).
-DEFAULT_FAMILY = {"provider": "openai", "pattern": r"^(gpt-6\.1-sol|gpt-6\.1-terra|gpt-6-astra)$", "name": "gpt-6"}
-DEFAULT_ROOT_ROUTE = {"provider": "openai", "model": "gpt-6.1-sol", "thinking": "high"}
+DEFAULT_FAMILY = {"provider": "openai", "pattern": r"^(gpt-6\.2-sol|gpt-6\.1-terra|gpt-6\.2-astra)$", "name": "gpt-6"}
+DEFAULT_ROOT_ROUTE = {"provider": "openai", "model": "gpt-6.2-sol", "thinking": "high"}
 EXCLUDED_PARTS = {"node_modules", "__tests__", "test-support", "fixtures"}
 
 

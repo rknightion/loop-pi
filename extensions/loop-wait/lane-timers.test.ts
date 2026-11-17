@@ -204,8 +204,8 @@ describe("loop-pi-runtime entry", () => {
         providers: {
           openai: {
             modelOverrides: {
-              "gpt-6.1-sol": { samplingParams: { service_tier: "priority" } },
-              "gpt-6-astra": { contextWindow: 1 },
+              "gpt-6.2-sol": { samplingParams: { service_tier: "priority" } },
+              "gpt-6.2-astra": { contextWindow: 1 },
             },
           },
         },
@@ -215,8 +215,8 @@ describe("loop-pi-runtime entry", () => {
       v: 1,
       variant: "fast",
       models: {
-        "gpt-6.1-sol": { service_tier: "priority" },
-        "gpt-6-astra": { service_tier: "default" },
+        "gpt-6.2-sol": { service_tier: "priority" },
+        "gpt-6.2-astra": { service_tier: "default" },
         "faux-1": { service_tier: "default" },
       },
     });

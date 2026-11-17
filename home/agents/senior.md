@@ -2,7 +2,7 @@
 name: senior
 description: SENIOR lane: freezing a shared contract (seam, interface, data model, migration design), an unknown cause, a security or privacy call, a design return, or a worker or composer failure escalated by the root; commits locally only. May spawn scout, worker and reviewer when its brief grants a count.
 advertise: true
-model: openai/gpt-6.1-sol
+model: openai/gpt-6.2-sol
 thinking: high
 tools: read, bash, edit, write, grep, find, ls, watch_process, subagent
 extensions: {{HOME}}/vendor/agento11y-pi/dist/index.js
