@@ -145,11 +145,12 @@ export function cleanupAll(): void {
 
 // Execute the installed bundle's actual module body, not its parallel src/ copy.
 // esbuild preserves module boundaries as comments; follow only chunks reachable from pi.extensions.
-export function bundledModuleUrl(module: string, names: string[]): string {
+export function bundledModuleUrl(module: string, names: string[], dependencies: string[] = []): string {
   const pkg = JSON.parse(readFileSync(join(PI_SUBAGENTS_PACKAGE_DIR, "package.json"), "utf8"));
   const pending = [...pkg.pi.extensions] as string[];
   const seen = new Set<string>();
-  const sections: string[] = [];
+  const modules = [...dependencies, module];
+  const sections = new Map<string, string[]>();
   while (pending.length) {
     const relative = pending.pop()!;
     if (seen.has(relative)) continue;
@@ -159,17 +160,25 @@ export function bundledModuleUrl(module: string, names: string[]): string {
     for (const match of text.matchAll(/(?:from\s*|import\s*\()"(\.\/[^"\n]+\.js)"/g)) {
       pending.push(join(dirname(relative), match[1]));
     }
-    const marker = `// src/${module}.ts\n`;
-    let start = text.indexOf(marker);
-    while (start >= 0) {
-      start += marker.length;
-      const end = text.indexOf("\n// src/", start);
-      sections.push(text.slice(start, end < 0 ? undefined : end));
-      start = text.indexOf(marker, start);
+    for (const name of modules) {
+      const marker = `// src/${name}.ts\n`;
+      let start = text.indexOf(marker);
+      while (start >= 0) {
+        start += marker.length;
+        const end = text.indexOf("\n// src/", start);
+        const matches = sections.get(name) ?? [];
+        matches.push(text.slice(start, end < 0 ? undefined : end));
+        sections.set(name, matches);
+        start = text.indexOf(marker, start);
+      }
     }
   }
-  if (!sections.length) throw new Error(`installed bundle is missing ${module}`);
-  return `data:text/javascript;base64,${Buffer.from(sections.join("\n") + `\nexport { ${names.join(", ")} };`).toString("base64")}`;
+  const body = modules.flatMap((name) => {
+    const matches = sections.get(name);
+    if (!matches) throw new Error(`installed bundle is missing ${name}`);
+    return matches;
+  });
+  return `data:text/javascript;base64,${Buffer.from(body.join("\n") + `\nexport { ${names.join(", ")} };`).toString("base64")}`;
 }
 
 export interface PiRpcSession {

@@ -25,7 +25,7 @@ export default function (pi: ExtensionAPI) {
         cwd: ctx.cwd,
         ...(params.command ? { commands: [{ command: params.command }] } : {}),
       };
-      const refusal: string | undefined = await approveWorkflowChildLaunch(ctx, () => args, signal ?? new AbortController().signal);
+      const { refusal } = await approveWorkflowChildLaunch(ctx, () => args, signal ?? new AbortController().signal);
       return { content: [{ type: "text", text: JSON.stringify({ offered, refusal: refusal ?? null }) }], details: {} };
     },
   });

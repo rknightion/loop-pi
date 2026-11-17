@@ -32,7 +32,7 @@ test("idle summary cancellation re-holds the shared wake reservation after compa
   fire("agent_settled");
   assert.equal(fire("session_before_compact", { preparation: { isSplitTurn: false, messagesToSummarize: [], turnPrefixMessages: [] } }), undefined, "idle summary is allowed");
   fire("session_compact_failed", { aborted: true });
-  const { createParentWake } = await import(bundledModuleUrl("shared/parent-wake", ["createParentWake"]));
+  const { createParentWake } = await import(bundledModuleUrl("shared/parent-wake", ["createParentWake"], ["shared/compaction-interruption"]));
   const wake = createParentWake(pi, () => Date.now());
   wake.bindSession(ctx);
   const notice = { customType: "subagent-notify", content: "finished" };
@@ -160,7 +160,7 @@ async function boundaryCase(options: BoundaryOptions) {
   writeFileSync(fixture, `
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { createParentWake } from ${JSON.stringify(bundledModuleUrl("shared/parent-wake", ["createParentWake"]))};
+import { createParentWake } from ${JSON.stringify(bundledModuleUrl("shared/parent-wake", ["createParentWake"], ["shared/compaction-interruption"]))};
 import { installRequestCeiling, installRetryBackoff } from ${JSON.stringify(join(HERE, "index.ts"))};
 export default function(pi) {
   const child = process.env.PI_SUBAGENT_CHILD === "1";
