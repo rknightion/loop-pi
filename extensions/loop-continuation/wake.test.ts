@@ -20,7 +20,7 @@ const plainStop = (pi: Awaited<ReturnType<typeof fakePi>>) =>
 const nudged = (result: any) => Array.isArray(result?.entries) && result.entries.some((e: any) => e.customType === "loop-continuation");
 const PACKAGE = new URL("../../node_modules/pi-subagents/src/", import.meta.url);
 
-const bundledWake = await import(bundledModuleUrl("shared/parent-wake", ["createParentWake"]));
+const bundledWake = await import(bundledModuleUrl("shared/parent-wake", ["createParentWake"], ["shared/compaction-interruption"]));
 
 for (const [label, createWake] of [["source", createParentWake], ["installed bundle", bundledWake.createParentWake]] as const) {
   test(`${label} wakes an idle parent with the original notice and reserves one turn`, () => {
