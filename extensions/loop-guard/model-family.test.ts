@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { isAllowedModel, modelFamilyConfig, refusedPayload, subagentModelOverrides, subagentOverrideBlock } from "./model-family.ts";
 
-test("only gpt-6.1-sol, gpt-6.1-terra and gpt-6-astra on openai are allowed", () => {
-  for (const id of ["gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra"]) assert.ok(isAllowedModel("openai", id), id);
+test("only gpt-6.2-sol, gpt-6.1-terra and gpt-6.2-astra on openai are allowed", () => {
+  for (const id of ["gpt-6.2-sol", "gpt-6.1-terra", "gpt-6.2-astra"]) assert.ok(isAllowedModel("openai", id), id);
   for (const id of [
     "gpt-6-luna",
     "gpt-6-sol",
@@ -14,7 +14,7 @@ test("only gpt-6.1-sol, gpt-6.1-terra and gpt-6-astra on openai are allowed", ()
     "gpt-6-sol-x/../gpt-5",
     "gpt-6.1",
     "gpt-6..1-sol",
-    "gpt-6-astra-x",
+    "gpt-6.2-astra-x",
   ]) {
     assert.ok(!isAllowedModel("openai", id), id);
   }
@@ -26,7 +26,7 @@ test("gpt-6-luna is refused by the default family: no switch, no request, no ove
   const defaults = modelFamilyConfig({});
   assert.ok(!isAllowedModel("openai", "gpt-6-luna", defaults));
   assert.ok(!defaults.members.includes("gpt-6-luna"));
-  assert.deepEqual(defaults.members, ["gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra"]);
+  assert.deepEqual(defaults.members, ["gpt-6.2-sol", "gpt-6.1-terra", "gpt-6.2-astra"]);
   assert.deepEqual(refusedPayload({ provider: "openai", id: "gpt-6-luna" }, { model: "gpt-6-luna", input: [] }), {
     model: "loop-pi-refused:gpt-6-luna",
     input: [],
@@ -35,7 +35,7 @@ test("gpt-6-luna is refused by the default family: no switch, no request, no ove
 
 test("any subagent model override is found wherever it sits: agent files pin the route", () => {
   assert.deepEqual(subagentModelOverrides({ agent: "worker", task: "x" }), []);
-  assert.deepEqual(subagentModelOverrides({ model: "openai/gpt-6-astra:max" }), ["openai/gpt-6-astra:max"]);
+  assert.deepEqual(subagentModelOverrides({ model: "openai/gpt-6.2-astra:max" }), ["openai/gpt-6.2-astra:max"]);
   assert.deepEqual(
     subagentModelOverrides({ tasks: [{ agent: "a", model: "openai/gpt-5.6-luna" }], chain: [{ model: { id: "gpt-5.5" } }] }),
     ["openai/gpt-5.6-luna", '{"id":"gpt-5.5"}'],
@@ -43,7 +43,7 @@ test("any subagent model override is found wherever it sits: agent files pin the
 });
 
 test("a request for a model outside the family is sent under a model name the provider rejects", () => {
-  assert.equal(refusedPayload({ provider: "openai", id: "gpt-6-astra" }, { model: "gpt-6-astra" }), undefined);
+  assert.equal(refusedPayload({ provider: "openai", id: "gpt-6.2-astra" }, { model: "gpt-6.2-astra" }), undefined);
   assert.deepEqual(refusedPayload({ provider: "openai", id: "gpt-5.6-sol" }, { model: "gpt-5.6-sol", input: [] }), {
     model: "loop-pi-refused:gpt-5.6-sol",
     input: [],
@@ -61,9 +61,9 @@ test("a subagent call may not shorten or reset a run deadline: agent files pin i
   ]) {
     assert.match(subagentOverrideBlock(input)?.reason ?? "", /run deadline/, JSON.stringify(input));
   }
-  assert.match(subagentOverrideBlock({ agent: "scout", model: "gpt-6-astra" })?.reason ?? "", /model override/);
+  assert.match(subagentOverrideBlock({ agent: "scout", model: "gpt-6.2-astra" })?.reason ?? "", /model override/);
   assert.equal(subagentOverrideBlock({ agent: "scout", task: "x" }), undefined);
-  for (const model of ["openai/gpt-6.1-sol:medium", "openai/gpt-6.1-terra:high", "openai/gpt-6-astra:high"]) {
+  for (const model of ["openai/gpt-6.2-sol:medium", "openai/gpt-6.1-terra:high", "openai/gpt-6.2-astra:high"]) {
     assert.match(subagentOverrideBlock({ agent: "scout", model })?.reason ?? "", /model override/);
   }
 });
@@ -72,13 +72,13 @@ test("the family and the fallback route come from settings loopPi, defaulting to
   const defaults = modelFamilyConfig({});
   assert.deepEqual(defaults, modelFamilyConfig({ loopPi: {} }));
   assert.equal(defaults.name, "gpt-6");
-  assert.deepEqual(defaults.fallback, { provider: "openai", id: "gpt-6.1-sol" });
+  assert.deepEqual(defaults.fallback, { provider: "openai", id: "gpt-6.2-sol" });
   // An overlay can pin the routed models exactly, so gpt-6-sol is refused.
-  const pinned = modelFamilyConfig({ loopPi: { modelFamily: { pattern: "^(gpt-6\\.1-sol|gpt-6\\.1-terra|gpt-6-astra)$" } } });
-  assert.ok(isAllowedModel("openai", "gpt-6.1-sol", pinned) && isAllowedModel("openai", "gpt-6.1-terra", pinned) && !isAllowedModel("openai", "gpt-6-sol", pinned));
+  const pinned = modelFamilyConfig({ loopPi: { modelFamily: { pattern: "^(gpt-6\\.2-sol|gpt-6\\.1-terra|gpt-6\\.2-astra)$" } } });
+  assert.ok(isAllowedModel("openai", "gpt-6.2-sol", pinned) && isAllowedModel("openai", "gpt-6.1-terra", pinned) && !isAllowedModel("openai", "gpt-6-sol", pinned));
   // A pattern-only overlay reports only the default members its pattern admits.
-  const narrowed = modelFamilyConfig({ loopPi: { modelFamily: { pattern: "^(gpt-6\\.1-sol|gpt-6-astra)$" } } });
-  assert.deepEqual(narrowed.members, ["gpt-6.1-sol", "gpt-6-astra"]);
+  const narrowed = modelFamilyConfig({ loopPi: { modelFamily: { pattern: "^(gpt-6\\.2-sol|gpt-6\\.2-astra)$" } } });
+  assert.deepEqual(narrowed.members, ["gpt-6.2-sol", "gpt-6.2-astra"]);
   const foreign = modelFamilyConfig({ loopPi: { modelFamily: { pattern: "^other-1$" } } });
   assert.deepEqual(foreign.members, []);
   assert.match(subagentOverrideBlock({ agent: "a", model: "x" }, foreign)?.reason ?? "", /family route \(\^other-1\$\)/);

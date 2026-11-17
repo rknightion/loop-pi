@@ -2,7 +2,7 @@
 name: reviewer
 description: REVIEW lane: read-only correctness, false-pass and security review of a diff or patch.
 advertise: true
-model: openai/gpt-6.1-sol
+model: openai/gpt-6.2-sol
 thinking: high
 tools: read, grep, find, ls, bash
 extensions: {{HOME}}/vendor/agento11y-pi/dist/index.js

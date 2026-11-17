@@ -344,7 +344,7 @@ telemetry code of its own and adds no configuration on top of the vendor's.
 ## Root launcher route
 
 The installer's `DEFAULT_ROOT_ROUTE` is
-`{provider: "openai", model: "gpt-6.1-sol", thinking: "high"}`. Settings
+`{provider: "openai", model: "gpt-6.2-sol", thinking: "high"}`. Settings
 `loopPi.rootRoute` override those defaults. The generated model-root launcher places caller
 arguments last, after its provider, model and thinking flags, so explicit caller flags win.
 

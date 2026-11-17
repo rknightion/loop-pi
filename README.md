@@ -103,13 +103,13 @@ Settings under `loopPi` in `home/settings.json` (or your overlay):
 
 | Key | Default | Meaning |
 |---|---|---|
-| `modelFamily` | `{"provider": "openai", "pattern": "^(gpt-6\\.1-sol\|gpt-6\\.1-terra\|gpt-6-astra)$", "name": "gpt-6"}` | the only models the root and lanes may run |
-| `rootRoute` | `{"provider": "openai", "model": "gpt-6.1-sol", "thinking": "high"}` | the root's model, and the fallback when a session selects one outside the family |
+| `modelFamily` | `{"provider": "openai", "pattern": "^(gpt-6\\.2-sol\|gpt-6\\.1-terra\|gpt-6\\.2-astra)$", "name": "gpt-6"}` | the only models the root and lanes may run |
+| `rootRoute` | `{"provider": "openai", "model": "gpt-6.2-sol", "thinking": "high"}` | the root's model, and the fallback when a session selects one outside the family |
 | `requiredHookScripts` | `[]` | guard scripts that must exist; a missing required one blocks every lane tool call |
 | `onIncident` | `[]` | argv of a notifier run, detached, whenever the loop writes an incident file; `{file}` in any element is replaced by the incident's absolute path. Failures are ignored. loop-pi ships no notifier: an overlay sets this to its own command |
 | `telemetry` | `{"exportTimeoutMs": 2000}` | the request timeout (500 to 2000 ms) the launcher gives the telemetry extension, so a session's exit flush (about twice it) stays under pi-subagents' 5 s child shutdown bound; see `extensions/SEAMS.md` "Telemetry" |
 
-The agent files name `openai/gpt-6.1-sol`, `openai/gpt-6.1-terra` and `openai/gpt-6-astra`. If you use another family, replace the agent files
+The agent files name `openai/gpt-6.2-sol`, `openai/gpt-6.1-terra` and `openai/gpt-6.2-astra`. If you use another family, replace the agent files
 through the overlay and set `modelFamily` and `rootRoute` to match; the installer refuses a build
 where they disagree.
 
@@ -119,9 +119,9 @@ where they disagree.
 |---|---|---|---|
 | `worker` | `gpt-6.1-terra` / high | yes | the default route for every task, guarded paths included; one task in its own worktree, handed back as an uncommitted candidate |
 | `composer` | `gpt-6.1-terra` / high | yes | composes reviewed candidates into a landing batch, or writes a board batch; commits locally only and returns the commit SHA; spawns nothing |
-| `senior` | `gpt-6.1-sol` / high | yes | freezing a shared contract, an unknown cause, a security or privacy call, a design return, or a worker or composer failure escalated by the root; the only agent that may spawn children (`scout`, `worker`, `reviewer`), at most two levels deep, when its brief grants a count |
-| `senior-escalation` | `gpt-6-astra` / high | yes | the same work after repair rounds failed, or when the owner names it |
-| `reviewer` | `gpt-6.1-sol` / high | no | reads a diff or patch and returns PASS or FAIL with findings by severity |
+| `senior` | `gpt-6.2-sol` / high | yes | freezing a shared contract, an unknown cause, a security or privacy call, a design return, or a worker or composer failure escalated by the root; the only agent that may spawn children (`scout`, `worker`, `reviewer`), at most two levels deep, when its brief grants a count |
+| `senior-escalation` | `gpt-6.2-astra` / high | yes | the same work after repair rounds failed, or when the owner names it |
+| `reviewer` | `gpt-6.2-sol` / high | no | reads a diff or patch and returns PASS or FAIL with findings by severity |
 | `scout` | `gpt-6.1-terra` / medium | no | read-only mapping, sweeps, wave drafts, CI or log reduction |
 
 Dispatch shapes: the root launches `worker`, `composer`, `senior` and `senior-escalation` lanes as
