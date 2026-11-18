@@ -9,6 +9,20 @@ first, then in every extension it touches.
 `just check` is the gate: run it before every commit. `just setup` installs dependencies and the
 git hooks.
 
+## Cursor Cloud specific instructions
+
+The pinned [environment](.cursor/environment.json) uses [the Node wrapper](.cursor/just.sh)
+to select the version declared by CI. It runs `just setup` to install the locked
+npm dependencies and Git hooks.
+The installer and live pi homes are separate from this development setup.
+
+- Run `.cursor/just.sh fmt-check lint </dev/null` for a fast check.
+- Run `.cursor/just.sh fmt-check lint test </dev/null` for the
+  source checks. The pi tests use the scripted provider.
+- The full `.cursor/just.sh check </dev/null` gate also needs
+  full Git history and an approved leak-term source. Use the hosted leak scan
+  or a maintainer environment with that source available.
+
 ## Task tracking
 
 This repository has no task board and does not use GitHub Issues for planned work: the maintainer
