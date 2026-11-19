@@ -12,10 +12,18 @@ It also asserts, from the files under `$PI_CODING_AGENT_DIR/agents/*.md`, that t
 agent set (SEAMS.md "Names and paths") is exactly what will be offered to the root -
 no name outside that set, and no C3 name missing.
 
+When the launcher passes `--node` and `--pi-cli`, it also asserts that every `provider/id` in the
+home's `settings.json` `enabledModels` resolves in the pi build that will run. pi's own
+`--list-models` is the source of truth (the bundled catalogue plus the per-home
+`models-store.json` cache). A missing model triggers one `pi update --models` for that home; the
+launch is refused only if it is still missing afterwards. Without those two arguments the check is
+skipped.
+
 Stdlib only. Exit 0 on a clean repository; exit 1 with every failing reason listed on
 stderr otherwise.
 """
 import argparse
+import json
 import os
 import re
 import subprocess
@@ -29,6 +37,12 @@ C3_AGENTS = {
     "reviewer",
     "scout",
 }
+
+# pi accepts `pattern:level` in enabledModels; strip only these known suffixes because model ids
+# may themselves contain a colon.
+THINKING_LEVELS = {"off", "minimal", "low", "medium", "high", "xhigh", "max"}
+LIST_TIMEOUT_SECONDS = 60
+REFRESH_TIMEOUT_SECONDS = 90
 
 FRONTMATTER_NAME = re.compile(r"^name:\s*(.+?)\s*$", re.MULTILINE)
 
@@ -181,7 +195,137 @@ def check_c3_agent_set(failures: list[str]) -> None:
         failures.append(f"C3 agent name(s) are missing from {agents_glob_dir}: {', '.join(missing)}")
 
 
-def preflight(repo: str) -> list[str]:
+def enabled_model_ids(agent_dir: str) -> list[tuple[str, str]]:
+    """The `(provider, id)` pairs named by `enabledModels` in the home's settings.json. Entries
+    that are globs, or have no `provider/` part, are fuzzy patterns in pi and are not checked.
+    A missing or unreadable settings file yields no pairs."""
+    try:
+        with open(os.path.join(agent_dir, "settings.json"), "r", encoding="utf-8") as fh:
+            settings = json.load(fh)
+    except (OSError, ValueError):
+        return []
+    entries = settings.get("enabledModels") if isinstance(settings, dict) else None
+    if not isinstance(entries, list):
+        return []
+    pairs: list[tuple[str, str]] = []
+    for entry in entries:
+        if not isinstance(entry, str) or "/" not in entry or any(c in entry for c in "*?["):
+            continue
+        head, _, tail = entry.rpartition(":")
+        if head and tail in THINKING_LEVELS:
+            entry = head
+        provider, _, model_id = entry.partition("/")
+        if provider and model_id:
+            pairs.append((provider, model_id))
+    return pairs
+
+
+def pi_env(agent_dir: str, offline: bool) -> dict[str, str]:
+    env = dict(os.environ)
+    env["PI_CODING_AGENT_DIR"] = agent_dir
+    if offline:
+        env["PI_OFFLINE"] = "1"
+    else:
+        env.pop("PI_OFFLINE", None)
+    return env
+
+
+def list_pi_models(node: str, pi_cli: str, agent_dir: str) -> tuple[set[tuple[str, str]] | None, str]:
+    """Run `--list-models` offline. Returns the resolvable `(provider, id)` pairs, or None and a
+    reason when the listing could not be taken. The table is on stdout with a `provider model ...`
+    header; warnings go to stderr."""
+    try:
+        result = subprocess.run(
+            [node, pi_cli, "--list-models"],
+            capture_output=True,
+            text=True,
+            timeout=LIST_TIMEOUT_SECONDS,
+            env=pi_env(agent_dir, offline=True),
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return None, f"`--list-models` could not run: {exc}"
+    if result.returncode != 0:
+        return None, f"`--list-models` exited {result.returncode}: {result.stderr.strip()[-300:]}"
+    rows = [line.split() for line in result.stdout.splitlines()]
+    return {(row[0], row[1]) for row in rows if len(row) >= 2 and row[0] != "provider"}, ""
+
+
+def refresh_pi_models(node: str, pi_cli: str, agent_dir: str) -> str:
+    """Run `update --models` once, with network. Returns "" on success, else why it failed."""
+    try:
+        result = subprocess.run(
+            [node, pi_cli, "update", "--models"],
+            capture_output=True,
+            text=True,
+            timeout=REFRESH_TIMEOUT_SECONDS,
+            env=pi_env(agent_dir, offline=False),
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return str(exc)
+    if result.returncode != 0:
+        return f"exited {result.returncode}: {(result.stderr.strip() or result.stdout.strip())[-300:]}"
+    return ""
+
+
+def check_enabled_models(node: str | None, pi_cli: str | None, failures: list[str]) -> None:
+    """Every `provider/id` in `enabledModels` must resolve in the pi build that will run, or pi
+    silently drops that model's overrides and falls back to a custom id. Print and RPC sessions,
+    and so child lanes, never refresh the catalogue cache themselves."""
+    if not node or not pi_cli:
+        print(
+            "loop-pi-preflight: skipping the enabledModels check (no --node/--pi-cli from the launcher).",
+            file=sys.stderr,
+        )
+        return
+    agent_dir_env = os.environ.get("PI_CODING_AGENT_DIR")
+    if not agent_dir_env:
+        return  # check_c3_agent_set already reports this.
+    agent_dir = os.path.expanduser(agent_dir_env)
+    wanted = enabled_model_ids(agent_dir)
+    if not wanted:
+        return
+
+    available, reason = list_pi_models(node, pi_cli, agent_dir)
+    if available is None:
+        failures.append(f"cannot verify enabledModels: {reason}")
+        return
+    # pi lists only the models it holds a credential for, so a provider with no rows at all says
+    # nothing about the catalogue: that home cannot start a model on it either way.
+    listed_providers = {provider for provider, _ in available}
+    for provider in sorted({provider for provider, _ in wanted} - listed_providers):
+        print(
+            f"loop-pi-preflight: no credential for provider {provider} in {agent_dir}; "
+            "its enabledModels entries were not checked.",
+            file=sys.stderr,
+        )
+    wanted = [pair for pair in wanted if pair[0] in listed_providers]
+    missing = [pair for pair in wanted if pair not in available]
+    if not missing:
+        return
+
+    refresh_error = refresh_pi_models(node, pi_cli, agent_dir)
+    available, reason = list_pi_models(node, pi_cli, agent_dir)
+    if available is None:
+        failures.append(f"cannot verify enabledModels after refreshing the model catalogue: {reason}")
+        return
+    missing = [pair for pair in wanted if pair not in available]
+    if not missing:
+        return
+    names = ", ".join(f"{provider}/{model_id}" for provider, model_id in missing)
+    message = (
+        f"enabledModels names model(s) this pi build cannot resolve: {names}. "
+        f"Run `pi update --models` for the home {agent_dir}"
+    )
+    if refresh_error:
+        message += f" (the automatic refresh failed: {refresh_error})"
+    else:
+        message += " (the automatic refresh succeeded but did not add them; check the ids)"
+    failures.append(message + ".")
+
+
+def preflight(repo: str, node: str | None = None, pi_cli: str | None = None) -> list[str]:
     repo = os.path.abspath(repo)
     failures: list[str] = []
     if not os.path.isdir(repo):
@@ -193,15 +337,18 @@ def preflight(repo: str) -> list[str]:
         check_clean_checkout(repo, failures)
     check_no_pi_project_files(repo, failures)
     check_c3_agent_set(failures)
+    check_enabled_models(node, pi_cli, failures)
     return failures
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("repo", help="Path to the target repository the root is about to spawn children into.")
+    parser.add_argument("--node", help="Node binary that runs pi; passed by the generated launcher.")
+    parser.add_argument("--pi-cli", help="pi's CLI entry point; passed by the generated launcher.")
     args = parser.parse_args()
 
-    failures = preflight(args.repo)
+    failures = preflight(args.repo, args.node, args.pi_cli)
     if failures:
         print(f"loop-pi-preflight: refusing to proceed for {os.path.abspath(args.repo)}:", file=sys.stderr)
         for failure in failures:

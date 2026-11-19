@@ -1567,7 +1567,7 @@ class LauncherTests(unittest.TestCase):
         proc, log, home = self.run_launcher(cwd=repo)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         run_dir = log[1].split("run=")[1]
-        self.assertEqual(log[0], f"preflight {repo.resolve()}")
+        self.assertEqual(log[0], f"preflight {repo.resolve()} --node {self.tmp / 'node'} --pi-cli {self.tmp / 'data/0.87.1-abc' / m.PI_CLI}")
         self.assertTrue(log[1].startswith(f"audit begin {repo.resolve()}"))
         self.assertTrue(Path(run_dir).parent == home / "runs" and Path(run_dir, "audit-before.json").is_file())
         self.assertTrue(log[2].startswith(f"node run={run_dir} repo={repo.resolve()}"))
