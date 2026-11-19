@@ -14,7 +14,7 @@
   "dependencies": {
     "@earendil-works/pi-coding-agent": "1.5.2",
     "@grafana/agento11y-pi": "0.28.0",
-    "pi-subagents": "0.89.0"
+    "pi-subagents": "0.89.1"
   },
   "devDependencies": {
     "@types/node": "26.6.6",
