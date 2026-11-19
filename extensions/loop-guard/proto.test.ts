@@ -18,9 +18,19 @@ let agentDir: string;
 let runDir: string;
 let legacyRunDir: string;
 let cwd: string;
-const AUTHORITY_FILE = join(homedir(), "repos", "agent-docs", "authority", "owner__repo.md");
+let fakeHome: string;
+const previousHome = process.env.HOME;
+const previousUserProfile = process.env.USERPROFILE;
+let AUTHORITY_FILE: string;
 
 before(async () => {
+  // pi-subagents discovers user agents under the home directory's `.agents` as well as <agentDir>/agents,
+  // so a real home that carries agent copies (a plugin cache, a checkout) would shadow the fixture's
+  // installed agents. Point the home at an empty scratch directory for the whole file.
+  fakeHome = await mkdtemp(join(tmpdir(), "loop-guard-proto-home-"));
+  process.env.HOME = fakeHome;
+  process.env.USERPROFILE = fakeHome;
+  AUTHORITY_FILE = join(homedir(), "repos", "agent-docs", "authority", "owner__repo.md");
   scratch = await mkdtemp(join(tmpdir(), "loop-guard-proto-test-"));
   agentDir = join(scratch, "agent");
   runDir = join(scratch, "runs", "20261004T000000Z-repo-abc");
@@ -44,7 +54,12 @@ after(async () => {
   delete process.env.PI_CODING_AGENT_DIR;
   delete process.env.LOOP_PI_RUN_DIR;
   delete process.env.PI_SUBAGENT_EXTENSION_BINDINGS;
+  if (previousHome === undefined) delete process.env.HOME;
+  else process.env.HOME = previousHome;
+  if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+  else process.env.USERPROFILE = previousUserProfile;
   await rm(scratch, { recursive: true, force: true });
+  await rm(fakeHome, { recursive: true, force: true });
 });
 
 function fakeApi() {

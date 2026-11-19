@@ -53,7 +53,7 @@ public statement of those contracts.
   exit 0 with `hookSpecificOutput.permissionDecision == "deny"` on stdout.
 ### Child runtime
 
-- `PI_SUBAGENTS_TEMP_ROOT` is honoured by pi-subagents (`src/shared/types.js:108`).
+- `PI_SUBAGENTS_TEMP_ROOT` is honoured by pi-subagents (`src/shared/types.js:102-104`).
 - pi-subagents child sessions are written under the parent's session dir:
   `<agentDir>/sessions/<cwd-slug>/<parent-session-basename>/<runId>/...`
   (`src/extension/index.js`, `getSubagentSessionRoot`); async run state under `$PI_SUBAGENTS_TEMP_ROOT`
@@ -70,7 +70,7 @@ public statement of those contracts.
   From 0.82.0 a required extension is matched by file identity (device and inode), so a symlink or
   case alias of a registered path still counts, and a registered extension that pi did not load at
   all fails the launch ("Required child extension failed to load") instead of starting the child
-  without it (`src/runs/shared/child-session.js:492-496`).
+  without it (`src/runs/shared/child-session.js:513-517`).
 - **Root capability ceiling:** at every `session_start`, loop-guard registers a session-id-keyed
   `loop-guard` ceiling containing only the six root roster `allowedAgents`; it sets neither
   `allowedTools` nor `denyExtensions`. This covers package delegation as well as model tool calls,
@@ -201,11 +201,11 @@ public statement of those contracts.
   binary as `$1`, so the wrapper leaves that form alone: never run `"$1" -e` against it.
 - **Workflow auto-resume (pi-subagents 0.89.1):** the home sets `autoResume: false`. 0.82.0
   relaunches an interrupted top-level workflow on session reopen through the executor, outside the
-  model `subagent` call loop-guard checks (`src/extension/index.js:956`). loop-guard refuses
+  model `subagent` call loop-guard checks (`src/extension/index.js:964`). loop-guard refuses
   workflows anyway; the setting keeps a stray one from relaunching unguarded.
 - **Results delivered on reopen (pi-subagents 0.89.1):** a background run that finishes while its
   root is dead is delivered when the root's session is reopened (`result-delivery-ownership.js`),
-  appended without a turn (`index.js:975`), with the usual `subagent:async-complete` event, so
+  appended without a turn (`index.js:983`), with the usual `subagent:async-complete` event, so
   loop-state records the lane's `return` (`loop-state/reopen-delivery-e2e.test.ts`). 0.81.0 never
   reported it.
 - **Package skills:** the home loads pi-subagents with `"skills": []` in its `packages` entry, so
@@ -241,7 +241,7 @@ selected agent's maximum. A senior delegates only when its brief grants a count.
 A child runtime has no completion notifier in pi-subagents 0.89.1: `fanout-child.js` gives it the
 `subagent` tool but no result watcher, poller or `sendMessage` path, and the package's own route,
 a blocking child `bg_wait` (`wait-tool.js:6`), is off because the home sets `waitTool: false`
-(passed explicitly to every child, `child-launch.js:171-174`). Its `agent_end` drain
+(passed explicitly to every child, `child-launch.js:177-181`). Its `agent_end` drain
 (`auto-drain.js`) waits only for queued or running children and injects no result, so before this
 seam a senior that ended its turn to wait settled without ever seeing its child's output.
 
