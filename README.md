@@ -62,7 +62,9 @@ Three pi extensions, a home template and an installer:
 - `home/` holds the six agent files (`worker`, `composer`, `senior`, `senior-escalation`, `reviewer`, `scout`),
   the lane policy, the pi settings and the policy header for the dedicated loop home.
 - `bin/loop-pi-install` builds a pinned runtime, validates it, installs one pi home and writes a
-  launcher. `bin/loop-pi-preflight` refuses a target repository that is not safe to loop in, and
+  launcher. `bin/loop-pi-preflight` refuses a target repository that is not safe to loop in, and also a home
+  whose `enabledModels` names a model the pi build cannot resolve (it runs `pi update --models`
+  for the home once before refusing; the launcher passes it the node and pi paths), and
   `bin/loop-pi-audit` snapshots remote state before a run and reports every remote change the
   run's push log does not account for at closeout.
 

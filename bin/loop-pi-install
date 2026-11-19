@@ -473,12 +473,12 @@ def launcher_preamble(prefix: Path, home: Path, node: str, generated_by: str) ->
     ]
 
 
-def loop_run_lines(prefix: Path, home: Path, name: str, indent: str, hint: str = "") -> List[str]:
+def loop_run_lines(prefix: Path, home: Path, node: str, name: str, indent: str, hint: str = "") -> List[str]:
     """Run dir, preflight and audit snapshot for a loop start in "$repo"."""
     lines = [
         f"mkdir -p '{home}/runs'",
         f'run_dir=$(mktemp -d "{home}/runs/$(date -u +%Y%m%dT%H%M%SZ)-$(basename "$repo")-XXXXXX")',
-        f"if ! '{prefix}/bin/loop-pi-preflight' \"$repo\" >&2; then",
+        f"if ! '{prefix}/bin/loop-pi-preflight' \"$repo\" --node '{node}' --pi-cli '{prefix / PI_CLI}' >&2; then",
         '  rmdir "$run_dir"',
         f'  echo "{name}: preflight refused $repo.{hint}" >&2',
         "  exit 78",
@@ -516,7 +516,7 @@ def launcher_text(prefix: Path, home: Path, node: str, manifest: dict, name: str
             "plain=0",
             'if [ "${1-}" = "--plain" ]; then plain=1; shift; fi',
             'if [ "$plain" = 0 ] && repo=$(git rev-parse --show-toplevel 2>/dev/null); then',
-            *loop_run_lines(prefix, home, name, "  ", f" Fix it, or run {name} --plain for a non-loop session."),
+            *loop_run_lines(prefix, home, node, name, "  ", f" Fix it, or run {name} --plain for a non-loop session."),
             "fi",
         ]
         # subagent is loaded up front and bg_wait is never declared: some OpenAI-compatible proxies

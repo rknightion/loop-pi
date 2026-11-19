@@ -21,6 +21,14 @@ public statement of those contracts.
   (`src/agents/agents.js` `buildAgentDiscoverySources`): an untrusted project contributes no
   `.agents` / `.pi/agents` or chain directories and no project agent settings, so repository agents
   no longer outrank the home's. `loop-pi-preflight` stays as the check for a trusted project.
+- **Model catalogue (pi 1.5.2):** pi bundles a model catalogue and overlays a remote one cached in
+  `<agent dir>/models-store.json`. Only interactive mode refreshes that cache in the background;
+  print and RPC sessions, so child lanes, use the saved list, and `modelOverrides` for an id pi
+  cannot resolve are dropped. `loop-pi-preflight` therefore runs the build's own
+  `--list-models` (offline) against the home's `enabledModels`, runs `update --models` once for
+  that home when an id is missing, and refuses the launch if it is still missing. The launcher
+  passes `--node` and `--pi-cli`; without them the check is skipped, so an older launcher and a
+  newer build (or the reverse) still work.
 - **Tool list (pi 1.5.2 / pi-subagents 0.89.1):** `toolActivation` is `"eager"`; never `"auto"`.
   pi sends an `additional_tools` item for a mid-conversation tool addition when a model's
   `compat.supportsAdditionalTools` is true. The overlay sets that and `supportsToolSearch` false for
