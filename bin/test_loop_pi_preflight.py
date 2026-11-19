@@ -284,6 +284,13 @@ class EnabledModelsTests(unittest.TestCase):
         self.assertIn("pi update --models", result.stderr)
         self.assertEqual(sum(c["argv"][1:] == ["update", "--models"] for c in self.calls()), 1)
 
+    def test_every_thinking_suffix_pi_accepts_is_stripped(self):
+        for level in ("off", "minimal", "low", "medium", "high", "xhigh", "max"):
+            with self.subTest(level=level):
+                self.set_enabled([f"openai/gpt-6.2-sol:{level}"])
+                result = self.run_check()
+                self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_provider_with_no_listed_models_is_skipped_not_refused(self):
         # pi lists only models it has a credential for: a home with no sign-in for the provider
         # prints a "No models available" line and no rows, which says nothing about the catalogue.

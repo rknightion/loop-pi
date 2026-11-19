@@ -40,7 +40,7 @@ C3_AGENTS = {
 
 # pi accepts `pattern:level` in enabledModels; strip only these known suffixes because model ids
 # may themselves contain a colon.
-THINKING_LEVELS = {"off", "minimal", "low", "medium", "high", "xhigh"}
+THINKING_LEVELS = {"off", "minimal", "low", "medium", "high", "xhigh", "max"}
 LIST_TIMEOUT_SECONDS = 60
 REFRESH_TIMEOUT_SECONDS = 90
 
