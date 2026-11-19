@@ -27,8 +27,8 @@ public statement of those contracts.
   cannot resolve are dropped. `loop-pi-preflight` therefore runs the build's own
   `--list-models` (offline) against the home's `enabledModels`, runs `update --models` once for
   that home when an id is missing, and refuses the launch if it is still missing. The launcher
-  passes `--node` and `--pi-cli`; without them the check is skipped, so an older launcher and a
-  newer build (or the reverse) still work.
+  passes `--node` and `--pi-cli`; without them the check is skipped, so an older launcher still
+  works against a newer build. The installer writes the launcher and the preflight together.
 - **Tool list (pi 1.5.2 / pi-subagents 0.89.1):** `toolActivation` is `"eager"`; never `"auto"`.
   pi sends an `additional_tools` item for a mid-conversation tool addition when a model's
   `compat.supportsAdditionalTools` is true. The overlay sets that and `supportsToolSearch` false for
