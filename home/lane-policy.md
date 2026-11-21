@@ -30,8 +30,7 @@ never. A status change or acceptance tick you want goes in your lane return. The
 - Never run a background process (`&`, `nohup`, `disown`, `setsid`) and never end your turn to wait.
 - Wait on a long command with one `watch_process` call: `deadline_s` at most 3600, and call again
   while time remains. A deadline exit is "not observed", never a pass.
-- Keep each `bash` call under 10 minutes. Your prompt cache lasts an hour, so a long wait on a gate
-  slot or a test run is fine.
+- Keep each `bash` call under 10 minutes.
 
 ## Git
 
