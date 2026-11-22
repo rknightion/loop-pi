@@ -23,6 +23,8 @@ never. A status change or acceptance tick you want goes in your lane return. The
 - A decision the brief does not cover: stop and return the question with your recommendation. Never
   invent copy, an interface or a requirement.
 - Touch no external state (services, clusters, accounts, other repositories, releases, secrets).
+- A `find` pattern is relative to the search path: `src/*.ts` matches only that directory's files,
+  `**/src/*.ts` matches at any depth, and a pattern without `/` matches file names anywhere.
 - When the root sends a repair round, fix exactly what it names, re-prove, and return again.
 
 ## Processes and waits
