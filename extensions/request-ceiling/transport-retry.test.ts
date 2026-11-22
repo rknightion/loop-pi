@@ -79,5 +79,7 @@ test("transport failures stop at the shared attempt limit instead of retrying fo
   assert.equal(last.message.loopPiRecovery.reason, "attempt-limit");
   assert.ok(dispositions.slice(0, -1).every((d) => d === "retry"), `retries before the limit: ${dispositions.join(",")}`);
   assert.equal(last.message.loopPiRecovery.attempts, last.message.loopPiRecovery.maxAttempts);
+  assert.equal(last.message.loopPiRecovery.maxAttempts, 5, "the home's retry.maxRetries 60 leaves recovery's own 5-attempt cap");
+  assert.deepEqual(dispositions, ["retry", "retry", "retry", "retry", "stop"]);
   fire("session_shutdown");
 });
