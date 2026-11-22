@@ -34,7 +34,7 @@ export function formatAge(ms: number): string {
 }
 
 /** Local `HH:MM`. */
-function clock(ms: number): string {
+export function clock(ms: number): string {
   const d = new Date(ms);
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }

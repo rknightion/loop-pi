@@ -809,7 +809,7 @@ before any `await`. A missing reply means the provider extension is not loaded; 
 - `loop-wait:arm-timer` `{ at: string /*ISO*/; reason: string; reply(r: { id: string; at: string }) }`
   - loop-wait root arms a timer exactly as `wake_at` would.
 - `loop-wait:query-watchers` `{ reply(ws: { id: string; label: string; pid: number; phase: string }[]) }`
-- `loop-continuation:query-launch` `{ cwd?: string; reply(r: { reportPath: string | null; standingPath: string | null; standingSha256: string | null; rootContext?: object; concurrency?: number }) }`
+- `loop-continuation:query-launch` `{ cwd?: string; closed?: boolean; reply(r: { reportPath: string | null; standingPath: string | null; standingSha256: string | null; rootContext?: object; concurrency?: number; launchedAt?: string; closed?: boolean; resumeDueAt?: string }) }`
   - loop-continuation answers from its frozen launch state. `reportPath` is the launch's closeout
     path (`codex/closeout-<name>-loop<N>.md`, v3 seam S1; the key is named for the persisted launch
     state). The state log is derived from it (S3): `closeout-` becomes `state-` and `.md` becomes
@@ -822,6 +822,11 @@ before any `await`. A missing reply means the provider extension is not loaded; 
   - The reply may also carry `launchedAt: string`, the ISO timestamp of the recognised launch prompt
     (`launch.launchTs`). It is absent, not null, when no launch is armed. Consumers treat it as
     optional (loop-status measures wall time from it, else from the session header).
+  - A request with `closed: true` gets `closed: boolean`, whether the launch's closeout report counts
+    (`reportCounts`, a file read, so only callers that ask pay for it). Absent when not asked or no
+    launch is armed.
+  - The reply may also carry `resumeDueAt: string`, the ISO time loop-continuation's scheduled
+    automatic resume is due ("Automatic root recovery"). Absent when none is pending.
 - `loop-guard:push-recorded` `{ count: number }`: loop-guard's root entry, after a root `git push` or
   `gh pr merge` appended `count > 0` lines to the push log (the remote move was verified; a failed,
   rejected or up-to-date push emits nothing). loop-state listens (see "State-aware root context
@@ -1488,7 +1493,8 @@ The optional version-1 `return.artifact` field is an absolute nonempty path with
 
 `extensions/loop-status/` is a root-only extension (listed in the installer's root extension set
 only; lanes never load it). It is the sole owner of the status key `loop-status`,
-set with `ctx.ui.setStatus`; it sets no widget and clears the key at `session_shutdown`.
+set with `ctx.ui.setStatus`, and clears the key at `session_shutdown`. Its only widget is the
+transient `loop-status-program-status` capture below, set and removed in the same call.
 
 - The status line reads, and writes nothing to, existing seams: `loop-wait:query-timers` and
   `loop-wait:query-watchers` (the optional `deadline` of each watcher; no reply shows `timers ?` or
@@ -1548,6 +1554,41 @@ set with `ctx.ui.setStatus`; it sets no widget and clears the key at `session_sh
   prefix>` in any state in place of "Async run not found", leaving every other result untouched;
   and (c) shows `(+N nested)` beside the lane count. Views (`fleet`, `transcript`) and `dir`
   lookups are never altered. An unset `PI_SUBAGENTS_TEMP_ROOT` shows no nested runs.
+- **Program status (OSC 7501).** pi 1.6.0's interactive mode reports its own state to a terminal that
+  supports the Program Status Protocol (Orca among them): `working` during a run, then `done`,
+  `error` or `idle` (after an abort) at `agent_settled`, and `blocked` while a dialog waits. A loop
+  root settles every time it goes back to waiting, so the terminal would show a finished task, and
+  raise its completion notice, on every wake. `loop-status/program-status.ts` therefore wraps
+  `setProgramStatus` on pi's terminal (`ui.terminal` of the TUI, obtained from a widget factory,
+  which is the only place pi hands an extension its TUI; RPC and print modes ignore factories, so
+  nothing is wrapped there). The wrap is per terminal (a reload takes it over with its own facts)
+  and never writes a root report of its own, so no `done` can slip out between pi's report and a
+  correction. For an armed launch that has not closed, a resting `done` becomes `working` with the
+  message `Loop waiting on <N lanes (+N nested), N timers, N watchers>, next HH:MM` while any of
+  those are live, or `blocked`/`question` with `Loop stopped: waiting for the owner` when none
+  are; an `error` becomes `working` (`Loop retrying at HH:MM`) while loop-continuation's automatic
+  resume is due. `working`, `blocked`, an owner's `idle`, a closed loop's `done` and every report
+  of an unarmed session pass through unchanged. The facts are read only for a resting report, from
+  `query-launch` (`closed: true` asked; `resumeDueAt`), loop-wait's timer and watcher queries, the
+  nested-run count and the lane count: this session's launches seen here plus the runs the
+  pi-subagents active-run index still lists as live for this session (`descendants.ts`
+  `listOwnRuns`; a reload or resume sees no launch events), less the runs seen to complete.
+  - A status-line rebuild re-decides pi's last report. A `working` decision (a new note) is sent at
+    once; one that leaves `working` is sent only if pi has not reported within `REBUILD_HOLD_MS`
+    (3 s): pi-subagents holds a lane's completion notice for up to a second before it wakes the root,
+    and a rebuild in that gap must not say the loop stopped, while something that ends without waking
+    the root (a run below a lane) still reaches the owner after the hold.
+  - The `idle` of a harness abort is also `working` (`Loop retrying at HH:MM`) while a resume is due;
+    an owner's abort cancels the resume, so its `idle` passes through. A retry decision is decided
+    again `RESUME_RECHECK_GRACE_MS` (5 s) after the resume was due, and a `resumeDueAt` older than that
+    counts as none, so a resume that is dropped or cancelled without a turn leaves pi's own report.
+  - Each live lane is also a child record (`id=<run id, bounded to one 32-character segment>`,
+    `title=` the agent): `working` while it runs, `clear` once it has ended (never `done`, which the
+    protocol defines as an unread result and a terminal may notify on), reconciled with the live
+    lanes on every rebuild and all cleared at `session_shutdown`. Records are written only while pi's
+    terminal reports the protocol supported. pi-tui re-sends its root report through
+    `writeProgramStatus` when the terminal confirms support and when it restarts (after a suspend or
+    an external editor); the wrap hooks that method too and sends the running lanes right after.
 - A pi child's parent link is already recorded by pi-subagents: the child session header's
   `parentSession` is the launching session's file path. For a lane that file is always named
   `session.jsonl`, so a reader that wants the parent's id must resolve the path, not its basename.

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 
-import { asyncRunsDir, findNestedRun, formatNestedRun, formatNestedRuns, listNestedRuns, sessionScope } from "./descendants.ts";
+import { asyncRunsDir, findNestedRun, formatNestedRun, formatNestedRuns, listNestedRuns, listOwnRuns, sessionScope } from "./descendants.ts";
 import loopStatus from "./index.ts";
 
 const dirs: string[] = [];
@@ -47,6 +47,15 @@ function fixture(): Fixture {
   write(OTHER, { state: "running", mode: "single", sessionId: join(tempRoot, "sessions", "--repo--", "another-session.jsonl"), steps: [{ agent: "worker" }] });
   return { tempRoot: join(tempRoot, "tmp"), runs, rootFile, laneFile, childFile };
 }
+
+test("this session's own live runs are read from disk with their agent, and nothing else is", () => {
+  const f = fixture();
+  assert.deepEqual(listOwnRuns(f.runs, f.rootFile), [{ id: LANE, agent: "senior" }]);
+  writeFileSync(join(f.runs, LANE, "status.json"), JSON.stringify({ runId: LANE, state: "complete", sessionId: f.rootFile }));
+  assert.deepEqual(listOwnRuns(f.runs, f.rootFile), [], "a finished run is not live");
+  assert.deepEqual(listOwnRuns(null, f.rootFile), []);
+  assert.deepEqual(listOwnRuns(f.runs, null), []);
+});
 
 test("a run launched by a lane is listed with its parent lane, and another session's run is not", () => {
   const f = fixture();

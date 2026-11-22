@@ -58,7 +58,11 @@ Three pi extensions, a home template and an installer:
   30 minutes of wall time elapsed since an armed launch, the wake carries one extra line telling it
   to combine reviews and keep its ledgers to one-line appends. It repeats only when the share
   reaches a higher 10-point band or ten wakes later. It only reads timing; no request is blocked
-  or retried.
+  or retried. In a terminal that reads OSC 7501 program status (Orca, for one), it also keeps an
+  armed root that is waiting on lanes, timers or watchers reported as working with what it waits
+  on, instead of the `done` pi reports each time a run settles; a root that settles with nothing
+  left to wait on reports that it needs the owner, and only a closed loop reports done. Each lane
+  shows as a child row while it runs and is cleared when it ends.
 - `home/` holds the six agent files (`worker`, `composer`, `senior`, `senior-escalation`, `reviewer`, `scout`),
   the lane policy, the pi settings and the policy header for the dedicated loop home.
 - `bin/loop-pi-install` builds a pinned runtime, validates it, installs one pi home and writes a

@@ -14,9 +14,10 @@ import { isAbsolute, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { MAX_NUDGES, STATE_CUSTOM_TYPE, isParentWake } from "../loop-continuation/state.ts";
 import { deriveLogPath } from "../loop-state/core.ts";
-import { asyncRunsDir, findNestedRun, formatNestedRun, formatNestedRuns, listNestedRuns } from "./descendants.ts";
+import { asyncRunsDir, findNestedRun, formatNestedRun, formatNestedRuns, listNestedRuns, listOwnRuns } from "./descendants.ts";
 import { MODEL_TIME_NOTICE_TYPE, NOTICE_GATE_START, WAKE_CUSTOM_TYPES, formatModelTime, gateNotice, rootModelTime, wakeNotice, type ModelTime } from "./modeltime.ts";
 import { formatStatus } from "./status.ts";
+import { captureTui, wrapProgramStatus, type LoopFacts, type ProgramStatusWrapper } from "./program-status.ts";
 import { installObservability } from "./observability.ts";
 
 export const STATUS_KEY = "loop-status";
@@ -66,6 +67,11 @@ export default function (pi: ExtensionAPI): void {
   let heartbeat: { stamp: string; at: number | null } | null = null;
   let lastText: string | undefined;
   let pending = false;
+  let programStatus: ProgramStatusWrapper | null = null;
+  // Program status lanes: the agent of each launch seen, and the runs seen to finish, so a run whose
+  // status.json still says running for a moment after its completion event is not counted again.
+  const runAgents = new Map<string, string | undefined>();
+  const endedRuns = new Set<string>();
 
   function remember(next: Ctx | undefined): void {
     if (next) ctx = next;
@@ -146,7 +152,64 @@ export default function (pi: ExtensionAPI): void {
     return result;
   }
 
+  /**
+   * This session's live lanes for the program status: the launches seen here, plus the runs the
+   * on-disk index still lists as live for this session (a reload or resume sees no launch events).
+   */
+  function liveLanes(): Map<string, string | undefined> {
+    const live = new Map<string, string | undefined>();
+    for (const id of liveRuns) live.set(id, runAgents.get(id));
+    for (const run of listOwnRuns(asyncRunsDir(), sessionKey)) {
+      if (!endedRuns.has(run.id) && !live.has(run.id)) live.set(run.id, run.agent ?? undefined);
+    }
+    return live;
+  }
+
+  /** The loop facts behind the root's program status, read fresh each time (SEAMS.md "Loop status line"). */
+  function loopFacts(): LoopFacts {
+    let reportPath: unknown;
+    let closed: unknown;
+    let resumeDueAt: unknown;
+    pi.events.emit("loop-continuation:query-launch", {
+      cwd: ctx?.cwd,
+      closed: true,
+      reply: (r: { reportPath?: unknown; closed?: unknown; resumeDueAt?: unknown } | null | undefined) => {
+        reportPath = r?.reportPath;
+        closed = r?.closed;
+        resumeDueAt = r?.resumeDueAt;
+      },
+    });
+    const due = typeof resumeDueAt === "string" ? Date.parse(resumeDueAt) : NaN;
+    return {
+      armed: typeof reportPath === "string" && reportPath !== "",
+      closed: closed === true,
+      lanes: liveLanes().size,
+      nested: listNestedRuns(asyncRunsDir(), sessionKey).length,
+      timers: query<{ at: string }>("loop-wait:query-timers"),
+      watchers: query<{ deadline?: string }>("loop-wait:query-watchers"),
+      resumeDueAt: Number.isFinite(due) ? due : null,
+    };
+  }
+
+  /** Wrap pi's program status reporter once a TUI exists (interactive mode only). */
+  function attachProgramStatus(next: Ctx | undefined): void {
+    if (!next?.hasUI) return;
+    try {
+      programStatus = wrapProgramStatus(captureTui(next.ui as never), loopFacts);
+    } catch {
+      programStatus = null;
+    }
+  }
+
   function render(): void {
+    if (programStatus) {
+      try {
+        programStatus.syncLanes(liveLanes());
+      } catch {
+        // An unreadable run index leaves the child records as they are.
+      }
+      programStatus.refresh();
+    }
     if (!ctx?.hasUI) return;
     const now = Date.now();
     const heartbeatMs = heartbeatAt();
@@ -194,11 +257,15 @@ export default function (pi: ExtensionAPI): void {
     parentWakeInput = false;
     heartbeat = null;
     lastText = undefined;
+    runAgents.clear();
+    endedRuns.clear();
+    attachProgramStatus(c);
     readNudges();
     refresh();
   });
   pi.on("agent_start", (_event, c) => {
     remember(c);
+    if (!programStatus) attachProgramStatus(c);
     readNudges();
     refresh();
   });
@@ -267,12 +334,19 @@ export default function (pi: ExtensionAPI): void {
     } catch {
       // Already gone.
     }
+    programStatus?.clearLanes();
+    programStatus = null;
     ctx = null;
   });
 
   pi.events.on("subagent:async-started", (data) => {
-    const d = data as { id?: unknown; sessionId?: unknown } | null;
-    if (typeof d?.id === "string" && d.sessionId === sessionKey) liveRuns.add(d.id);
+    const d = data as { id?: unknown; sessionId?: unknown; agent?: unknown } | null;
+    if (typeof d?.id === "string" && d.sessionId === sessionKey) {
+      const agent = typeof d.agent === "string" ? d.agent : undefined;
+      liveRuns.add(d.id);
+      runAgents.set(d.id, agent);
+      programStatus?.laneStarted(d.id, agent);
+    }
     refresh();
   });
   // pi-subagents 0.83.0: one of this session's background runs started, moved to its next step,
@@ -283,7 +357,12 @@ export default function (pi: ExtensionAPI): void {
   pi.events.on("subagent:async-complete", (data) => {
     const d = data as { runId?: unknown; id?: unknown } | null;
     const id = typeof d?.runId === "string" ? d.runId : typeof d?.id === "string" ? d.id : undefined;
-    if (id) liveRuns.delete(id);
+    if (id) {
+      liveRuns.delete(id);
+      runAgents.delete(id);
+      endedRuns.add(id);
+      programStatus?.laneEnded(id);
+    }
     refresh();
   });
 }

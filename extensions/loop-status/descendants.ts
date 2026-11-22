@@ -172,6 +172,22 @@ export function listNestedRuns(runsDir: string | null, sessionKey: string | null
 }
 
 /**
+ * Live (queued or running) runs this session launched itself, read from disk. Unlike the
+ * `subagent:async-started` events, this survives a reload, a resume or a restart of the root.
+ */
+export function listOwnRuns(runsDir: string | null, sessionKey: string | null): { id: string; agent: string | null }[] {
+  if (!runsDir || !sessionKey) return [];
+  const own: { id: string; agent: string | null }[] = [];
+  for (const id of activeIds(runsDir)) {
+    const status = readStatus(runsDir, id);
+    if (!status || status.sessionId !== sessionKey) continue;
+    if (status.state !== "queued" && status.state !== "running") continue;
+    own.push({ id: str(status.runId) ?? id, agent: agentOf(status) });
+  }
+  return own;
+}
+
+/**
  * One nested run by exact id or unique id prefix, in any state, or null when the id is not below
  * this session. Terminal runs are found too: their `status.json` stays on disk.
  */

@@ -438,14 +438,26 @@ export default function (pi: ExtensionAPI) {
   pi.events.on("loop-continuation:query-launch", (data) => {
     const req = data as {
       cwd?: string;
+      /** Ask for `closed`: it reads the closeout report, so only callers that need it pay for it. */
+      closed?: boolean;
       reply: (r: {
         reportPath: string | null;
         standingPath: string | null;
         standingSha256: string | null;
         concurrency?: number;
         launchedAt?: string;
+        closed?: boolean;
+        resumeDueAt?: string;
       }) => void;
     };
+    let closed: boolean | undefined;
+    if (req.closed === true && state.armed && state.launch) {
+      try {
+        closed = reportCounts(state.launch, req.cwd ?? launchCwd ?? null);
+      } catch {
+        closed = undefined;
+      }
+    }
     const reportPath =
       state.armed && state.launch ? resolveReportPath(state.launch.report, req.cwd ?? launchCwd ?? null) : null;
     req.reply({
@@ -457,6 +469,10 @@ export default function (pi: ExtensionAPI) {
       ...(state.armed && typeof state.concurrency === "number" && state.concurrency >= 1 ? { concurrency: state.concurrency } : {}),
       // Additive and optional: the launch prompt's ISO timestamp, for wall-time readers.
       ...(state.armed && state.launch?.launchTs ? { launchedAt: state.launch.launchTs } : {}),
+      // Additive and optional: whether the closeout report counts, only when asked for and armed.
+      ...(closed === undefined ? {} : { closed }),
+      // Additive and optional: when a scheduled automatic resume is due (ISO), absent when none is.
+      ...(resumeDueAt === null ? {} : { resumeDueAt: new Date(resumeDueAt).toISOString() }),
     });
   });
 

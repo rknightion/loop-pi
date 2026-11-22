@@ -7,7 +7,7 @@ import { chmodSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { cleanupAll, FAUX_EXTENSION, ROOT_EXTENSION, startPiRpc, writeFauxScript } from "../loop-wait/test-helpers.ts";
-import { cleanupFixtures, fakePi, loopFixture } from "./test-fixture.ts";
+import { cleanupFixtures, closeoutBody, fakePi, loopFixture } from "./test-fixture.ts";
 
 after(cleanupAll);
 after(cleanupFixtures);
@@ -34,6 +34,36 @@ test("query-launch answers the closeout path as reportPath; a resumed session re
     } finally {
       resumed.restore();
     }
+  } finally {
+    pi.restore();
+  }
+});
+
+test("query-launch answers closed only when asked and armed, and resumeDueAt while an automatic resume is due", async () => {
+  const f = loopFixture();
+  const pi = await fakePi({ agentDir: f.agentDir, cwd: f.repo, runDir: f.runDir });
+  const ask = (closed?: boolean): any => {
+    let answer: any;
+    pi.emit("loop-continuation:query-launch", { ...(closed === undefined ? {} : { closed }), reply: (r: unknown) => (answer = r) });
+    return answer;
+  };
+  try {
+    assert.equal("closed" in ask(true), false, "nothing is armed yet");
+    await pi.input(f.launch);
+    assert.equal("closed" in ask(), false, "absent unless asked for");
+    assert.equal(ask(true).closed, false, "no closeout yet");
+    assert.equal("resumeDueAt" in ask(), false, "no resume is due");
+
+    const failed = [{ type: "message", message: { role: "assistant", stopReason: "error", errorMessage: "fetch failed" } }];
+    const before = Date.now();
+    await pi.handlers.get("agent_settled")!({ type: "agent_settled" }, pi.ctx(failed));
+    const due = Date.parse(ask().resumeDueAt);
+    assert.ok(due >= before + 60_000 && due <= Date.now() + 60_000, "the first automatic resume is one base delay away");
+    await pi.handlers.get("session_shutdown")!({ type: "session_shutdown" }, pi.ctx());
+    assert.equal("resumeDueAt" in ask(), false, "a cancelled resume is no longer due");
+
+    writeFileSync(f.report, closeoutBody());
+    assert.equal(ask(true).closed, true, "a counting closeout closes the loop");
   } finally {
     pi.restore();
   }
