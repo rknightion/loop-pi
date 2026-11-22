@@ -155,7 +155,7 @@ function assertLiveLaneUntouched(asyncDir: string, before: Record<string, any>):
 
 test("a nopush lane that finishes after its root ended gets an unobserved proof from another Pi, and its state is unchanged", { timeout: 150_000 }, async () => {
   const f = nopushHome();
-  const runId = await launchLaneThenEndRoot(f, 4_000);
+  const runId = await launchLaneThenEndRoot(f, 8_000);
   const asyncDir = asyncDirOf(f, runId);
 
   // The lane finishes with no Pi watching: the runner's own proof stays pending, and nobody has reconciled yet.
@@ -210,7 +210,7 @@ test("another Pi reading a lane that is still running writes no proof and leaves
 
 test("another Pi reading a finished lane whose recorded runner pid is still alive writes no proof", { timeout: 150_000 }, async () => {
   const f = nopushHome();
-  const runId = await launchLaneThenEndRoot(f, 4_000);
+  const runId = await launchLaneThenEndRoot(f, 8_000);
   const asyncDir = asyncDirOf(f, runId);
   await statusWhen(f, runId, (state) => FINISHED.includes(state));
   await waitForDetachedWriters(f.subagentTemp, 1);
@@ -229,4 +229,8 @@ test("another Pi reading a finished lane whose recorded runner pid is still aliv
     // Cleanup waits on the recorded runner pid to be gone, so put the real record back.
     writeFileSync(statusPath, original);
   }
+  // Positive control: with the real, dead pid back, the same call does write the proof.
+  await statusFromAnotherPi(f, runId);
+  const proof = await waitForCondition(() => (existsSync(unobservedPath(asyncDir)) ? readJson(unobservedPath(asyncDir)) : undefined), 10_000, 100);
+  assert.equal(proof.reason, "observer-unavailable", "the dead recorded pid is settled once it is back");
 });

@@ -107,3 +107,23 @@ test("a malformed dropped-reasoning diagnostic is ignored", () => {
   ] } });
   assert.equal("droppedReasoning" in end.message.loopPiTiming, false);
 });
+
+test("dropped reasoning counts only removed reasoning items and bounds the reason keys", () => {
+  const emit = emitter();
+  emit("turn_start");
+  const many = Array.from({ length: 20 }, (_, i) => "reason_" + i);
+  const message = { ...assistant, diagnostics: [
+    { type: "openai_input_transformations", timestamp: 7, details: { transformations: [
+      { type: "message", id: "m1", action: "removed", reason: "prefix_mismatch" },
+      { type: "reasoning", id: "r1", action: "kept", reason: "prefix_mismatch" },
+      { type: "reasoning", id: "r2", action: "removed", reason: "x".repeat(200) },
+    ] } },
+    diagnostic(...many),
+  ] };
+  const end = emit("message_end", { message });
+  const dropped = end.message.loopPiTiming.droppedReasoning;
+  assert.equal(dropped.count, 21, "only removed reasoning items count");
+  assert.equal(dropped.reasons["x".repeat(64)], 1, "a long reason is cut to 64 characters");
+  assert.equal(Object.keys(dropped.reasons).length, 17, "16 distinct reasons, then other");
+  assert.equal(dropped.reasons.other, 5);
+});

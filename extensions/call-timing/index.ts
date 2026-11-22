@@ -29,6 +29,9 @@ export interface DroppedReasoning {
 }
 
 const DROPPED_REASONING_DIAGNOSTIC = "openai_input_transformations";
+// Reasons are server strings: bound their length and how many distinct keys one record holds.
+const MAX_REASON_LENGTH = 64;
+const MAX_REASONS = 16;
 
 /** Count the replayed reasoning items OpenAI dropped, by reason; never copies an item id or content. */
 export function droppedReasoning(diagnostics: unknown): DroppedReasoning | undefined {
@@ -40,7 +43,9 @@ export function droppedReasoning(diagnostics: unknown): DroppedReasoning | undef
     const transformations = diagnostic.details?.transformations;
     if (!Array.isArray(transformations)) continue;
     for (const transformation of transformations) {
-      const reason = typeof transformation?.reason === "string" && transformation.reason !== "" ? transformation.reason : "unknown";
+      if (transformation?.type !== "reasoning" || transformation?.action !== "removed") continue;
+      const raw = typeof transformation.reason === "string" && transformation.reason !== "" ? transformation.reason.slice(0, MAX_REASON_LENGTH) : "unknown";
+      const reason = reasons.has(raw) || reasons.size < MAX_REASONS ? raw : "other";
       reasons.set(reason, (reasons.get(reason) ?? 0) + 1);
       count++;
     }
