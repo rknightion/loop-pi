@@ -381,6 +381,12 @@ child extension (including children declaring `extensions: []`).
   nonnegative 32-bit integer supplied by `openai-processing-ms`, or null if absent/invalid; no
   rounding, truncation or inference from elapsed time. `service-tier` is a response header only,
   never substituted from the request setting or response body.
+- `droppedReasoning` is an additive field: `{count: int, reasons: {<reason>: int}}`, summed over every
+  `openai_input_transformations` diagnostic (pi-ai 1.6.0) on the assistant message, one count per
+  dropped reasoning item, keyed by its reason (e.g. `prefix_mismatch`; a missing or non-string reason is
+  `unknown`). Item ids and content are never copied. The key is absent when no such diagnostic was
+  observed. Readers treat absent as none observed or an older build, never as zero, and ignore it
+  when they do not know it; the other four fields are unchanged.
 - `attempts` stays null: pi's provider-internal retries have no authoritative extension counter.
   Catalogue readers use `firstTokenAt - message.timestamp` for `ttft_ms` and explicit
   `attempts` / `processingMs` only, with absent or invalid values NULL. Null attempts is compatible
