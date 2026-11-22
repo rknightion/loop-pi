@@ -12,9 +12,9 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "1.5.2",
+    "@earendil-works/pi-coding-agent": "1.6.0",
     "@grafana/agento11y-pi": "0.28.0",
-    "pi-subagents": "0.89.1"
+    "pi-subagents": "0.89.2"
   },
   "devDependencies": {
     "@types/node": "26.6.6",

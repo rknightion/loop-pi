@@ -87,7 +87,7 @@ export async function waitForDetachedWriters(root: string, count: number, timeou
           if (status.runId !== run.name || !receipt || receipt.runId !== run.name
             || receipt.runnerProcessInstanceId !== status.processTerminal?.runnerProcessInstanceId
             || !["complete", "completed", "failed", "stopped", "paused"].includes(status.state)
-            || !proof || !["pending", "observed"].includes(proof.state)
+            || !proof || !(["pending", "observed"].includes(proof.state) || (proof.state === "unknown" && proof.reason === "observer-unavailable"))
             || !entries.length
             || entries.some(([index, n]) => receipt.writers[index]?.length !== n)
             || Object.keys(receipt.writers).some((index) => !(index in expected))
@@ -97,7 +97,8 @@ export async function waitForDetachedWriters(root: string, count: number, timeou
             diagnostic = `${run.name}: terminal writer receipt incomplete`; return;
           }
           // In-process native sessions have expectedWriters=0: their only OS writer is the runner.
-          // With a dead root the overall proof may stay pending, so require its validated candidate,
+          // With a dead root the overall proof may stay pending, or read unknown/observer-unavailable once
+          // another Pi reconciles the run (pi-subagents 0.89.2), so require its validated candidate,
           // terminal status, all external writer closures, free session lease AND runner absence.
           // Numeric PID absence is exit evidence only. Never use status metadata to signal a process.
           if (!Number.isInteger(status.pid) || status.pid <= 1) { diagnostic = `${run.name}: runner identity missing`; return; }
