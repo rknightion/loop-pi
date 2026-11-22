@@ -86,7 +86,10 @@ public statement of those contracts.
   `observer-unavailable`) for a run whose status is already terminal, whose recorded runner pid is dead
   and whose proof is still pending because no Pi observed the close; nopush lanes record a pid and boot
   id, so this can apply to them. It never marks a live run terminal, and a close a Pi does observe
-  replaces it.
+  replaces it. One reconciling call a second Pi runs is the `subagent` tool's `status` action
+  (`reconcileAsyncRun`); unscoped run listings can reconcile foreign runs too. `extensions/loop-guard/unobserved-exit.e2e.test.ts` launches a real nopush lane, ends
+  the root mid-run, and proves the proof appears with the run's state unchanged and still read as finished by
+  `loop-wait/lane-children.ts`, and that no proof is written for a running lane or a live recorded pid.
   Retention prunes resumable run directories after 90 days and other eligible runs after 30 days;
   `lane-patches` is the durable patch record outside that prunable tree.
 - **Child settle (pi-subagents 0.89.2):** after a child's final `agent_end` with a clean stop, the
@@ -381,6 +384,15 @@ child extension (including children declaring `extensions: []`).
   nonnegative 32-bit integer supplied by `openai-processing-ms`, or null if absent/invalid; no
   rounding, truncation or inference from elapsed time. `service-tier` is a response header only,
   never substituted from the request setting or response body.
+- `droppedReasoning` is an additive field: `{count: int, reasons: {<reason>: int}}`, summed over every
+  `openai_input_transformations` diagnostic (pi-ai 1.6.0) on the assistant message, one count per
+  removed reasoning item (`type: "reasoning"`, `action: "removed"`), keyed by its reason (e.g.
+  `prefix_mismatch`; a missing or non-string reason is `unknown`, a reason longer than 64 characters is
+  cut to 64, and past 16 distinct reasons the rest count under `other`). The count is per request: pi
+  reports a removal again on every later request that replays the item, so summing it across a
+  session's calls counts one dropped item once per replay. Item ids and content are never copied. The key is absent when no such diagnostic was
+  observed. Readers treat absent as none observed or an older build, never as zero, and ignore it
+  when they do not know it; the other four fields are unchanged.
 - `attempts` stays null: pi's provider-internal retries have no authoritative extension counter.
   Catalogue readers use `firstTokenAt - message.timestamp` for `ttft_ms` and explicit
   `attempts` / `processingMs` only, with absent or invalid values NULL. Null attempts is compatible

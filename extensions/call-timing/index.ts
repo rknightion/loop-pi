@@ -19,6 +19,38 @@ export interface CallTiming {
   attempts: null;
   processingMs: number | null;
   headers: Record<string, string>;
+  /** Additive: present only when pi reported dropped OpenAI reasoning items. Counts and reasons only. */
+  droppedReasoning?: DroppedReasoning;
+}
+
+export interface DroppedReasoning {
+  count: number;
+  reasons: Record<string, number>;
+}
+
+const DROPPED_REASONING_DIAGNOSTIC = "openai_input_transformations";
+// Reasons are server strings: bound their length and how many distinct keys one record holds.
+const MAX_REASON_LENGTH = 64;
+const MAX_REASONS = 16;
+
+/** Count the replayed reasoning items OpenAI dropped, by reason; never copies an item id or content. */
+export function droppedReasoning(diagnostics: unknown): DroppedReasoning | undefined {
+  if (!Array.isArray(diagnostics)) return undefined;
+  const reasons = new Map<string, number>();
+  let count = 0;
+  for (const diagnostic of diagnostics) {
+    if (diagnostic?.type !== DROPPED_REASONING_DIAGNOSTIC) continue;
+    const transformations = diagnostic.details?.transformations;
+    if (!Array.isArray(transformations)) continue;
+    for (const transformation of transformations) {
+      if (transformation?.type !== "reasoning" || transformation?.action !== "removed") continue;
+      const raw = typeof transformation.reason === "string" && transformation.reason !== "" ? transformation.reason.slice(0, MAX_REASON_LENGTH) : "unknown";
+      const reason = reasons.has(raw) || reasons.size < MAX_REASONS ? raw : "other";
+      reasons.set(reason, (reasons.get(reason) ?? 0) + 1);
+      count++;
+    }
+  }
+  return count === 0 ? undefined : { count, reasons: Object.fromEntries(reasons) };
 }
 
 /** Only recorded nonnegative 32-bit integer milliseconds, matching the catalogue read seam. */
@@ -149,7 +181,8 @@ export default function (pi: ExtensionAPI) {
   });
   pi.on("message_end", (event) => {
     if (!timing || event.message.role !== "assistant") return;
-    const recorded = timing;
+    const dropped = droppedReasoning((event.message as { diagnostics?: unknown }).diagnostics);
+    const recorded = dropped ? { ...timing, droppedReasoning: dropped } : timing;
     reset();
     const progressed = closeProgress("ended", event.message.stopReason ?? null);
     // pi applies message_end replacements to agent state and persists them before turn_end.

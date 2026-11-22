@@ -63,3 +63,67 @@ test("boundaries and last response replacement prevent stale headers or timestam
     assert.equal(emit("message_end", { message: assistant }), undefined);
   }
 });
+
+function diagnostic(...reasons: unknown[]) {
+  return {
+    type: "openai_input_transformations", timestamp: 5,
+    details: { transformations: reasons.map((reason, i) => ({ type: "reasoning", id: "rs_secret_" + i, action: "removed", reason })) },
+  };
+}
+
+test("a message without the dropped-reasoning diagnostic records no droppedReasoning", () => {
+  const emit = emitter();
+  emit("turn_start");
+  const unrelated = { type: "other_diagnostic", timestamp: 5, details: { transformations: [{ type: "reasoning", reason: "x" }] } };
+  const end = emit("message_end", { message: { ...assistant, diagnostics: [unrelated] } });
+  assert.equal("droppedReasoning" in end.message.loopPiTiming, false);
+  const plain = emitter();
+  plain("turn_start");
+  assert.equal("droppedReasoning" in plain("message_end", { message: assistant }).message.loopPiTiming, false);
+});
+
+test("dropped reasoning records only the count and reasons, summed across diagnostics", () => {
+  const emit = emitter();
+  emit("turn_start");
+  const message = { ...assistant, diagnostics: [
+    diagnostic("prefix_mismatch", "prefix_mismatch"), { type: "other_diagnostic", timestamp: 6 },
+    diagnostic("organization_mismatch", "prefix_mismatch", undefined),
+  ] };
+  const end = emit("message_end", { message });
+  assert.deepEqual(end.message.loopPiTiming.droppedReasoning, {
+    count: 5, reasons: { prefix_mismatch: 3, organization_mismatch: 1, unknown: 1 },
+  });
+  assert.equal(JSON.stringify(end.message.loopPiTiming).includes("rs_secret"), false, "item ids are never copied");
+  assert.equal(end.message.loopPiTiming.attempts, null);
+});
+
+test("a malformed dropped-reasoning diagnostic is ignored", () => {
+  const emit = emitter();
+  emit("turn_start");
+  const end = emit("message_end", { message: { ...assistant, diagnostics: [
+    { type: "openai_input_transformations", timestamp: 1 },
+    { type: "openai_input_transformations", timestamp: 1, details: { transformations: "bad" } },
+    { type: "openai_input_transformations", timestamp: 1, details: { transformations: [] } },
+  ] } });
+  assert.equal("droppedReasoning" in end.message.loopPiTiming, false);
+});
+
+test("dropped reasoning counts only removed reasoning items and bounds the reason keys", () => {
+  const emit = emitter();
+  emit("turn_start");
+  const many = Array.from({ length: 20 }, (_, i) => "reason_" + i);
+  const message = { ...assistant, diagnostics: [
+    { type: "openai_input_transformations", timestamp: 7, details: { transformations: [
+      { type: "message", id: "m1", action: "removed", reason: "prefix_mismatch" },
+      { type: "reasoning", id: "r1", action: "kept", reason: "prefix_mismatch" },
+      { type: "reasoning", id: "r2", action: "removed", reason: "x".repeat(200) },
+    ] } },
+    diagnostic(...many),
+  ] };
+  const end = emit("message_end", { message });
+  const dropped = end.message.loopPiTiming.droppedReasoning;
+  assert.equal(dropped.count, 21, "only removed reasoning items count");
+  assert.equal(dropped.reasons["x".repeat(64)], 1, "a long reason is cut to 64 characters");
+  assert.equal(Object.keys(dropped.reasons).length, 17, "16 distinct reasons, then other");
+  assert.equal(dropped.reasons.other, 5);
+});
