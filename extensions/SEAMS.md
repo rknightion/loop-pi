@@ -86,7 +86,10 @@ public statement of those contracts.
   `observer-unavailable`) for a run whose status is already terminal, whose recorded runner pid is dead
   and whose proof is still pending because no Pi observed the close; nopush lanes record a pid and boot
   id, so this can apply to them. It never marks a live run terminal, and a close a Pi does observe
-  replaces it.
+  replaces it. The reconciling call a second Pi runs is the `subagent` tool's `status` action
+  (`reconcileAsyncRun`); `extensions/loop-guard/unobserved-exit.e2e.test.ts` launches a real nopush lane, ends
+  the root mid-run, and proves the proof appears with the run's state unchanged and still read as finished by
+  `loop-wait/lane-children.ts`, and that no proof is written for a running lane or a live recorded pid.
   Retention prunes resumable run directories after 90 days and other eligible runs after 30 days;
   `lane-patches` is the durable patch record outside that prunable tree.
 - **Child settle (pi-subagents 0.89.2):** after a child's final `agent_end` with a clean stop, the
