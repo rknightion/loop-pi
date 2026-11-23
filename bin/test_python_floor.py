@@ -44,7 +44,9 @@ ECHO_CWD = 'printf "%s %s" "${0##*/}" "$(pwd -P)"; for a in "$@"; do printf " %s
 # A uv that behaves like the real one when asked from a hostile directory: it would hand back that
 # directory's .venv python (or VIRTUAL_ENV's) if it were ever started there or given that environment.
 UV_STUB = (
-    'echo "$PWD|VIRTUAL_ENV=${VIRTUAL_ENV-unset}|$*" >> "$UV_LOG"\n'
+    'args="$*"\n'
+    'if [ "${1:-}" = "--directory" ]; then cd "$2"; shift 2; elif [ -n "${UV_WORKING_DIR:-}" ]; then cd "$UV_WORKING_DIR"; fi\n'
+    'echo "$PWD|VIRTUAL_ENV=${VIRTUAL_ENV-unset}|$args" >> "$UV_LOG"\n'
     'case "$2" in\n'
     'find)\n'
     '  if [ -n "${HOSTILE_PYTHON:-}" ]; then echo "$HOSTILE_PYTHON"\n'
@@ -55,7 +57,7 @@ UV_STUB = (
     'install) if [ -n "${NEED_INSTALL:-}" ]; then : > "$NEED_INSTALL"; fi ;;\n'
     'esac\n'
 )
-FIND_ARGS = "python find --no-project --no-config --no-python-downloads 3.15"
+FIND_ARGS = "--directory / python find --no-project --no-config --no-python-downloads 3.15"
 
 
 def hostile_directory(directory, marker):
@@ -139,7 +141,7 @@ class EntryPointBlock(unittest.TestCase):
                 with open(log) as handle:
                     self.assertEqual(handle.read().splitlines(), [
                         "/|VIRTUAL_ENV=|" + FIND_ARGS,
-                        "/|VIRTUAL_ENV=|python install --no-config 3.15",
+                        "/|VIRTUAL_ENV=|--directory / python install --no-config 3.15",
                         "/|VIRTUAL_ENV=|" + FIND_ARGS,
                     ])
 
@@ -157,6 +159,40 @@ class EntryPointBlock(unittest.TestCase):
                 self.assertEqual(result.stdout.strip(), f"py315 {os.path.realpath(hostile)} {os.path.join(HERE, name)} --probe")
 
     @unittest.skipIf(any(os.access(path, os.X_OK) for path in HOMEBREW), "a Homebrew python3.15 is installed")
+    def test_a_hostile_uv_working_dir_cannot_move_uv_out_of_the_neutral_directory(self):
+        for name in ENTRY_POINTS:
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                hostile = os.path.join(tmp, "hostile")
+                marker = os.path.join(tmp, "marker")
+                hostile_directory(hostile, marker)
+                bin_dir, log, extra = self.uv_setup(tmp, UV_WORKING_DIR=hostile)
+                result = self.run_older(name, bin_dir, cwd=hostile, extra=extra)
+                self.assertFalse(os.path.exists(marker), "the hostile .venv python ran")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue(result.stdout.startswith("py315 "), result.stdout)
+                with open(log) as handle:
+                    self.assertEqual(handle.read().splitlines(), ["/|VIRTUAL_ENV=|" + FIND_ARGS])
+
+    @unittest.skipIf(any(os.access(path, os.X_OK) for path in HOMEBREW), "a Homebrew python3.15 is installed")
+    def test_a_dot_or_empty_path_entry_never_runs_a_file_from_the_callers_directory(self):
+        for name in ENTRY_POINTS:
+            for entry in (".", ""):
+                for template in ("{e}:{d}", "{d}:{e}", "{d}:{e}:{d}"):
+                    with self.subTest(name=name, entry=entry, template=template), tempfile.TemporaryDirectory() as tmp:
+                        hostile = os.path.join(tmp, "hostile")
+                        os.makedirs(hostile)
+                        marker = os.path.join(tmp, "marker")
+                        for tool in ("python3.15", "uv"):
+                            stub(hostile, tool, f'echo hostile > "{marker}"\n')
+                        empty = os.path.join(tmp, "empty")
+                        os.makedirs(empty)
+                        path = template.format(e=entry, d=empty)
+                        result = self.run_older(name, path, cwd=hostile)
+                        self.assertFalse(os.path.exists(marker), "a file from the caller's directory ran")
+                        self.assertEqual(result.returncode, 1, result.stderr)
+                        self.assertIn("needs Python 3.15 or later", result.stderr)
+
+    @unittest.skipIf(any(os.access(path, os.X_OK) for path in HOMEBREW), "a Homebrew python3.15 is installed")
     def test_an_interpreter_inside_a_dot_venv_is_refused_even_if_uv_names_it(self):
         for name in ENTRY_POINTS:
             with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
@@ -171,7 +207,7 @@ class EntryPointBlock(unittest.TestCase):
 
 
 class GitHooks(unittest.TestCase):
-    def run_hook(self, hook, args, tmp, stubs, extra=None):
+    def run_hook(self, hook, args, tmp, stubs, extra=None, path_entry=None, only_git=False):
         repo = os.path.join(tmp, "repo")
         if not os.path.isdir(os.path.join(repo, ".git")):
             subprocess.run(["git", "init", "-q", repo], check=True)
@@ -180,12 +216,19 @@ class GitHooks(unittest.TestCase):
         for name, body in stubs.items():
             stub(bin_dir, name, body)
         path = os.pathsep.join([bin_dir, os.path.dirname(shutil.which("git")), "/usr/bin", "/bin"])
+        if only_git:  # nothing else on PATH, so no python3 anywhere
+            git_dir = os.path.join(tmp, "git-only")
+            os.makedirs(git_dir)
+            os.symlink(shutil.which("git"), os.path.join(git_dir, "git"))
+            path = os.pathsep.join([bin_dir, git_dir])
         system = os.pathsep.join(path.split(os.pathsep)[1:])
         if shutil.which("python3.15", path=system):
             self.skipTest("a python3.15 is installed outside the scratch PATH")
         if "uv" not in stubs and shutil.which("uv", path=system):
             self.skipTest("a uv is installed outside the scratch PATH")
-        return subprocess.run(["sh", os.path.join(ROOT, "hooks", hook), *args], cwd=repo, capture_output=True,
+        if path_entry is not None:
+            path = path_entry + os.pathsep + path
+        return subprocess.run(["/bin/sh", os.path.join(ROOT, "hooks", hook), *args], cwd=repo, capture_output=True,
                               text=True, env={"PATH": path, "HOME": tmp, **(extra or {})}, timeout=60)
 
     def expected_tail(self, hook, args):
@@ -242,6 +285,49 @@ class GitHooks(unittest.TestCase):
                     self.assertTrue(result.stdout.startswith("python3 " if hostile_path else "py315 "), result.stdout)
                     with open(extra["UV_LOG"]) as handle:
                         self.assertEqual(handle.read().splitlines(), ["/|VIRTUAL_ENV=|" + FIND_ARGS])
+
+    @unittest.skipIf(any(os.access(path, os.X_OK) for path in HOMEBREW), "a Homebrew python3.15 is installed")
+    def test_a_hostile_uv_working_dir_cannot_move_uv_out_of_the_neutral_directory(self):
+        for hook, args in HOOKS:
+            with self.subTest(hook), tempfile.TemporaryDirectory() as tmp:
+                repo = os.path.join(tmp, "repo")
+                marker = os.path.join(tmp, "marker")
+                hostile_directory(repo, marker)
+                extra = {"UV_LOG": os.path.join(tmp, "uv.log"), "STUB_PYTHON": os.path.join(tmp, "stubs", "py315"),
+                         "UV_WORKING_DIR": repo}
+                result = self.run_hook(hook, args, tmp, {"uv": UV_STUB, "py315": ECHO_CWD, "python3": ECHO_NAME}, extra)
+                self.assertFalse(os.path.exists(marker), "the hostile .venv python ran")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue(result.stdout.startswith("py315 "), result.stdout)
+                with open(extra["UV_LOG"]) as handle:
+                    self.assertEqual(handle.read().splitlines(), ["/|VIRTUAL_ENV=|" + FIND_ARGS])
+
+    @unittest.skipIf(any(os.access(path, os.X_OK) for path in HOMEBREW), "a Homebrew python3.15 is installed")
+    def test_a_dot_or_empty_path_entry_never_runs_a_file_from_the_repository(self):
+        for hook, args in HOOKS:
+            for entry in (".", ""):
+                with self.subTest(hook=hook, entry=entry), tempfile.TemporaryDirectory() as tmp:
+                    repo = os.path.join(tmp, "repo")
+                    marker = os.path.join(tmp, "marker")
+                    os.makedirs(repo)
+                    for tool in ("python3.15", "python3", "uv"):
+                        stub(repo, tool, f'echo hostile > "{marker}"\n')
+                    result = self.run_hook(hook, args, tmp, {"python3": ECHO_NAME}, path_entry=entry)
+                    self.assertFalse(os.path.exists(marker), "a file from the repository ran")
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertTrue(result.stdout.startswith("python3 "), result.stdout)
+
+    @unittest.skipIf(any(os.access(path, os.X_OK) for path in HOMEBREW), "a Homebrew python3.15 is installed")
+    def test_without_any_absolute_python3_the_hook_stops_instead_of_running_one_from_the_repository(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = os.path.join(tmp, "repo")
+            marker = os.path.join(tmp, "marker")
+            os.makedirs(repo)
+            stub(repo, "python3", f'echo hostile > "{marker}"\n')
+            result = self.run_hook("pre-commit", [], tmp, {}, path_entry=".", only_git=True)
+            self.assertFalse(os.path.exists(marker), "a file from the repository ran")
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("cannot scan", result.stderr)
 
     @unittest.skipIf(any(os.access(path, os.X_OK) for path in HOMEBREW), "a Homebrew python3.15 is installed")
     def test_a_uv_that_finds_nothing_falls_through_to_python3(self):
