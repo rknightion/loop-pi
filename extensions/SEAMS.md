@@ -1255,6 +1255,14 @@ source sends a `loop-*` custom message type the set does not name.
   in that cwd. State records each run's relative cwd; resume (including after reload) requires a
   unique run match, the original allocation and a directory-only, symlink-free walk of that cwd
   inside the worktree. Missing cwd evidence or an ambiguous prefix refuses resume.
+  When the original allocation cannot be verified (ownership or confinement unknown), it is never
+  reused, repaired or removed: it stays recorded as kept unknown under `<lane>~unverified-<id>`.
+  If the lane's candidate patch exists at `<run dir>/<lane>/candidate.patch` (a regular file, no
+  link) and the allocation base was recorded, a fresh allocation is made from that base, the patch
+  is applied with `git apply --binary`, and the resume is refused with a reason naming the new
+  worktree: a resumed session cannot change its cwd, so the root launches the lane again with its
+  brief and that `cwd`. A later resume of the old run names the same worktree. With no patch, no
+  recorded base or a patch that does not apply, nothing is rebuilt and the resume is refused.
   A root `land` or `park`, or explicit root closeout, may release a clean terminal
   tree; session quit/reload alone never releases candidates. Live, unknown and dirty trees remain
   kept. Branch/path components use neutral stable opaque run/lane identifiers, not brief text,
