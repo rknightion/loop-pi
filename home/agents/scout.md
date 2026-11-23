@@ -2,7 +2,7 @@
 name: scout
 description: SCOUT lane: read-only mapping, tracker sweeps, wave drafts, CI or log reduction, and single waits.
 advertise: true
-model: openai/gpt-6.1-terra
+model: openai/gpt-6.2-sol
 thinking: medium
 tools: read, grep, find, ls, bash
 extensions: {{HOME}}/vendor/agento11y-pi/dist/index.js
