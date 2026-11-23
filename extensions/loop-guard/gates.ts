@@ -1,7 +1,7 @@
 // Explicit heavy-gate grammar shared with bin/loop-gate-lock; ordinary mutex prose is advisory.
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { dirname, isAbsolute, join } from "node:path";
+import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 
 export interface GateDeclaration { name: string; command: string }
 export interface GateDeclarations {
@@ -58,19 +58,24 @@ function worktreeRoot(start: string): string | undefined {
   }
 }
 
-/** A check that an absolute path lies in the same checkout as `cwd`, never a nested or other one.
- * The path need not exist: its nearest existing ancestor is resolved through symlinks. */
-export function worktreeContains(cwd: string): (path: string) => boolean {
+/** Place an absolute path in the checkout holding `cwd`: its real path when it lies in that checkout,
+ * outside its `.git` and never in a nested or other checkout, else undefined. A directory must exist.
+ * A file's parent must exist and the file itself may not be a symlink, dangling or not. */
+export function worktreeContains(cwd: string): (path: string, kind: "directory" | "file") => string | undefined {
   const root = worktreeRoot(cwd);
-  return (path) => {
-    if (!root || !isAbsolute(path)) return false;
-    let probe = path;
-    while (!existsSync(probe)) {
-      const parent = dirname(probe);
-      if (parent === probe) return false;
-      probe = parent;
-    }
-    return worktreeRoot(probe) === root;
+  return (path, kind) => {
+    if (!root || !isAbsolute(path)) return undefined;
+    let real: string;
+    try {
+      if (kind === "directory") real = realpathSync(path);
+      else {
+        if (lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink()) return undefined;
+        real = join(realpathSync(dirname(path)), basename(path));
+      }
+    } catch { return undefined; }
+    const inside = relative(root, real);
+    if (inside.split(sep).some((part) => part === ".." || part === ".git") || isAbsolute(inside)) return undefined;
+    return worktreeRoot(kind === "directory" ? real : dirname(real)) === root ? real : undefined;
   };
 }
 

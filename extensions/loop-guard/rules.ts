@@ -1480,9 +1480,10 @@ export interface LaneContext {
    *  standing-authority registry for lanes), or undefined. Built by the extension entries, which
    *  own the file system lookups; this module stays pure. */
   protectedPath?: (path: string) => string | undefined;
-  /** True when an absolute path lies in the checkout holding `cwd`, never a nested or other one.
-   *  Built by the extension entries (gates.ts); without it a gate's `cd` and `tee` targets are refused. */
-  inWorktree?: (path: string) => boolean;
+  /** The real path of an absolute path in the checkout holding `cwd` (outside its `.git`, never a
+   *  nested or other checkout, a file never a symlink), else undefined. Built by the extension entries
+   *  (gates.ts); without it a gate's `cd` and `tee` targets are refused. */
+  inWorktree?: (path: string, kind: "directory" | "file") => string | undefined;
 }
 
 /** The context every role's bash check takes. Root calls pass `cwd`, `proto` and `protectedPath`. */
@@ -1907,6 +1908,8 @@ const GATE_CONTEXT_VARIABLE =
   /^(?:GIT_\w*|LOOP_PI_\w*|BASH_FUNC_\w*|LD_\w*|DYLD_\w*|BASH_ENV|ENV|SHELLOPTS|BASHOPTS|IFS|CDPATH|PATH|HOME|PWD|OLDPWD|PS4|PROMPT_COMMAND|NODE_OPTIONS|PYTHONSTARTUP|PYTHONPATH|PERL5OPT|RUBYOPT)$/;
 const GATE_STDERR_SENTINEL = "\x01stderr";
 const GATE_DURATION = /^\d+(?:\.\d+)?[smhd]?$/;
+/** More prefix words than `stripWrappers` strips are refused, so no prefix count hides the wrapper. */
+const GATE_MAX_PREFIX_WORDS = 16;
 
 function gateAssignment(word: string): boolean {
   return ASSIGNMENT.test(word) && !GATE_CONTEXT_VARIABLE.test(word.slice(0, word.indexOf("=")));
@@ -1959,6 +1962,7 @@ function parseGateForm(command: string): GateForm | string {
     }
     break;
   }
+  if (i > GATE_MAX_PREFIX_WORDS) return GATE_FORM_REASON;
   const rest = gate.slice(i);
   const mergeStderr = rest[rest.length - 1] === GATE_STDERR_SENTINEL;
   if (mergeStderr) rest.pop();
@@ -1982,30 +1986,48 @@ function parseGateForm(command: string): GateForm | string {
   return { steps, prefix: gate.slice(0, i), wrapper: rest[0], name: rest[1], mergeStderr, pipeline };
 }
 
-/** Why a gate invocation is refused, or undefined: its form, then every `cd` and `tee` target. */
-function gateFormRefusal(command: string, lane: LaneContext): string | undefined {
-  const form = parseGateForm(command);
-  if (typeof form === "string") return `${form}.`;
+/** Why an accepted gate form is refused, or undefined. Each `cd` and `tee` target is resolved where
+ * the shell uses it (after the cd steps, through symlinks); each tee file then gets every write protection. */
+function gateFormRefusal(form: GateForm, role: Role, lane: LaneContext): string | undefined {
   let directory = lane.gates?.cwd ?? lane.cwd;
-  const place = (target: string): string | undefined => {
+  const place = (target: string, kind: "directory" | "file"): string | undefined => {
     if (!directory || !lane.inWorktree || target.startsWith("-") || /[*?[\]{}~]/.test(target)) return undefined;
-    const path = posix.resolve(directory, target);
-    return lane.inWorktree(path) ? path : undefined;
+    return lane.inWorktree(posix.resolve(directory, target), kind);
   };
-  const outside = (target: string) => `loop-guard: a declared gate's \`${target}\` must stay inside this worktree; other checkouts and paths are refused.`;
+  const outside = (target: string) => `loop-guard: a declared gate's \`${target}\` must stay inside this worktree, outside .git and not through a symlink; other paths are refused.`;
   for (const step of form.steps) {
     if (!("cd" in step)) continue;
-    const next = place(step.cd);
+    const next = place(step.cd, "directory");
     if (!next) return outside(step.cd);
     directory = next;
   }
   for (const segment of form.pipeline) {
     if (segment[0] !== "tee") continue;
     for (const file of segment.slice(1).filter((arg) => arg !== "-a" && arg !== "--append")) {
-      if (file.split("/").some((part) => part === ".." || part === ".git") || !place(file)) return outside(file);
+      const real = place(file, "file");
+      if (!real) return outside(file);
+      if (role === "lane" && isLoopControlPath(real)) return loopControlReason(real);
+      if (role === "root" && lane.proto && isLoopControlPath(real, undefined, { root: true })) return rootControlReason(real);
+      const write = protectedWrite([real], lane);
+      if (write) return write;
     }
   }
   return undefined;
+}
+
+/** The checks for an accepted gate form: a declared name, its targets, and the declared command
+ *  itself under every existing rule. */
+function gateInvocationRefusal(form: GateForm, role: Role, gitAliasDepth: number, lane: LaneContext): Decision | undefined {
+  const gate = lane.gates?.gates.find((g) => g.name === form.name);
+  if (!gate) return block("loop-guard: loop-gate-lock takes exactly one declared gate name; execution binding flags are guard-owned.");
+  const refusal = gateFormRefusal(form, role, lane);
+  if (refusal) return block(refusal);
+  const declared = parseCommand(gate.command, role);
+  if (!declared || declared.segments.some((s) => basename(stripWrappers(s)[0] ?? "") === "loop-gate-lock")) {
+    return block("loop-guard: nested gate wrappers are not supported in declarations.");
+  }
+  const decision = evaluateBashCommand(gate.command, role, gitAliasDepth, { ...lane, gates: undefined });
+  return decision.block ? decision : undefined;
 }
 
 function quoteGateWord(word: string): string {
@@ -2014,9 +2036,10 @@ function quoteGateWord(word: string): string {
 }
 
 /** Bind an approved gate invocation: rebuild its accepted form with every word shell-quoted and the
- * guard-owned `--cwd` and `--sha256` after the gate name. A pipeline gains `pipefail`, so a pipe to
- * `tail` or `tee` still reports the gate's own exit status. Runtime handlers replace the model's
- * tool input, never accept model-supplied binding flags. */
+ * guard-owned `--cwd` and `--sha256` after the gate name. A pipeline runs under `bash` (found on PATH,
+ * startup files unset) with `pipefail`, so a pipe to `tail` or `tee` still reports the gate's own exit
+ * status whatever shell runs the tool: `watch_process` uses /bin/sh, which need not know pipefail.
+ * Runtime handlers replace the model's tool input, never accept model-supplied binding flags. */
 export function bindGateExecution(command: string, declarations: GateDeclarations): string {
   const form = parseGateForm(command);
   if (typeof form === "string") return command;
@@ -2033,19 +2056,16 @@ export function bindGateExecution(command: string, declarations: GateDeclaration
     return `cd ${quoteForShell(directory)}`;
   });
   const bound = [...steps, pipeline].join(" && ");
-  return form.pipeline.length ? `set -o pipefail; ${bound}` : bound;
+  return form.pipeline.length ? `env -u BASH_ENV -u ENV bash -c ${quoteForShell(`set -o pipefail; ${bound}`)}` : bound;
 }
 
-/** Declared commands run by name-only wrappers, for the shared hook adapters. */
+/** The declared command an accepted gate form runs, for the shared hook adapters. Read through the
+ *  same parser as detection and binding. */
 export function wrappedGateCommands(command: string, declarations: GateDeclarations): string[] {
-  const parsed = parseCommand(command);
-  if (!parsed) return [];
-  return parsed.segments.flatMap((raw) => {
-    const words = stripWrappers(raw);
-    if (basename(words[0] ?? "") !== "loop-gate-lock" || words.length !== 2) return [];
-    const gate = declarations.gates.find((g) => g.name === words[1]);
-    return gate ? [gate.command] : [];
-  });
+  const form = parseGateForm(command);
+  if (typeof form === "string") return [];
+  const gate = declarations.gates.find((g) => g.name === form.name);
+  return gate ? [gate.command] : [];
 }
 
 // Compare executable segments, not quoted inert text. Shell -c parents are redundant:
@@ -2093,6 +2113,16 @@ export function evaluateBashCommand(
     return block("loop-guard: gate wrappers inside interpreter code are unsupported; use a direct name-only invocation.");
   }
 
+  // One parser decides: an accepted gate form gets the gate checks here, and any other command that
+  // reaches the wrapper (or hides it behind more prefixes than stripWrappers strips) is refused below.
+  const gateForm = parseGateForm(command);
+  if (typeof gateForm !== "string") {
+    const refusal = gateInvocationRefusal(gateForm, role, gitAliasDepth, lane);
+    if (refusal) return refusal;
+  } else if (parsed.segments.some((raw) => stripOneWrapper(stripWrappers(raw)) !== null && raw.some((w) => basename(w) === "loop-gate-lock"))) {
+    return block(`${gateForm}.`);
+  }
+
   if (parsed.hasBackgroundOperator) {
     return block(
       "loop-guard: a command-terminating `&` (nohup/disown/setsid or a bare background operator) detaches a " +
@@ -2106,19 +2136,11 @@ export function evaluateBashCommand(
     if (stripped.length === 0) continue;
     const head = basename(stripped[0]);
 
-    if (head === "loop-gate-lock") {
-      const gate = lane.gates?.gates.find((g) => g.name === stripped[1]);
-      if (stripped.length !== 2 || !gate) {
+    if (head === "loop-gate-lock" && typeof gateForm === "string") {
+      if (stripped.length !== 2 || !lane.gates?.gates.some((g) => g.name === stripped[1])) {
         return block("loop-guard: loop-gate-lock takes exactly one declared gate name; execution binding flags are guard-owned.");
       }
-      const formRefusal = gateFormRefusal(command, lane);
-      if (formRefusal) return block(formRefusal);
-      const declared = parseCommand(gate.command, role);
-      if (!declared || declared.segments.some((s) => basename(stripWrappers(s)[0] ?? "") === "loop-gate-lock")) {
-        return block("loop-guard: nested gate wrappers are not supported in declarations.");
-      }
-      const decision = evaluateBashCommand(gate.command, role, gitAliasDepth, { ...lane, gates: undefined });
-      if (decision.block) return decision;
+      return block(`${gateForm}.`);
     }
 
     if (head === "nohup" || head === "disown" || head === "setsid") {

@@ -1,13 +1,13 @@
 // Ordinary shell forms around a declared gate wrapper: accepted when they stay in this worktree.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { loadGateDeclarations, worktreeContains } from "./gates.ts";
-import { evaluateBashCommand } from "./rules.ts";
+import { evaluateBashCommand, wrappedGateCommands } from "./rules.ts";
 import laneExtension from "./lane.ts";
 import rootExtension from "./root.ts";
 
@@ -16,7 +16,8 @@ const cli = join(dirname(fileURLToPath(import.meta.url)), "../../bin/loop-gate-l
 function fixture() {
   const base = realpathSync(mkdtempSync(join(tmpdir(), "gate-forms-")));
   const repo = join(base, "repo");
-  mkdirSync(join(repo, ".git"), { recursive: true });
+  mkdirSync(join(repo, ".git", "hooks"), { recursive: true });
+  mkdirSync(join(repo, "codex"));
   mkdirSync(join(repo, "sub"));
   mkdirSync(join(repo, "nested", ".git"), { recursive: true });
   mkdirSync(join(base, "outside"));
@@ -93,6 +94,42 @@ for (const role of ["root", "lane"] as const) {
       assert.equal(evaluateBashCommand("CI=1 loop-gate-lock heavy | tail -5", role, 0, noPathCheck).block, false);
     } finally { rmSync(base, { recursive: true, force: true }); }
   });
+
+  test(`${role}: a tee destination is checked where the shell writes it`, () => {
+    const { base, repo, outside } = fixture();
+    try {
+      symlinkSync(join(outside, "created.log"), join(repo, "dangling.log"));
+      symlinkSync(join(repo, "sub"), join(repo, "inside.log"));
+      const context = { gates: loadGateDeclarations(repo), cwd: repo, inWorktree: worktreeContains(repo), proto: true };
+      for (const command of [
+        // Loop and root control files reached through a cd.
+        "cd codex && loop-gate-lock heavy | tee charter-test.md",
+        "cd sub && cd ../codex && loop-gate-lock heavy | tee -a charter-test.md",
+        // A symlink destination, dangling to outside or not.
+        "loop-gate-lock heavy | tee dangling.log",
+        "loop-gate-lock heavy | tee inside.log",
+        // Git's own directory, reached by cd or by the resolved path.
+        "cd .git/hooks && loop-gate-lock heavy | tee pre-commit",
+        "cd .git && loop-gate-lock heavy",
+      ]) {
+        assert.equal(evaluateBashCommand(command, role, 0, context).block, true, command);
+      }
+      assert.equal(evaluateBashCommand("cd codex && loop-gate-lock heavy | tee gate.log", role, 0, context).block, false);
+    } finally { rmSync(base, { recursive: true, force: true }); }
+  });
+
+  test(`${role}: one parser decides both gate detection and binding, whatever the prefix count`, () => {
+    const { base, repo } = fixture();
+    try {
+      writeFileSync(join(repo, "LOOP.md"), "## Mutexes\n- gate: heavy | printf ok\n- gate: unsafe | git push --force origin HEAD\n");
+      const context = { gates: loadGateDeclarations(repo), cwd: repo, inWorktree: worktreeContains(repo) };
+      const prefixes = "A=1 ".repeat(17);
+      for (const command of [`${prefixes}loop-gate-lock unsafe`, `${prefixes}loop-gate-lock heavy; true`, `${prefixes}loop-gate-lock heavy | sh`]) {
+        assert.equal(evaluateBashCommand(command, role, 0, context).block, true, command);
+      }
+      assert.deepEqual(wrappedGateCommands("CI=1 timeout 60 loop-gate-lock unsafe 2>&1 | tail -5", context.gates), ["git push --force origin HEAD"]);
+    } finally { rmSync(base, { recursive: true, force: true }); }
+  });
 }
 
 for (const [role, extension] of [["root", rootExtension], ["lane", laneExtension]] as const) {
@@ -101,12 +138,15 @@ for (const [role, extension] of [["root", rootExtension], ["lane", laneExtension
     try {
       const call = handler(extension);
       const ctx = { cwd: repo, ui: { notify() {} } };
-      const input = { command: `cd sub && CI=1 timeout 60 '${cli}' heavy 2>&1 | tee gate.log | tail -n 5` };
+      // No `timeout` here: macOS has no timeout command; the evaluation tests above cover that prefix.
+      const input = { command: `cd sub && CI=1 '${cli}' heavy 2>&1 | tee gate.log | tail -n 5` };
       const verdict = await call({ toolName: "bash", input }, ctx);
       assert.equal(verdict?.block ?? false, false, verdict?.reason);
-      assert.ok(input.command.startsWith(`set -o pipefail; cd '${join(repo, "sub")}' && CI='1' 'timeout' '60' `), input.command);
-      assert.match(input.command, /--cwd '[^']+' --sha256 '[0-9a-f]{64}' 2>&1 \| 'tee' 'gate\.log' \| 'tail' '-n' '5'$/);
-      const run = spawnSync("bash", ["-c", input.command], { cwd: repo, timeout: 20_000, encoding: "utf8" });
+      assert.ok(input.command.startsWith("env -u BASH_ENV -u ENV bash -c 'set -o pipefail; cd "), input.command);
+      assert.ok(input.command.includes(join(repo, "sub")), input.command);
+      assert.match(input.command, /--cwd '\\''[^']+'\\'' --sha256 '\\''[0-9a-f]{64}'\\'' 2>&1 \| '\\''tee'\\'' /);
+      // /bin/sh is what watch_process runs a command with; it need not know pipefail itself.
+      const run = spawnSync("/bin/sh", ["-c", input.command], { cwd: repo, timeout: 20_000, encoding: "utf8" });
       assert.equal(run.status, 0, run.stderr);
       // The wrapper's timing lines share the merged stream, so the gate's own output sits among them.
       assert.match(run.stdout, /(?:^|\n|\})ok(?:\{|\n|$)/);
@@ -114,8 +154,10 @@ for (const [role, extension] of [["root", rootExtension], ["lane", laneExtension
 
       const failing = { command: `'${cli}' failing 2>&1 | tail -n 1` };
       assert.equal((await call({ toolName: "bash", input: failing }, ctx))?.block ?? false, false);
-      const failed = spawnSync("bash", ["-c", failing.command], { cwd: repo, timeout: 20_000, encoding: "utf8" });
-      assert.equal(failed.status, 3, "a pipe to tail hid the gate's failure");
+      for (const shell of ["/bin/sh", "bash"]) {
+        const failed = spawnSync(shell, ["-c", failing.command], { cwd: repo, timeout: 20_000, encoding: "utf8" });
+        assert.equal(failed.status, 3, `${shell}: a pipe to tail hid the gate's failure`);
+      }
     } finally { rmSync(base, { recursive: true, force: true }); }
   });
 }
