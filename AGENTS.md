@@ -13,7 +13,11 @@ git hooks.
 
 The floor is Python 3.15, pinned in `.python-version` and used by CI. The Python tools in `bin/`
 carry an identical `python-floor` block that re-runs them under `python3.15` (on `PATH`, then in
-Homebrew) or `uv run --no-project --python 3.15`, and otherwise exits non-zero saying how to get 3.15.
+Homebrew) or a 3.15 that `uv python find` resolves, and otherwise exits non-zero saying how to get 3.15.
+uv only ever resolves a path, run from `/` with `VIRTUAL_ENV` and `CONDA_PREFIX` emptied and `--no-project
+--no-config`; the tool then execs that path and keeps the caller's directory. Never run uv from the caller's
+directory or pass the tool's arguments through `uv run`: a `.venv`, `VIRTUAL_ENV` or `uv.toml` there would
+steer or run code from whatever repository the user is in. The hooks resolve the same way and never download.
 A new tool in `bin/` carries the block too; `bin/test_python_floor.py` pins it. `bin/leak-scan` is the
 one exception and stays stdlib and version-agnostic, because the git hooks run it and must keep
 scanning on a host without 3.15. The hooks prefer 3.15 and fall back to `python3`; never make them

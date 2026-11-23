@@ -13,11 +13,34 @@ import sys
 if __name__ == "__main__" and sys.version_info < (3, 15):
     import os
     import shutil
+    import subprocess
+
+    def _uv_python(uv, args, capture):
+        # uv only resolves an interpreter, from "/" with its environment and config cleared, so a
+        # project, .venv, VIRTUAL_ENV or uv.toml in the caller's directory is never consulted.
+        try:
+            done = subprocess.run([uv, "python", *args], cwd="/", env=dict(os.environ, VIRTUAL_ENV="", CONDA_PREFIX=""),
+                                  stdin=subprocess.DEVNULL, stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL if capture else None, text=True)
+        except OSError:
+            return None
+        found = done.stdout.strip() if capture and done.returncode == 0 else ""
+        if (os.path.isabs(found) and os.path.isfile(found) and os.access(found, os.X_OK)
+                and ".venv" not in found.split(os.sep) and ".venv" not in os.path.realpath(found).split(os.sep)):
+            return found
+        return None
 
     _python = [shutil.which(name) for name in ("python3.15", "/opt/homebrew/bin/python3.15", "/home/linuxbrew/.linuxbrew/bin/python3.15")]
     _python = [path for path in _python if path][:1]
-    if not _python and shutil.which("uv"):
-        _python = [shutil.which("uv"), "run", "--no-project", "--python", "3.15", "python"]
+    _uv = shutil.which("uv")
+    if not _python and _uv:
+        _uv = os.path.abspath(_uv)
+        _find = ["find", "--no-project", "--no-config", "--no-python-downloads", "3.15"]
+        _found = _uv_python(_uv, _find, True)
+        if not _found:
+            _uv_python(_uv, ["install", "--no-config", "3.15"], False)
+            _found = _uv_python(_uv, _find, True)
+        _python = [_found] if _found else []
     if not _python:
         sys.exit(os.path.basename(sys.argv[0]) + " needs Python 3.15 or later and found " + sys.version.split()[0]
                  + ". Install it (macOS: brew install python@3.15; elsewhere: uv python install 3.15) and run again.")

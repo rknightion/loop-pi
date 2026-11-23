@@ -3,12 +3,21 @@
 # Never bypass it with --no-verify and never point core.hooksPath elsewhere in this repository.
 set -eu
 top=$(git rev-parse --show-toplevel)
-# Prefer Python 3.15 (PATH, Homebrew, then an installed one uv knows of; uv never downloads here).
+# Prefer Python 3.15 (PATH, Homebrew, then an installed one uv resolves; uv never downloads here).
 # The scan is stdlib-only and is a gate, so with no 3.15 anywhere it runs on python3 instead of
 # refusing the commit or push.
 py=
 for candidate in python3.15 /opt/homebrew/bin/python3.15 /home/linuxbrew/.linuxbrew/bin/python3.15; do
   if command -v "$candidate" >/dev/null 2>&1; then py=$candidate; break; fi
 done
-if [ -z "$py" ] && command -v uv >/dev/null 2>&1; then py=$(uv python find --no-python-downloads 3.15 2>/dev/null || true); fi
+if [ -z "$py" ] && command -v uv >/dev/null 2>&1; then
+  # Resolve only: from /, with the environment and config cleared, so nothing in this repository's
+  # directory (.venv, VIRTUAL_ENV, uv.toml) steers uv. Then exec the path it prints.
+  py=$(cd / && VIRTUAL_ENV= CONDA_PREFIX= uv python find --no-project --no-config --no-python-downloads 3.15 </dev/null 2>/dev/null || true)
+  case "$py" in
+    /*/.venv/*) py= ;;
+    /*) [ -f "$py" ] && [ -x "$py" ] || py= ;;
+    *) py= ;;
+  esac
+fi
 exec "${py:-python3}" "$top/bin/leak-scan" --staged
