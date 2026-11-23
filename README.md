@@ -215,7 +215,10 @@ evidence, judges a move of a remote's default branch commit by commit:
   above applies; author, committer and current SHA are never backfilled. Refusing such pushes
   before mutation in loop-guard was deliberately not chosen.
 - Any other added, moved or deleted ref, tag or release is reported and fails the audit (exit 1),
-  except `refs/pull/*` changes, which are reported as foreign.
+  except `refs/pull/*` changes and refs bots own (any change to a `renovate/*` branch, a
+  `release-please--*` branch added or moved, and a new release-candidate tag such as `v1.2.3-rc.4`
+  with its local tag and release), which are reported as foreign. Deleting a `release-please--*`
+  branch still needs the charter's release authority.
 - `compare BEFORE AFTER` applies the same rules when given `--run-dir DIR` for a run dir with the
   marker or `--push-log FILE`; it never reads `LOOP_PI_RUN_DIR`.
 

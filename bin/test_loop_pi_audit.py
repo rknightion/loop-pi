@@ -443,6 +443,84 @@ class CompareTests(unittest.TestCase):
                                 for line in denied.stdout.splitlines()), denied.stdout)
         self.assertIn("tag added: refs/tags/v2 ", denied.stdout)
 
+    def test_bot_owned_refs_are_foreign(self):
+        # Renovate and release-please branches and release-candidate tags are pushed by bots while a
+        # loop runs: added, force-moved and deleted, they are FOREIGN, never a violation.
+        git(self.repo, "push", "-q", "origin", "HEAD:refs/heads/renovate/go-deps")
+        git(self.repo, "push", "-q", "origin", "HEAD:refs/heads/release-please--branches--main")
+        git(self.repo, "tag", "-a", "-m", "rc", "v1.2.0-rc.1")
+        git(self.repo, "push", "-q", "origin", "v1.2.0-rc.1")
+        mid = os.path.join(self.tmp, "mid.json")
+        snapshot(mid, self.repo, env_overrides={"PATH": self.gh_bin})
+        result = run_audit("compare", self.before, mid)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for shown in ("refs/heads/renovate/go-deps", "refs/heads/release-please--branches--main",
+                      "refs/tags/v1.2.0-rc.1 ", "refs/tags/v1.2.0-rc.1^{}", "tag added: refs/tags/v1.2.0-rc.1"):
+            self.assertTrue(any(shown in line and "[FOREIGN]" in line for line in result.stdout.splitlines()),
+                            shown + "\n" + result.stdout)
+
+        git(self.repo, "commit", "-q", "--allow-empty", "-m", "rebased update")
+        git(self.repo, "commit", "-q", "--amend", "--allow-empty", "-m", "rebased update, again")
+        git(self.repo, "push", "-q", "--force", "origin", "HEAD:refs/heads/renovate/go-deps")
+        git(self.repo, "push", "-q", "--force", "origin", "HEAD:refs/heads/release-please--branches--main")
+        git(self.repo, "reset", "-q", "--hard", "origin/main")
+        later = os.path.join(self.tmp, "later.json")
+        snapshot(later, self.repo, env_overrides={"PATH": self.gh_bin})
+        result = run_audit("compare", mid, later)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("ref moved: refs/heads/renovate/go-deps", result.stdout)
+        self.assertIn("ref moved: refs/heads/release-please--branches--main", result.stdout)
+        self.assertNotIn("UNGRANTED", result.stdout)
+
+        # Renovate deletes its branch once the update merges. Deleting a release-please branch means
+        # its release merged, so that stays under the charter's release authority (ReleaseAuthorityTests).
+        git(self.repo, "push", "-q", "origin", "--delete", "renovate/go-deps")
+        result = run_audit("compare", later, self._snapshot_after())
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("ref deleted: refs/heads/renovate/go-deps", result.stdout)
+        self.assertIn("[FOREIGN]", result.stdout)
+
+    def test_only_bot_owned_refs_are_foreign(self):
+        # A look-alike branch, a final version tag and a moved release-candidate tag stay UNGRANTED.
+        git(self.repo, "push", "-q", "origin", "HEAD:refs/heads/feature/renovate/x")
+        git(self.repo, "tag", "v1.2.0")
+        git(self.repo, "push", "-q", "origin", "v1.2.0")
+        result = run_audit("compare", self.before, self._snapshot_after())
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        for shown in ("refs/heads/feature/renovate/x", "refs/tags/v1.2.0 ", "tag added: refs/tags/v1.2.0 "):
+            self.assertTrue(any(shown in line and "[UNGRANTED]" in line for line in result.stdout.splitlines()),
+                            shown + "\n" + result.stdout)
+
+        git(self.repo, "push", "-q", "origin", "HEAD:refs/tags/v1.3.0-rc.1")
+        mid = os.path.join(self.tmp, "mid.json")
+        snapshot(mid, self.repo, env_overrides={"PATH": self.gh_bin})
+        git(self.repo, "commit", "-q", "--allow-empty", "-m", "moved")
+        git(self.repo, "push", "-q", "--force", "origin", "HEAD:refs/tags/v1.3.0-rc.1")
+        result = run_audit("compare", mid, self._snapshot_after())
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("refs/tags/v1.3.0-rc.1", result.stdout)
+        self.assertIn("UNGRANTED", result.stdout)
+
+    def test_a_release_candidate_release_is_foreign(self):
+        def snap(releases):
+            return {"repos": {"fake-repo": {
+                "remotes": {"origin": {"available": True, "refs": {"refs/heads/main": "a" * 40}}},
+                "tags": {"available": True, "tags": {}},
+                "releases": {"available": True, "releases": [{"tagName": t} for t in releases]},
+            }}}
+        paths = []
+        for phase, releases in (("before", []), ("rc", ["v2.0.0-rc.3"]), ("final", ["v2.0.0"])):
+            path = os.path.join(self.tmp, f"release-{phase}.json")
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(snap(releases), fh)
+            paths.append(path)
+        result = run_audit("compare", paths[0], paths[1])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("release added: v2.0.0-rc.3 [FOREIGN]", result.stdout)
+        result = run_audit("compare", paths[0], paths[2])
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("release added: v2.0.0 [UNGRANTED]", result.stdout)
+
     def test_releases_unavailable_on_one_side_is_unverified_and_fails_closed(self):
         # Releases unreadable on either side means the audit
         # cannot prove no ungranted release change occurred, so it must fail

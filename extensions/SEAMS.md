@@ -1355,7 +1355,9 @@ source sends a `loop-*` custom message type the set does not name.
   was made on top of (FOREIGN: reported, not a violation, never a grant; both facts are required) and, where the charter's `authority:` names release-please for the repository, a
   release-please merge, its version tag, its release and the deletion of its `release-please--*`
   branch (GRANTED; a charter that no longer hashes to its arm-time digest grants nothing). Every other added, moved or deleted ref, tag or
-  release fails the audit, except `refs/pull/*` (foreign). Another snapshotted remote whose
+  release fails the audit, except `refs/pull/*` and bot-owned refs (foreign: any change to a
+  `renovate/*` branch, a `release-please--*` branch added or moved, and a new release-candidate tag
+  such as `v1.2.3-rc.4`, its local tag and its release). Another snapshotted remote whose
   unchanged URL is byte-identical to the canonical repository's (no scheme, user, host-case or
   path normalisation) receives only that canonical's exact `actor: root` `old..new` ranges. Only absolute
   URLs qualify (`scheme://`, scp-like `host:path`, absolute local path); a relative URL such as
