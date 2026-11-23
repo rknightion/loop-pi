@@ -1,7 +1,7 @@
 // Explicit heavy-gate grammar shared with bin/loop-gate-lock; ordinary mutex prose is advisory.
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, relative, sep } from "node:path";
 
 export interface GateDeclaration { name: string; command: string }
 export interface GateDeclarations {
@@ -43,6 +43,34 @@ export function parseGateDeclarations(text: string): GateDeclarations {
     gates.push({ name, command });
   }
   return { gates };
+}
+
+/** The canonical root of the checkout holding `start`: the nearest directory with a `.git` entry. */
+function worktreeRoot(start: string): string | undefined {
+  let directory: string;
+  try { directory = realpathSync(start); }
+  catch { return undefined; }
+  for (;;) {
+    if (existsSync(join(directory, ".git"))) return directory;
+    const parent = dirname(directory);
+    if (parent === directory) return undefined;
+    directory = parent;
+  }
+}
+
+/** Place an existing absolute directory in the checkout holding `cwd`: its real path when it lies in
+ * that checkout, outside its `.git` and never in a nested or other checkout, else undefined. */
+export function worktreeContains(cwd: string): (path: string) => string | undefined {
+  const root = worktreeRoot(cwd);
+  return (path) => {
+    if (!root || !isAbsolute(path)) return undefined;
+    let real: string;
+    try { real = realpathSync(path); }
+    catch { return undefined; }
+    const inside = relative(root, real);
+    if (inside.split(sep).some((part) => part === ".." || part === ".git") || isAbsolute(inside)) return undefined;
+    return worktreeRoot(real) === root ? real : undefined;
+  };
 }
 
 /** Walk to this worktree's root, never another checkout via the common git dir. */

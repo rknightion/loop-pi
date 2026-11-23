@@ -43,8 +43,10 @@ for (const role of ["root", "lane"] as const) {
       assert.equal(evaluateBashCommand(command, role, 0, { gates: declarations }).block, false, command);
       assert.deepEqual(wrappedGateCommands(command, declarations), ["just check"]);
     }
+    // An ordinary environment prefix is an accepted gate form (gate-forms.test.ts holds the full set).
+    assert.equal(evaluateBashCommand("env FOO=bar loop-gate-lock heavy", role, 0, { gates: declarations }).block, false);
     for (const command of ["loop-gate-lock wrong", "loop-gate-lock heavy -- just check", "loop-gate-lock heavy && just check",
-      "env FOO=bar loop-gate-lock heavy", "bash -c 'loop-gate-lock heavy'", "loop-gate-lock heavy > log.json"]) {
+      "env GIT_WORK_TREE=/ loop-gate-lock heavy", "bash -c 'loop-gate-lock heavy'", "loop-gate-lock heavy > log.json"]) {
       assert.equal(evaluateBashCommand(command, role, 0, { gates: declarations }).block, true, command);
     }
     assert.equal(evaluateBashCommand("echo 'just check'", role, 0, { gates: declarations }).block, false);
