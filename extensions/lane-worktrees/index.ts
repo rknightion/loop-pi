@@ -448,6 +448,7 @@ export default function (pi: ExtensionAPI) {
     if (!dir || !patch) return { why: "there is no candidate patch to rebuild from" };
     if (!tree.base) return { why: "its base was not recorded" };
     if (allocating.has(tree.lane)) return { why: "an allocation for this lane is already in progress" };
+    if (trees.get(tree.lane) !== tree) return { why: "the lane's allocation changed before the rebuild" };
     allocating.add(tree.lane);
     const allocation = randomUUID();
     let made: Tree | undefined;
@@ -687,6 +688,17 @@ export default function (pi: ExtensionAPI) {
         if (isLive(tree) || releasing.has(tree.lane) || tree.release) return { block: true, reason: "lane-worktrees: the lane is live or awaiting root release; it cannot resume concurrently." };
         if (tree.rebuiltAs) return { block: true, reason: `lane-worktrees: this run's worktree could not be verified and was replaced by one rebuilt at ${tree.rebuiltAs}; launch the lane again with its brief and cwd ${tree.rebuiltAs}.` };
         if (!await verifyAllocation(tree.identity, runDir(), tree.path, tree.repo, tree.branch, git)) {
+          // Another resume may have rebuilt the lane, or a launch claimed it, while this one verified.
+          const current = trees.get(tree.lane);
+          if (current !== tree) {
+            return {
+              block: true,
+              reason: current && current.task === tree.task && current.path !== tree.path
+                ? `lane-worktrees: this run's worktree could not be verified and was replaced by one rebuilt at ${current.path}; launch the lane again with its brief and cwd ${current.path}.`
+                : "lane-worktrees: allocation became live or was released during resume verification.",
+            };
+          }
+          if (isLive(tree) || releasing.has(tree.lane) || tree.release) return { block: true, reason: "lane-worktrees: allocation became live or was released during resume verification." };
           const rebuilt = await rebuildFromPatch(tree);
           if ("why" in rebuilt) return { block: true, reason: `lane-worktrees: resume refused because retained allocation ownership or confinement is unknown, and no worktree was rebuilt: ${rebuilt.why}.` };
           return {

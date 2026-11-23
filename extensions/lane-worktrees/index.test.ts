@@ -809,6 +809,54 @@ test("an unverifiable retained worktree is kept and the lane is rebuilt from its
   }
 });
 
+test("concurrent resumes of an unverifiable worktree rebuild it once and point at the same rebuilt worktree", async () => {
+  const s = setup();
+  const path = process.env.PATH;
+  try {
+    const base = git(s.repo, "rev-parse", "HEAD");
+    const a = await s.launch(brief("L1", "T1"));
+    await s.end(a.id, { runId: "run-1" });
+    const old = s.path("L1");
+    writeCandidate(s.runDir, "L1", old, base);
+    git(old, "checkout", "-q", "--detach");
+    s.reload();
+    s.emit("subagent:async-complete", { runId: "run-1" });
+    // Hold the first HEAD read (the step a detached allocation fails) until the other resume has
+    // verified and rebuilt, so that verification completes after the lane's record was replaced.
+    const realGit = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+    const bin = fresh("lw-slow-git-");
+    const slots = fresh("lw-slow-git-slots-");
+    writeFileSync(join(bin, "git"), [
+      "#!/bin/sh",
+      'case " $* " in *" symbolic-ref --quiet HEAD "*)',
+      `  i=1; while ! mkdir "${slots}/$i" 2>/dev/null; do i=$((i+1)); done`,
+      '  [ "$i" = 1 ] && sleep 4;;',
+      "esac",
+      `exec "${realGit}" "$@"`,
+      "",
+    ].join("\n"), { mode: 0o755 });
+    process.env.PATH = `${bin}:${path}`;
+    const resume = (id: string) => s.handlers.get("tool_call")!({ toolName: "subagent", toolCallId: id, input: { action: "resume", id: "run-1" } }, s.ctx);
+    const results = await Promise.all([resume("resume-a"), resume("resume-b")]);
+    process.env.PATH = path;
+
+    const current = s.path("L1");
+    assert.notEqual(current, old);
+    const worktrees = git(s.repo, "worktree", "list", "--porcelain").split("\n").filter((l) => l.startsWith("worktree "));
+    assert.equal(worktrees.length, 3, `the main checkout, the kept worktree and one rebuild\n${worktrees.join("\n")}`);
+    for (const r of results) {
+      assert.equal(r?.block, true);
+      const named = /rebuilt at (\S+?)[;\s]/.exec(r.reason)?.[1];
+      assert.equal(named, current, r.reason);
+    }
+    const again = await s.launch(brief("L1", "T1"), { cwd: current });
+    assert.equal(again.result, undefined, "the named worktree is the lane's recorded one");
+  } finally {
+    process.env.PATH = path;
+    s.restore();
+  }
+});
+
 test("an unverifiable retained worktree with no candidate patch is refused and nothing is rebuilt", async () => {
   const s = setup();
   try {
