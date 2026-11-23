@@ -6,6 +6,9 @@ LEAK_TERMS_FILE, or ${XDG_CONFIG_HOME:-~/.config}/leak-scan/<repo>.txt, where <r
 line of leak-scan.repo. The committed leak-patterns.public.txt is always added. See README-leak-scan
 or the file format section of the repository's AGENTS.md.
 
+Stdlib only, and deliberately without the Python 3.15 re-run the other bin tools carry: the git hooks run it
+on commit and push, and a host without 3.15 must keep scanning rather than refuse the commit.
+
 Exit 0 clean, 1 on a finding, 2 when the scan cannot be trusted (no term source, an empty or
 malformed list, zero files, a shallow repository, any internal error). A finding prints
 `path:line: label` and never the matched text, the line or the pattern.

@@ -80,7 +80,14 @@ script payload and the settings keys.
 
 ## Install
 
-You need Node 22.19 or later, npm, Python 3.10 or later and git, on macOS or Linux.
+You need Node 22.19 or later, npm, Python 3.15 or later and git, on macOS or Linux. The checkout pins
+`.python-version` to 3.15 for [uv](https://docs.astral.sh/uv/). The Python tools in `bin/` re-run
+themselves under the first of `python3.15` on `PATH` (absolute entries only), Homebrew's `python3.15` or a 3.15 that uv
+resolves (installing a managed one when none exists) when `python3` is older, and otherwise exit with a
+message saying how to install 3.15. uv is only asked for a path, from `/` with its environment and
+config cleared, so a project in the current directory never picks the interpreter. `bin/leak-scan` is the
+exception: it stays version-agnostic so the git
+hooks keep scanning on a host without 3.15.
 
 ```sh
 git clone https://github.com/rknightion/loop-pi && cd loop-pi

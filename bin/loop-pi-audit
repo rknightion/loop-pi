@@ -78,6 +78,54 @@ considered and not chosen.
 
 Stdlib only.
 """
+# python-floor: begin (identical in every bin entry point except leak-scan; bin/test_python_floor.py pins it)
+import sys
+
+if __name__ == "__main__" and sys.version_info < (3, 15):
+    import os
+    import subprocess
+
+    def _on_path(name):
+        # Absolute PATH entries only: "." or an empty entry would run a file from the caller's directory.
+        for directory in os.environ.get("PATH", "").split(os.pathsep):
+            path = os.path.join(directory, name)
+            if os.path.isabs(directory) and os.path.isfile(path) and os.access(path, os.X_OK):
+                return path
+        return None
+
+    def _uv_python(uv, args, capture):
+        # uv only resolves an interpreter, from "/" with --directory, its environment and config cleared, so a
+        # project, .venv, VIRTUAL_ENV, UV_WORKING_DIR or uv.toml in the caller's directory is never consulted.
+        try:
+            done = subprocess.run([uv, "--directory", "/", "python", *args], cwd="/",
+                                  env=dict(os.environ, VIRTUAL_ENV="", CONDA_PREFIX=""), stdin=subprocess.DEVNULL,
+                                  stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL if capture else None, text=True)
+        except OSError:
+            return None
+        found = done.stdout.strip() if capture and done.returncode == 0 else ""
+        if (os.path.isabs(found) and os.path.isfile(found) and os.access(found, os.X_OK)
+                and ".venv" not in found.split(os.sep) and ".venv" not in os.path.realpath(found).split(os.sep)):
+            return found
+        return None
+
+    _python = _on_path("python3.15")
+    for _path in ("/opt/homebrew/bin/python3.15", "/home/linuxbrew/.linuxbrew/bin/python3.15"):
+        if not _python and os.path.isfile(_path) and os.access(_path, os.X_OK):
+            _python = _path
+    _uv = _on_path("uv")
+    if not _python and _uv:
+        _find = ["find", "--no-project", "--no-config", "--no-python-downloads", "3.15"]
+        _python = _uv_python(_uv, _find, True)
+        if not _python:
+            _uv_python(_uv, ["install", "--no-config", "3.15"], False)
+            _python = _uv_python(_uv, _find, True)
+    if not _python:
+        sys.exit(os.path.basename(sys.argv[0]) + " needs Python 3.15 or later and found " + sys.version.split()[0]
+                 + ". Install it (macOS: brew install python@3.15; elsewhere: uv python install 3.15) and run again.")
+    os.execv(_python, [_python] + sys.argv)
+# python-floor: end
+
 import argparse
 import fcntl
 import hashlib
