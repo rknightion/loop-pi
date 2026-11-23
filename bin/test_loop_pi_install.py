@@ -1297,12 +1297,12 @@ class InstallerTests(unittest.TestCase):
         apply(prefix, tgt)
         # SEAMS S4: model and thinking per role, in the source file and in the installed copy.
         for name, model, thinking in (
-            ("worker", "gpt-6.1-terra", "high"),
-            ("composer", "gpt-6.1-terra", "high"),
+            ("worker", "gpt-6.2-sol", "medium"),
+            ("composer", "gpt-6.2-sol", "medium"),
             ("senior", "gpt-6.2-sol", "high"),
             ("senior-escalation", "gpt-6.2-astra", "high"),
             ("reviewer", "gpt-6.2-sol", "high"),
-            ("scout", "gpt-6.1-terra", "medium"),
+            ("scout", "gpt-6.2-sol", "medium"),
         ):
             source = (m.SRC / "home/agents" / f"{name}.md").read_text()
             installed = (tgt.home / "agents" / f"{name}.md").read_text()

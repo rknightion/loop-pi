@@ -2,8 +2,8 @@
 name: composer
 description: COMPOSE lane: composes reviewed candidates into a landing batch, or writes a board batch; commits locally only and returns the commit SHA.
 advertise: true
-model: openai/gpt-6.1-terra
-thinking: high
+model: openai/gpt-6.2-sol
+thinking: medium
 tools: read, bash, edit, write, grep, find, ls, watch_process
 extensions: {{HOME}}/vendor/agento11y-pi/dist/index.js
 systemPromptMode: append
