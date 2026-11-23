@@ -2,8 +2,9 @@
 """Drive one command on a pseudo-terminal for a test. Not itself a test.
 
 argv[1] is a JSON object: {"argv": [...], "steps": [{"wait": regex|null, "send": text|null,
-"timeout": seconds}], "out": path}. Each step first waits until the output so far matches `wait`
-(a Python regex over the output decoded as UTF-8), then types `send`. The whole output is written
+"timeout": seconds, "quiet": seconds}], "out": path}. Each step first waits until the output so far matches `wait`
+(a Python regex over the output decoded as UTF-8) and, when `quiet` is set, until the output has
+been silent for that many seconds (a slow host may still be starting up), then types `send`. The whole output is written
 to `out` at the end, and the exit status is 0 only when every wait matched. The device-attributes
 query (CSI c) is answered so a TUI's terminal negotiation completes. The environment is inherited.
 """
@@ -46,10 +47,26 @@ def pump(deadline, pattern=None):
     return pattern is None
 
 
+def settle(deadline, quiet):
+    """Wait until no output has arrived for `quiet` seconds, or the deadline passes."""
+    last = len(output)
+    since = time.time()
+    while time.time() < deadline:
+        pump(min(deadline, time.time() + 0.1))
+        if len(output) != last:
+            last, since = len(output), time.time()
+        elif time.time() - since >= quiet:
+            return True
+    return False
+
+
 ok = True
 for step in config["steps"]:
     timeout = float(step.get("timeout", 20))
     if step.get("wait") is not None and not pump(time.time() + timeout, step["wait"]):
+        ok = False
+        break
+    if step.get("quiet") is not None and not settle(time.time() + timeout, float(step["quiet"])):
         ok = False
         break
     text = step.get("send")

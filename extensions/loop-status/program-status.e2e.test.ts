@@ -41,7 +41,8 @@ test("an interactive loop root reports working while a lane runs and asks for th
   const esc = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const b64 = (s: string): string => esc(Buffer.from(s).toString("base64"));
   const steps = [
-    { wait: "\x1b\\]7501;state=idle", send: "launch /tmp/none/codex/closeout-demo-loop1.md\r" },
+    // pi reports idle before its startup finishes; input typed during startup is dropped on a slow host.
+    { wait: "\x1b\\]7501;state=idle", quiet: 3, timeout: 60, send: "launch /tmp/none/codex/closeout-demo-loop1.md\r" },
     { wait: null, send: "lane-start run-a\r" },
     { wait: null, send: "hello\r" },
     // The settled run's resting report, whatever it is: pi's own would be `done`.
