@@ -62,6 +62,30 @@ test("watch_process runs in ctx.cwd, not the extension host's own process.cwd()"
   assert.notEqual(realpathSync(result.details.tail[0]), realpathSync(process.cwd()));
 });
 
+test("watch_process accepts a deadline that covers a long gate's queue wait plus its timeout", async () => {
+  // A gate route may wait 60 minutes for a slot and then run for 90: one watch must cover both.
+  const deadline = (60 + 90) * 60;
+  const script = writeFauxScript([
+    { match: "RUN_GATE", once: true, toolCalls: [{ name: "watch_process", args: { command: "exit 0", deadline_s: deadline, tail_lines: 5 } }] },
+    { match: ".*", text: "done" },
+  ]);
+  const session = startPiRpc({ extensions: [FAUX_EXTENSION, LANE_EXTENSION], fauxScriptPath: script });
+  try {
+    session.send({ id: "p1", type: "prompt", message: "RUN_GATE" });
+    await session.waitForResponse("p1");
+    const toolEnd = await session.waitFor(
+      (e) => e.type === "tool_execution_end" && (e as { toolName?: string }).toolName === "watch_process",
+    );
+    const end = toolEnd as unknown as { isError?: boolean; result: { content?: { text?: string }[]; details?: { exit_code: number | null; deadline_hit: boolean } } };
+    assert.notEqual(end.isError, true, JSON.stringify(end.result.content));
+    assert.equal(end.result.details?.exit_code, 0);
+    assert.equal(end.result.details?.deadline_hit, false);
+    await session.waitFor((e) => e.type === "agent_settled");
+  } finally {
+    await session.close();
+  }
+});
+
 test("watch_process kills a runaway command and reports deadline_hit", async () => {
   const script = writeFauxScript([
     { match: "RUN_SLOW", once: true, toolCalls: [{ name: "watch_process", args: { command: "sleep 30", deadline_s: 1, tail_lines: 5 } }] },

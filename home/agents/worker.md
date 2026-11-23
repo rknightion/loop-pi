@@ -24,7 +24,8 @@ live in, Root-owned and a `Rules:` line.
 - Implement the one task in your own worktree, prove it red first, gate once, and hand back an
   uncommitted candidate: `candidate.patch`, its sha256 and a `return.md`.
 - You never run `git push`; the guard refuses it for every lane. Wait on a long command with one
-  `watch_process` call (`deadline_s` at most 3600). Never background a process.
+  `watch_process` call (`deadline_s` at most 14400, enough for a gate's queue wait plus its
+  timeout). Never background a process.
 - You never write to the tracker: not the Backlog, not GitHub issues or the Project. A status change
   or acceptance tick you want goes in your lane return (the optional `tracker` field); the root
   applies it.

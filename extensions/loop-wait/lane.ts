@@ -8,9 +8,14 @@ import { runWatchProcess } from "./core.ts";
 import { registerChildResultDelivery } from "./lane-children.ts";
 import { registerRuntimeEntry } from "./runtime-entry.ts";
 
+/** The longest a lane may watch one process: a lane's own run limit (`timeoutMs: 14400000` in the
+ *  worker, composer and senior agent files), so a gate's whole queue wait plus its timeout fits in one
+ *  watch. A lower cap made a lane choose between cutting a gate short and not running it. */
+export const WATCH_PROCESS_MAX_DEADLINE_S = 4 * 3600;
+
 export const WatchProcessParams = Type.Object({
   command: Type.String({ description: "Shell command to run to completion (never append `&`)." }),
-  deadline_s: Type.Number({ minimum: 1, maximum: 3600, description: "Kill the process and return if it has not exited by this deadline." }),
+  deadline_s: Type.Number({ minimum: 1, maximum: WATCH_PROCESS_MAX_DEADLINE_S, description: "Kill the process and return if it has not exited by this deadline. Cover the command's whole run: a gate's queue wait plus its timeout." }),
   tail_lines: Type.Number({ minimum: 1, description: "Number of trailing output lines to return." }),
 });
 
