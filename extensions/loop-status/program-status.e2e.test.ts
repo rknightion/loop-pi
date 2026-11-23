@@ -74,7 +74,7 @@ test("an interactive loop root reports working while a lane runs and asks for th
   const seen = reports(stream);
   const root = seen.filter((r) => r.id === undefined);
   assert.equal(root.some((r) => r.state === "done"), false, `pi's resting done never reaches the terminal: ${JSON.stringify(seen)}`);
-  assert.equal(result.status, 0, `a step timed out; reports so far: ${JSON.stringify(seen)}\n${result.stderr}`);
+  assert.equal(result.status, 0, `a step timed out; reports so far: ${JSON.stringify(seen)}\n${result.stderr}\nstream tail: ${JSON.stringify(stream.slice(-3000))}`);
 
   // Between the lane's end and the wake the root stays working: only the settled turn asks for the owner.
   assert.deepEqual(root.map((r) => r.state), ["idle", "working", "working", "working", "blocked"]);
