@@ -1,13 +1,13 @@
 // Ordinary shell forms around a declared gate wrapper: accepted when they stay in this worktree.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { loadGateDeclarations, worktreeContains } from "./gates.ts";
-import { evaluateBashCommand, wrappedGateCommands } from "./rules.ts";
+import { bindGateExecution, evaluateBashCommand, wrappedGateCommands } from "./rules.ts";
 import laneExtension from "./lane.ts";
 import rootExtension from "./root.ts";
 
@@ -44,8 +44,6 @@ for (const role of ["root", "lane"] as const) {
         "cd sub && cd .. && loop-gate-lock heavy",
         "loop-gate-lock heavy | tail -40",
         "loop-gate-lock heavy 2>&1 | tail -n 40",
-        "loop-gate-lock heavy 2>&1 | tee gate.log | tail -n 20",
-        "cd sub && loop-gate-lock heavy 2>&1 | tee -a gate.log",
         "timeout 3600 loop-gate-lock heavy",
         "timeout -k 30 --signal=TERM 90m loop-gate-lock heavy",
         "export CI=1 && loop-gate-lock heavy",
@@ -69,7 +67,9 @@ for (const role of ["root", "lane"] as const) {
           "loop-gate-lock heavy 2>&1 | tail -5 && kubectl apply -f deploy.yaml"],
         credentials: ["cat ~/.aws/credentials && loop-gate-lock heavy", "loop-gate-lock heavy | cat - ~/.ssh/id_ed25519",
           "cd ~/.ssh && loop-gate-lock heavy", "AWS_SHARED_CREDENTIALS_FILE=$HOME/.aws/credentials loop-gate-lock heavy"],
-        outsideWrite: [`loop-gate-lock heavy | tee '${join(outside, "gate.log")}'`, "loop-gate-lock heavy | tee ../gate.log",
+        // tee is not accepted anywhere, inside the worktree or out: the gate's output comes back through the tool.
+        write: ["loop-gate-lock heavy | tee gate.log", "loop-gate-lock heavy 2>&1 | tee -a gate.log | tail -n 20",
+          `loop-gate-lock heavy | tee '${join(outside, "gate.log")}'`, "loop-gate-lock heavy | tee ../gate.log",
           "loop-gate-lock heavy 2>&1 | tee .git/hooks/pre-commit", `loop-gate-lock heavy > '${join(outside, "gate.log")}'`,
           "loop-gate-lock heavy > gate.log", `cd '${outside}' && loop-gate-lock heavy`, "cd nested && loop-gate-lock heavy",
           "cd .. && loop-gate-lock heavy", "cd - && loop-gate-lock heavy", "loop-gate-lock heavy | tee /tmp/*.log"],
@@ -87,7 +87,7 @@ for (const role of ["root", "lane"] as const) {
           assert.equal(evaluateBashCommand(command, role, 0, context).block, true, `${kind}: ${command}`);
         }
       }
-      // Without the file system check the guard cannot place a cd or tee target, so it refuses them.
+      // Without the file system check the guard cannot place a cd target, so it refuses it; tee is never accepted.
       const noPathCheck = { gates: context.gates, cwd: repo };
       assert.equal(evaluateBashCommand("cd sub && loop-gate-lock heavy", role, 0, noPathCheck).block, true);
       assert.equal(evaluateBashCommand("loop-gate-lock heavy | tee gate.log", role, 0, noPathCheck).block, true);
@@ -95,26 +95,31 @@ for (const role of ["root", "lane"] as const) {
     } finally { rmSync(base, { recursive: true, force: true }); }
   });
 
-  test(`${role}: a tee destination is checked where the shell writes it`, () => {
+  test(`${role}: tee is refused and a cd, even through a symlink, changes nothing that runs`, () => {
     const { base, repo, outside } = fixture();
     try {
-      symlinkSync(join(outside, "created.log"), join(repo, "dangling.log"));
-      symlinkSync(join(repo, "sub"), join(repo, "inside.log"));
+      symlinkSync(outside, join(repo, "escape"));
+      symlinkSync(join(repo, "sub"), join(repo, "codex", "link"));
       const context = { gates: loadGateDeclarations(repo), cwd: repo, inWorktree: worktreeContains(repo), proto: true };
+      // tee through a symlinked directory: the lexical path stays inside, tee would follow the link out.
+      const escape = evaluateBashCommand("loop-gate-lock heavy | tee escape/../gate.log", role, 0, context);
+      assert.equal(escape.block, true);
+      assert.match(escape.reason!, /output is returned.*tee is not accepted/);
       for (const command of [
-        // Loop and root control files reached through a cd.
-        "cd codex && loop-gate-lock heavy | tee charter-test.md",
-        "cd sub && cd ../codex && loop-gate-lock heavy | tee -a charter-test.md",
-        // A symlink destination, dangling to outside or not.
-        "loop-gate-lock heavy | tee dangling.log",
-        "loop-gate-lock heavy | tee inside.log",
-        // Git's own directory, reached by cd or by the resolved path.
-        "cd .git/hooks && loop-gate-lock heavy | tee pre-commit",
+        "cd codex/link && cd .. && loop-gate-lock heavy | tee charter-test.md",
+        "cd .git/hooks && loop-gate-lock heavy",
         "cd .git && loop-gate-lock heavy",
+        "cd escape && loop-gate-lock heavy",
       ]) {
         assert.equal(evaluateBashCommand(command, role, 0, context).block, true, command);
       }
-      assert.equal(evaluateBashCommand("cd codex && loop-gate-lock heavy | tee gate.log", role, 0, context).block, false);
+      // A cd through a symlink that stays in the checkout is accepted, and the bound command carries no cd:
+      // it is exactly the command bound without the cd steps.
+      const hopped = "cd codex/link && cd .. && loop-gate-lock heavy 2>&1 | tail -5";
+      assert.equal(evaluateBashCommand(hopped, role, 0, context).block, false);
+      const bound = bindGateExecution(hopped, context.gates);
+      assert.equal(bound, bindGateExecution("loop-gate-lock heavy 2>&1 | tail -5", context.gates));
+      assert.doesNotMatch(bound, /\bcd\b/);
     } finally { rmSync(base, { recursive: true, force: true }); }
   });
 
@@ -139,18 +144,18 @@ for (const [role, extension] of [["root", rootExtension], ["lane", laneExtension
       const call = handler(extension);
       const ctx = { cwd: repo, ui: { notify() {} } };
       // No `timeout` here: macOS has no timeout command; the evaluation tests above cover that prefix.
-      const input = { command: `cd sub && CI=1 '${cli}' heavy 2>&1 | tee gate.log | tail -n 5` };
+      const input = { command: `cd sub && CI=1 '${cli}' heavy 2>&1 | tail -n 5` };
       const verdict = await call({ toolName: "bash", input }, ctx);
       assert.equal(verdict?.block ?? false, false, verdict?.reason);
-      assert.ok(input.command.startsWith("env -u BASH_ENV -u ENV bash -c 'set -o pipefail; cd "), input.command);
-      assert.ok(input.command.includes(join(repo, "sub")), input.command);
-      assert.match(input.command, /--cwd '\\''[^']+'\\'' --sha256 '\\''[0-9a-f]{64}'\\'' 2>&1 \| '\\''tee'\\'' /);
+      // The cd is checked but not run: the gate runs in the bound cwd whatever a cd says.
+      assert.ok(input.command.startsWith("env -u BASH_ENV -u ENV bash -c 'set -o pipefail; CI="), input.command);
+      assert.doesNotMatch(input.command, /\bcd\b/);
+      assert.match(input.command, /--cwd '\\''[^']+'\\'' --sha256 '\\''[0-9a-f]{64}'\\'' 2>&1 \| '\\''tail'\\'' /);
       // /bin/sh is what watch_process runs a command with; it need not know pipefail itself.
       const run = spawnSync("/bin/sh", ["-c", input.command], { cwd: repo, timeout: 20_000, encoding: "utf8" });
       assert.equal(run.status, 0, run.stderr);
       // The wrapper's timing lines share the merged stream, so the gate's own output sits among them.
       assert.match(run.stdout, /(?:^|\n|\})ok(?:\{|\n|$)/);
-      assert.match(readFileSync(join(repo, "sub", "gate.log"), "utf8"), /ok/, "tee did not write in the cd target");
 
       const failing = { command: `'${cli}' failing 2>&1 | tail -n 1` };
       assert.equal((await call({ toolName: "bash", input: failing }, ctx))?.block ?? false, false);

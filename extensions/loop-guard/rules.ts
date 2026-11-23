@@ -1480,10 +1480,10 @@ export interface LaneContext {
    *  standing-authority registry for lanes), or undefined. Built by the extension entries, which
    *  own the file system lookups; this module stays pure. */
   protectedPath?: (path: string) => string | undefined;
-  /** The real path of an absolute path in the checkout holding `cwd` (outside its `.git`, never a
-   *  nested or other checkout, a file never a symlink), else undefined. Built by the extension entries
-   *  (gates.ts); without it a gate's `cd` and `tee` targets are refused. */
-  inWorktree?: (path: string, kind: "directory" | "file") => string | undefined;
+  /** The real path of an existing absolute directory in the checkout holding `cwd` (outside its
+   *  `.git`, never a nested or other checkout), else undefined. Built by the extension entries
+   *  (gates.ts); without it a gate's `cd` steps are refused. */
+  inWorktree?: (path: string) => string | undefined;
 }
 
 /** The context every role's bash check takes. Root calls pass `cwd`, `proto` and `protectedPath`. */
@@ -1888,7 +1888,7 @@ export function fallbackScan(text: string, role: Role, depth = 0, lane: LaneCont
 // ---------------------------------------------------------------------------
 
 /** One accepted gate invocation: `&&` steps (`cd`, `export`) before one pipeline whose first
- *  command is the wrapper under assignment, `env` and `timeout` prefixes, then `tail`/`tee`. */
+ *  command is the wrapper under assignment, `env` and `timeout` prefixes, then `tail`. */
 interface GateForm {
   steps: ({ cd: string } | { exports: string[] })[];
   prefix: string[];
@@ -1901,8 +1901,8 @@ interface GateForm {
 const GATE_FORM_REASON =
   "loop-guard: a declared gate runs as `loop-gate-lock <name>`, optionally after `cd <dir in this worktree> &&` and " +
   "`export NAME=value &&` steps, under `NAME=value`, `env NAME=value` and `timeout` prefixes, with `2>&1` and pipes " +
-  "to `tail` or `tee <file in this worktree>`; other commands, operators, substitutions, redirections and " +
-  "context-changing variables are refused around it";
+  "to `tail`; other commands, operators, substitutions, redirections and context-changing variables are refused " +
+  "around it. The gate's output is returned by this tool, so tee is not accepted and no file is needed";
 /** Variables that move a gate to another checkout, shell startup, loader or interpreter, or loop control. */
 const GATE_CONTEXT_VARIABLE =
   /^(?:GIT_\w*|LOOP_PI_\w*|BASH_FUNC_\w*|LD_\w*|DYLD_\w*|BASH_ENV|ENV|SHELLOPTS|BASHOPTS|IFS|CDPATH|PATH|HOME|PWD|OLDPWD|PS4|PROMPT_COMMAND|NODE_OPTIONS|PYTHONSTARTUP|PYTHONPATH|PERL5OPT|RUBYOPT)$/;
@@ -1976,9 +1976,6 @@ function parseGateForm(command: string): GateForm | string {
       const ok = args.every((arg, k) => /^(?:-\d+|-n\+?\d+|--lines=\+?\d+)$/.test(arg) ||
         (arg === "-n" && /^\+?\d+$/.test(args[k + 1] ?? "")) || (args[k - 1] === "-n" && /^\+?\d+$/.test(arg)));
       if (!ok) return GATE_FORM_REASON;
-    } else if (segment[0] === "tee") {
-      const files = args.filter((arg) => arg !== "-a" && arg !== "--append");
-      if (!files.length || files.some((file) => file.startsWith("-"))) return GATE_FORM_REASON;
     } else {
       return GATE_FORM_REASON;
     }
@@ -1986,31 +1983,18 @@ function parseGateForm(command: string): GateForm | string {
   return { steps, prefix: gate.slice(0, i), wrapper: rest[0], name: rest[1], mergeStderr, pipeline };
 }
 
-/** Why an accepted gate form is refused, or undefined. Each `cd` and `tee` target is resolved where
- * the shell uses it (after the cd steps, through symlinks); each tee file then gets every write protection. */
-function gateFormRefusal(form: GateForm, role: Role, lane: LaneContext): string | undefined {
+/** Why an accepted gate form is refused, or undefined: each `cd` target must be a directory in this
+ * checkout, outside `.git`. The cd steps are checked so the form stays honest, but never run: the gate
+ * runs in the bound cwd whatever they say, and the bound command carries none. */
+function gateFormRefusal(form: GateForm, lane: LaneContext): string | undefined {
   let directory = lane.gates?.cwd ?? lane.cwd;
-  const place = (target: string, kind: "directory" | "file"): string | undefined => {
-    if (!directory || !lane.inWorktree || target.startsWith("-") || /[*?[\]{}~]/.test(target)) return undefined;
-    return lane.inWorktree(posix.resolve(directory, target), kind);
-  };
-  const outside = (target: string) => `loop-guard: a declared gate's \`${target}\` must stay inside this worktree, outside .git and not through a symlink; other paths are refused.`;
   for (const step of form.steps) {
     if (!("cd" in step)) continue;
-    const next = place(step.cd, "directory");
-    if (!next) return outside(step.cd);
+    const target = step.cd;
+    const next = directory && lane.inWorktree && !target.startsWith("-") && !/[*?[\]{}~]/.test(target)
+      ? lane.inWorktree(posix.resolve(directory, target)) : undefined;
+    if (!next) return `loop-guard: a declared gate's \`cd ${target}\` must stay inside this worktree and outside .git; other paths are refused.`;
     directory = next;
-  }
-  for (const segment of form.pipeline) {
-    if (segment[0] !== "tee") continue;
-    for (const file of segment.slice(1).filter((arg) => arg !== "-a" && arg !== "--append")) {
-      const real = place(file, "file");
-      if (!real) return outside(file);
-      if (role === "lane" && isLoopControlPath(real)) return loopControlReason(real);
-      if (role === "root" && lane.proto && isLoopControlPath(real, undefined, { root: true })) return rootControlReason(real);
-      const write = protectedWrite([real], lane);
-      if (write) return write;
-    }
   }
   return undefined;
 }
@@ -2020,7 +2004,7 @@ function gateFormRefusal(form: GateForm, role: Role, lane: LaneContext): string 
 function gateInvocationRefusal(form: GateForm, role: Role, gitAliasDepth: number, lane: LaneContext): Decision | undefined {
   const gate = lane.gates?.gates.find((g) => g.name === form.name);
   if (!gate) return block("loop-guard: loop-gate-lock takes exactly one declared gate name; execution binding flags are guard-owned.");
-  const refusal = gateFormRefusal(form, role, lane);
+  const refusal = gateFormRefusal(form, lane);
   if (refusal) return block(refusal);
   const declared = parseCommand(gate.command, role);
   if (!declared || declared.segments.some((s) => basename(stripWrappers(s)[0] ?? "") === "loop-gate-lock")) {
@@ -2036,9 +2020,10 @@ function quoteGateWord(word: string): string {
 }
 
 /** Bind an approved gate invocation: rebuild its accepted form with every word shell-quoted and the
- * guard-owned `--cwd` and `--sha256` after the gate name. A pipeline runs under `bash` (found on PATH,
- * startup files unset) with `pipefail`, so a pipe to `tail` or `tee` still reports the gate's own exit
- * status whatever shell runs the tool: `watch_process` uses /bin/sh, which need not know pipefail.
+ * guard-owned `--cwd` and `--sha256` after the gate name. The cd steps are dropped: the gate runs in the
+ * bound cwd. A pipeline runs under `bash` (found on PATH, startup files unset) with `pipefail`, so a pipe
+ * to `tail` still reports the gate's own exit status whatever shell runs the tool: `watch_process` uses
+ * /bin/sh, which need not know pipefail.
  * Runtime handlers replace the model's tool input, never accept model-supplied binding flags. */
 export function bindGateExecution(command: string, declarations: GateDeclarations): string {
   const form = parseGateForm(command);
@@ -2048,13 +2033,7 @@ export function bindGateExecution(command: string, declarations: GateDeclaration
     "--cwd", quoteForShell(declarations.cwd), "--sha256", quoteForShell(declarations.sha256)].join(" ") +
     (form.mergeStderr ? " 2>&1" : "");
   const pipeline = [gate, ...form.pipeline.map((segment) => segment.map(quoteForShell).join(" "))].join(" | ");
-  // Each cd is bound to the absolute directory the guard checked, so CDPATH cannot move it.
-  let directory = declarations.cwd;
-  const steps = form.steps.map((step) => {
-    if (!("cd" in step)) return `export ${step.exports.map(quoteGateWord).join(" ")}`;
-    directory = posix.resolve(directory, step.cd);
-    return `cd ${quoteForShell(directory)}`;
-  });
+  const steps = form.steps.flatMap((step) => "cd" in step ? [] : [`export ${step.exports.map(quoteGateWord).join(" ")}`]);
   const bound = [...steps, pipeline].join(" && ");
   return form.pipeline.length ? `env -u BASH_ENV -u ENV bash -c ${quoteForShell(`set -o pipefail; ${bound}`)}` : bound;
 }
