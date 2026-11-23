@@ -876,6 +876,95 @@ test("an unverifiable retained worktree with no candidate patch is refused and n
   }
 });
 
+test("a rebuild whose rollback fails is recorded, never repeated, and reported at closeout", async () => {
+  const s = setup();
+  try {
+    const base = git(s.repo, "rev-parse", "HEAD");
+    const a = await s.launch(brief("L1", "T1"));
+    await s.end(a.id, { runId: "run-1" });
+    const old = s.path("L1");
+    writeCandidate(s.runDir, "L1", old, base);
+    git(old, "checkout", "-q", "--detach");
+    // A post-checkout hook generates a file the candidate patch also adds: the patch no longer
+    // applies, and the generated file leaves the new worktree dirty, so rollback cannot remove it.
+    const hooks = git(s.repo, "rev-parse", "--path-format=absolute", "--git-common-dir");
+    writeFileSync(join(hooks, "hooks", "post-checkout"), "#!/bin/sh\necho generated > work.txt\n", { mode: 0o755 });
+    s.reload();
+    s.emit("subagent:async-complete", { runId: "run-1" });
+    const listed = () => git(s.repo, "worktree", "list", "--porcelain").split("\n").filter((l) => l.startsWith("worktree ")).map((l) => l.slice(9));
+    const resume = (id: string) => s.handlers.get("tool_call")!({ toolName: "subagent", toolCallId: id, input: { action: "resume", id: "run-1" } }, s.ctx);
+
+    const first = await resume("resume-1");
+    assert.equal(first?.block, true);
+    assert.match(first.reason, /no worktree was rebuilt: the candidate patch does not apply/);
+    assert.equal(s.path("L1"), old, "the lane keeps its recorded allocation");
+    const kept = listed().filter((p) => realpathSync(p) !== realpathSync(s.repo) && realpathSync(p) !== realpathSync(old));
+    assert.equal(kept.length, 1, `one failed rebuild left behind\n${listed().join("\n")}`);
+    const recordedTrees = () => (s.entries.filter((e) => Array.isArray(e.data?.trees)).at(-1)?.data.trees ?? []) as { lane: string; path: string }[];
+    const record = recordedTrees().find((t) => realpathSync(t.path) === realpathSync(kept[0]));
+    assert.ok(record, `the kept rebuild is a recorded allocation\n${JSON.stringify(recordedTrees())}`);
+    assert.notEqual(record.lane, "L1", "it is kept under its own key, never the lane's");
+
+    // A second resume, after a reload as well, makes no second orphan.
+    s.reload();
+    s.emit("subagent:async-complete", { runId: "run-1" });
+    const second = await resume("resume-2");
+    assert.equal(second?.block, true);
+    assert.ok(second.reason.includes(kept[0]) || second.reason.includes(record.path), second.reason);
+    assert.equal(listed().length, 3, `the main checkout, the unverified worktree and the kept rebuild\n${listed().join("\n")}`);
+
+    const lines: string[] = [];
+    const pending: Promise<unknown>[] = [];
+    s.emit("loop-closeout", { lines, pending });
+    await Promise.all(pending);
+    assert.equal(existsSync(kept[0]), true, "a dirty failed rebuild is never removed");
+    assert.ok(lines.join("\n").includes(`kept dirty: ${record.lane}`), lines.join("\n"));
+  } finally {
+    s.restore();
+  }
+});
+
+test("a failed rebuild the operator removed stops blocking the lane once git no longer lists it", async () => {
+  const s = setup();
+  try {
+    const base = git(s.repo, "rev-parse", "HEAD");
+    const a = await s.launch(brief("L1", "T1"));
+    await s.end(a.id, { runId: "run-1" });
+    const old = s.path("L1");
+    writeCandidate(s.runDir, "L1", old, base);
+    git(old, "checkout", "-q", "--detach");
+    const hook = join(git(s.repo, "rev-parse", "--path-format=absolute", "--git-common-dir"), "hooks", "post-checkout");
+    writeFileSync(hook, "#!/bin/sh\necho generated > work.txt\n", { mode: 0o755 });
+    s.reload();
+    s.emit("subagent:async-complete", { runId: "run-1" });
+    const resume = (id: string) => s.handlers.get("tool_call")!({ toolName: "subagent", toolCallId: id, input: { action: "resume", id: "run-1" } }, s.ctx);
+    assert.equal((await resume("resume-1"))?.block, true);
+    const trees = () => (s.entries.filter((e) => Array.isArray(e.data?.trees)).at(-1)?.data.trees ?? []) as { lane: string; path: string; branch: string; rebuildOf?: string }[];
+    const record = trees().find((t) => t.rebuildOf === "L1");
+    assert.ok(record, "the failed rebuild is recorded");
+    rmSync(hook);
+
+    // Deleted but still listed by git: absence is not confirmed, so the lane stays refused.
+    rmSync(record.path, { recursive: true, force: true });
+    const listedStill = await resume("resume-2");
+    assert.equal(listedStill?.block, true);
+    assert.ok(listedStill.reason.includes(record.path), listedStill.reason);
+    assert.equal(s.path("L1"), old);
+
+    git(s.repo, "worktree", "prune");
+    s.reload();
+    s.emit("subagent:async-complete", { runId: "run-1" });
+    const recovered = await resume("resume-3");
+    assert.equal(recovered?.block, true, "a resumed session still cannot move to the new worktree");
+    assert.match(recovered.reason, /was rebuilt at /);
+    assert.notEqual(s.path("L1"), old);
+    assert.equal(trees().some((t) => t.lane === record.lane), false, "the absent record is reconciled away");
+    assert.equal(branches(s.repo).includes(record.branch), false, "its unused branch is gone");
+  } finally {
+    s.restore();
+  }
+});
+
 test("simultaneous resumes retain single-flight ownership during asynchronous identity verification", async () => {
   const s = setup();
   try {
