@@ -9,6 +9,16 @@ first, then in every extension it touches.
 `just check` is the gate: run it before every commit. `just setup` installs dependencies and the
 git hooks.
 
+## Python
+
+The floor is Python 3.15, pinned in `.python-version` and used by CI. The Python tools in `bin/`
+carry an identical `python-floor` block that re-runs them under `python3.15` (on `PATH`, then in
+Homebrew) or `uv run --no-project --python 3.15`, and otherwise exits non-zero saying how to get 3.15.
+A new tool in `bin/` carries the block too; `bin/test_python_floor.py` pins it. `bin/leak-scan` is the
+one exception and stays stdlib and version-agnostic, because the git hooks run it and must keep
+scanning on a host without 3.15. The hooks prefer 3.15 and fall back to `python3`; never make them
+refuse a commit for want of 3.15. No shims or CI legs for older versions.
+
 ## Cursor Cloud specific instructions
 
 The pinned [environment](.cursor/environment.json) uses [the Node wrapper](.cursor/just.sh)
@@ -16,6 +26,8 @@ to select the version declared by CI. It runs `just setup` to install the locked
 npm dependencies and Git hooks.
 The installer and live pi homes are separate from this development setup.
 
+- The pinned image ships Python 3.12 and its egress allowlist reaches only the Node and npm hosts, so
+  it cannot fetch Python 3.15: the Python tests (`just test`, `just check`) need an image that has it.
 - Run `.cursor/just.sh fmt-check lint </dev/null` for a fast check.
 - Run `.cursor/just.sh fmt-check lint test </dev/null` for the
   source checks. The pi tests use the scripted provider.

@@ -6,7 +6,7 @@
   loop-state digest <log> [--json]
   loop-state check <log>
 
-Stdlib only; runs under Python 3.9 (macOS /usr/bin/python3).
+Stdlib only; needs Python 3.15 or later (it re-runs itself there, see the python-floor block below).
 
 Run dir (`--run-dir DIR` on append, else $LOOP_PI_RUN_DIR; a $LOOP_PI_RUN_DIR that holds
 `loop-pi-proto` wins over a different `--run-dir`, with a warning): when it holds `loop-pi-proto`, a
@@ -18,6 +18,23 @@ unlicensed budget close) or usage error;
 1 digest/check failure (unreadable log, or the first invalid line for `check`).
 """
 from __future__ import annotations
+
+# python-floor: begin (identical in every bin entry point except leak-scan; bin/test_python_floor.py pins it)
+import sys
+
+if __name__ == "__main__" and sys.version_info < (3, 15):
+    import os
+    import shutil
+
+    _python = [shutil.which(name) for name in ("python3.15", "/opt/homebrew/bin/python3.15", "/home/linuxbrew/.linuxbrew/bin/python3.15")]
+    _python = [path for path in _python if path][:1]
+    if not _python and shutil.which("uv"):
+        _python = [shutil.which("uv"), "run", "--no-project", "--python", "3.15", "python"]
+    if not _python:
+        sys.exit(os.path.basename(sys.argv[0]) + " needs Python 3.15 or later and found " + sys.version.split()[0]
+                 + ". Install it (macOS: brew install python@3.15; elsewhere: uv python install 3.15) and run again.")
+    os.execv(_python[0], _python + sys.argv)
+# python-floor: end
 
 import fcntl
 import json

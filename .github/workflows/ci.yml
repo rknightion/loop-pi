@@ -36,6 +36,14 @@ jobs:
           # renovate: datasource=node-version depName=node
           node-version: "26.13.1"
 
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version-file: .python-version
+
+      - name: Require Python 3.15
+        run: python3 -c 'import sys; print(sys.version); sys.exit(sys.version_info[:2] != (3, 15))'
+
       - name: Set up just
         uses: rknightion/.github/.github/actions/setup-just@84486af028f18f4a2d93ee5c4eb954fdd541d800 # v1.31.10
 
@@ -88,6 +96,11 @@ jobs:
           # renovate: datasource=node-version depName=node
           node-version: "26.13.1"
 
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version-file: .python-version
+
       - name: Set up just
         uses: rknightion/.github/.github/actions/setup-just@84486af028f18f4a2d93ee5c4eb954fdd541d800 # v1.31.10
 
@@ -96,46 +109,6 @@ jobs:
 
       - name: just test
         run: just test
-
-  python-3-15:
-    name: python tests (3.15)
-    runs-on: ubuntu-26.04
-    timeout-minutes: 20
-    permissions:
-      contents: read
-    steps:
-      - name: Harden the runner (audit egress)
-        uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
-        with:
-          egress-policy: audit
-
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Set up Node
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          # renovate: datasource=node-version depName=node
-          node-version: "26.13.1"
-
-      - name: Set up Python 3.15
-        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
-        with:
-          python-version: "3.15"
-
-      - name: Set up just
-        uses: rknightion/.github/.github/actions/setup-just@84486af028f18f4a2d93ee5c4eb954fdd541d800 # v1.31.10
-
-      - name: just setup
-        run: just setup
-
-      - name: Require Python 3.15
-        run: python3 -c 'import sys; print(sys.version); sys.exit(sys.version_info[:2] != (3, 15))'
-
-      - name: just test-python
-        run: just test-python
 
   leak-scan:
     name: leak-scan
@@ -154,6 +127,11 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version-file: .python-version
 
       # Fails closed: an unset or empty LEAK_TERMS secret exits 2.
       - name: Scan history and tree against the private term list

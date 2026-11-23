@@ -1,6 +1,6 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
-python_tests := "bin.test_loop_pi_install bin.test_loop_pi_preflight bin.test_loop_pi_audit bin.test_leak_scan bin.test_loop_state bin.test_loop_gate_lock"
+python_tests := "bin.test_loop_pi_install bin.test_loop_pi_preflight bin.test_loop_pi_audit bin.test_leak_scan bin.test_loop_state bin.test_loop_gate_lock bin.test_python_floor"
 
 # List the recipes
 default:
