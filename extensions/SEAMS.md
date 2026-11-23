@@ -1255,6 +1255,14 @@ source sends a `loop-*` custom message type the set does not name.
   in that cwd. State records each run's relative cwd; resume (including after reload) requires a
   unique run match, the original allocation and a directory-only, symlink-free walk of that cwd
   inside the worktree. Missing cwd evidence or an ambiguous prefix refuses resume.
+  When the original allocation cannot be verified (ownership or confinement unknown), it is never
+  reused, repaired or removed: it stays recorded as kept unknown under `<lane>~unverified-<id>`.
+  If the lane's candidate patch exists at `<run dir>/<lane>/candidate.patch` (a regular file, no
+  link) and the allocation base was recorded, a fresh allocation is made from that base, the patch
+  is applied with `git apply --binary`, and the resume is refused with a reason naming the new
+  worktree: a resumed session cannot change its cwd, so the root launches the lane again with its
+  brief and that `cwd`. A later resume of the old run names the same worktree. With no patch, no
+  recorded base or a patch that does not apply, nothing is rebuilt and the resume is refused.
   A root `land` or `park`, or explicit root closeout, may release a clean terminal
   tree; session quit/reload alone never releases candidates. Live, unknown and dirty trees remain
   kept. Branch/path components use neutral stable opaque run/lane identifiers, not brief text,
@@ -1355,7 +1363,9 @@ source sends a `loop-*` custom message type the set does not name.
   was made on top of (FOREIGN: reported, not a violation, never a grant; both facts are required) and, where the charter's `authority:` names release-please for the repository, a
   release-please merge, its version tag, its release and the deletion of its `release-please--*`
   branch (GRANTED; a charter that no longer hashes to its arm-time digest grants nothing). Every other added, moved or deleted ref, tag or
-  release fails the audit, except `refs/pull/*` (foreign). Another snapshotted remote whose
+  release fails the audit, except `refs/pull/*` and bot-owned refs (foreign: any change to a
+  `renovate/*` branch, a `release-please--*` branch added or moved, and a new release-candidate tag
+  such as `v1.2.3-rc.4`, its local tag and its release). Another snapshotted remote whose
   unchanged URL is byte-identical to the canonical repository's (no scheme, user, host-case or
   path normalisation) receives only that canonical's exact `actor: root` `old..new` ranges. Only absolute
   URLs qualify (`scheme://`, scp-like `host:path`, absolute local path); a relative URL such as

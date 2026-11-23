@@ -18,7 +18,7 @@
 
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -70,6 +70,8 @@ interface Tree {
   /** A release found uncommitted changes, so the worktree was kept. */
   keptDirty?: boolean;
   keptUnknown?: boolean;
+  /** This allocation could not be verified and the lane was rebuilt at this path instead. */
+  rebuiltAs?: string;
 }
 
 interface NativeName {
@@ -418,6 +420,75 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  /** The lane's candidate patch at the lane policy's path (`<run dir>/<lane>/candidate.patch`):
+   *  a regular file inside the run dir, never a link. Null when there is none to rebuild from. */
+  function candidatePatch(lane: string): string | null {
+    const dir = runDir();
+    if (!dir || !safeLaneId(lane)) return null;
+    const file = join(dir, lane, "candidate.patch");
+    try {
+      const stat = lstatSync(file);
+      if (!stat.isFile() || stat.size === 0 || stat.size > 128 * 1024 * 1024) return null;
+      return isInside(dir, realpathSync(file), dir) && realpathSync(file) === join(real(dir), lane, "candidate.patch") ? file : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * A retained allocation that can no longer be verified is never reused, removed or repaired: it is
+   * kept, recorded as unknown under its own key, and the lane gets a fresh allocation rebuilt from the
+   * recorded base and the lane's candidate patch. A resumed session cannot move to another cwd, so the
+   * caller refuses the resume and names the new worktree for a fresh launch. Returns the new tree,
+   * or why nothing was rebuilt.
+   */
+  async function rebuildFromPatch(tree: Tree): Promise<{ tree: Tree; patch: string } | { why: string }> {
+    const dir = runDir();
+    const patch = candidatePatch(tree.lane);
+    if (!dir || !patch) return { why: "there is no candidate patch to rebuild from" };
+    if (!tree.base) return { why: "its base was not recorded" };
+    if (allocating.has(tree.lane)) return { why: "an allocation for this lane is already in progress" };
+    if (trees.get(tree.lane) !== tree) return { why: "the lane's allocation changed before the rebuild" };
+    allocating.add(tree.lane);
+    const allocation = randomUUID();
+    let made: Tree | undefined;
+    try {
+      const root = prepareParent(dir);
+      const path = lanePath(root, tree.lane, allocation);
+      const branch = laneBranch(root, tree.lane, allocation);
+      confinedPath(root, path, true);
+      if (existsSync(path) || (await git(tree.repo, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`])).code === 0) {
+        return { why: "the new allocation identity already exists" };
+      }
+      const add = await git(tree.repo, ["worktree", "add", "-b", branch, path, tree.base]);
+      if (add.code !== 0) return { why: `git worktree add failed: ${add.stderr.trim()}` };
+      made = { lane: tree.lane, task: tree.task, path, branch, repo: tree.repo, runs: [], allocation, base: tree.base };
+      registerAllocation(root, path, allocation);
+      const preimage = await relativeGitdir(path, async () => {
+        const head = await git(path, ["rev-parse", "--verify", "HEAD"]);
+        return head.code === 0 ? head.stdout.trim() : "";
+      });
+      made.gitdirPreimage = preimage;
+      made.identity = await allocationIdentity(root, path, tree.repo, branch, allocation, git);
+      const apply = await git(path, ["apply", "--binary", "--whitespace=nowarn", patch]);
+      if (apply.code !== 0) throw new Error(`the candidate patch does not apply to the base: ${apply.stderr.trim()}`);
+      if (!await verifyAllocation(made.identity, dir, path, tree.repo, branch, git)) throw new Error("the rebuilt allocation changed during setup");
+      // The unverified allocation stays recorded (kept unknown) under its own key, never under the lane's.
+      const stale: Tree = { ...tree, lane: `${tree.lane}~unverified-${(tree.allocation ?? randomUUID()).slice(0, 8)}`, keptUnknown: true, rebuiltAs: path };
+      delete stale.release;
+      trees.set(stale.lane, stale);
+      trees.set(tree.lane, made);
+      persist();
+      return { tree: made, patch };
+    } catch (error) {
+      if (made && (await removeWorktree(made)) === "removed") await deleteUnusedBranch(made);
+      else if (made) warn(`kept ${made.path}: a failed rebuild could not be undone`);
+      return { why: String(error instanceof Error ? error.message : error) };
+    } finally {
+      allocating.delete(tree.lane);
+    }
+  }
+
   async function scanLog() {
     if (lastSeq === null || trees.size === 0) return;
     const { events, maxSeq } = landParkEvents(readLog(), lastSeq);
@@ -615,7 +686,27 @@ export default function (pi: ExtensionAPI) {
       if (matches.length === 1) {
         const { tree, id } = matches[0];
         if (isLive(tree) || releasing.has(tree.lane) || tree.release) return { block: true, reason: "lane-worktrees: the lane is live or awaiting root release; it cannot resume concurrently." };
-        if (!await verifyAllocation(tree.identity, runDir(), tree.path, tree.repo, tree.branch, git)) return { block: true, reason: "lane-worktrees: resume refused because retained allocation ownership or confinement is unknown." };
+        if (tree.rebuiltAs) return { block: true, reason: `lane-worktrees: this run's worktree could not be verified and was replaced by one rebuilt at ${tree.rebuiltAs}; launch the lane again with its brief and cwd ${tree.rebuiltAs}.` };
+        if (!await verifyAllocation(tree.identity, runDir(), tree.path, tree.repo, tree.branch, git)) {
+          // Another resume may have rebuilt the lane, or a launch claimed it, while this one verified.
+          const current = trees.get(tree.lane);
+          if (current !== tree) {
+            return {
+              block: true,
+              reason: current && current.task === tree.task && current.path !== tree.path
+                ? `lane-worktrees: this run's worktree could not be verified and was replaced by one rebuilt at ${current.path}; launch the lane again with its brief and cwd ${current.path}.`
+                : "lane-worktrees: allocation became live or was released during resume verification.",
+            };
+          }
+          if (isLive(tree) || releasing.has(tree.lane) || tree.release) return { block: true, reason: "lane-worktrees: allocation became live or was released during resume verification." };
+          const rebuilt = await rebuildFromPatch(tree);
+          if ("why" in rebuilt) return { block: true, reason: `lane-worktrees: resume refused because retained allocation ownership or confinement is unknown, and no worktree was rebuilt: ${rebuilt.why}.` };
+          return {
+            block: true,
+            reason: `lane-worktrees: retained allocation ownership or confinement is unknown, so it was kept untouched and lane ${tree.lane} was rebuilt at ${rebuilt.tree.path} from base ${rebuilt.tree.base} and ${rebuilt.patch}. ` +
+              `A resumed session cannot move to it: launch the lane again with its brief and cwd ${rebuilt.tree.path}.`,
+          };
+        }
         if (isLive(tree) || releasing.has(tree.lane) || !trees.has(tree.lane)) return { block: true, reason: "lane-worktrees: allocation became live or was released during resume verification." };
         const cwd = tree.runCwds?.[id];
         if (!verifyRunCwd(tree.path, cwd)) return { block: true, reason: "lane-worktrees: resume refused because recorded cwd is missing, linked, invalid or outside the retained worktree." };

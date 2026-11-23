@@ -36,8 +36,8 @@ header line, Why, Done when, Scope, Others live in, Root-owned and a `Rules:` li
   This is an interim waiting turn: give only a short progress update, without a `lane-return` or
   `acceptance-report` block. Reserve terminal blocks for actual completion or an intentional final
   partial return. A final partial return ends the lane even if a child is still running.
-- Wait on a long command with one `watch_process` call (`deadline_s` at most 3600). Never background
-  a process.
+- Wait on a long command with one `watch_process` call (`deadline_s` at most 14400, enough for a
+  gate's queue wait plus its timeout). Never background a process.
 - You never write GitHub issues or the Project, and the Backlog only when your brief makes you a
   board lane. A status change or acceptance tick you want goes in your lane return (the optional
   `tracker` field); the root applies it.

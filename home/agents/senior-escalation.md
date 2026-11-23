@@ -27,7 +27,7 @@ Root-owned and a `Rules:` line, and it carries the evidence from the earlier rou
 - Finish as LANE.md says: an uncommitted candidate, or local commits for a compose or board task
   (`"sha"` in place of `patch` and `patch_sha256`). You never run `git push`; the guard refuses it.
 - You spawn no children. Wait on a long command with one `watch_process` call (`deadline_s` at most
-  3600). Never background a process.
+  14400, enough for a gate's queue wait plus its timeout). Never background a process.
 - You never write GitHub issues or the Project, and the Backlog only when your brief makes you a
   board lane. A status change or acceptance tick you want goes in your lane return (the optional
   `tracker` field); the root applies it.

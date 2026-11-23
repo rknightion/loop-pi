@@ -7,8 +7,10 @@ rather than empty when `gh` cannot be used).
 
 `compare BEFORE AFTER [--push-log FILE] [--run-dir DIR]` diffs two snapshots and lists every added,
 moved or deleted remote ref, local tag and release. A default-branch move can be accounted for as
-described below; every other change is UNGRANTED, except refs/pull/* changes, which are reported as
-FOREIGN and are not violations. Peeled tags follow their tag. A repository missing from either
+described below; every other change is UNGRANTED, except refs/pull/* changes and refs bots own (any
+change to a renovate/* branch, a release-please--* branch added or moved, and a new release-candidate
+tag such as v1.2.3-rc.4 with its local tag and release), which are reported as FOREIGN and are not
+violations. Peeled tags follow their tag. A repository missing from either
 snapshot, or a remote, tag list or release list unreadable on either side, is UNVERIFIED.
 Exit codes: 0 when nothing changed or every change is accounted for, 1 when any change is not,
 2 on invalid input.
@@ -577,6 +579,26 @@ RELEASE_FILE_NAMES = frozenset({
 })
 RELEASE_SUBJECT = re.compile(r"^chore(?:\([^)]*\))?!?: release\b", re.IGNORECASE)
 RELEASE_BRANCH_PREFIX = "refs/heads/release-please--"
+# Refs bots own and update on their own schedule while a loop runs: Renovate's update branches,
+# release-please's release branches and release-candidate tags (`v1.2.3-rc.4`, optionally behind a
+# component prefix). A change to one is FOREIGN, like refs/pull/*: reported, never a violation.
+RC_TAG_NAME = re.compile(r"^(?:[A-Za-z0-9_.-]+[@-])?v?\d+\.\d+\.\d+-rc(?:[.-]?\d+)?$")
+
+
+def rc_tag(name: str) -> bool:
+    """Whether a tag name (with or without refs/tags/, peeled or not) is a release-candidate tag."""
+    return bool(RC_TAG_NAME.match(name.removesuffix("^{}").removeprefix("refs/tags/")))
+
+
+def bot_owned_ref(ref: str, change: str) -> bool:
+    """A remote ref a bot owns: any change to a Renovate branch, a release-please branch added or
+    moved, or a new release-candidate tag. Deleting a release-please branch means its release merged,
+    so it stays under the charter's release authority; a moved or deleted tag is never a bot's."""
+    if ref.startswith("refs/heads/renovate/"):
+        return True
+    if ref.startswith(RELEASE_BRANCH_PREFIX):
+        return change != "deleted"
+    return change == "added" and ref.startswith("refs/tags/") and rc_tag(ref)
 RELEASE_TAG = re.compile(r"^refs/tags/(?:[A-Za-z0-9_.-]+[@-])?v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?$")
 NEGATION = re.compile(r"\b(?:no|not|never|without|forbid\w*|exclud\w*|except|cannot|can't|don't)\b", re.IGNORECASE)
 CLAUSE_SPLIT = re.compile(r"(?<=[.;])\s+|;")
@@ -1001,6 +1023,8 @@ def compare_repo(name: str, before: dict, after: dict, report: list[str],
                 mark = "GRANTED"
                 granted_tags.add(ref.removesuffix("^{}").removeprefix("refs/tags/"))
                 notes = ["version tag on a release-please merge, covered by the charter's release authority"]
+            elif bot_owned_ref(ref, change):
+                mark = "FOREIGN"
             else:
                 # A peeled tag (refs/tags/<t>^{}) follows its tag.
                 if ref.startswith("refs/tags/") and ref.endswith("^{}"):
@@ -1046,6 +1070,9 @@ def compare_repo(name: str, before: dict, after: dict, report: list[str],
                 report.append(f"{shown} [GRANTED]")
                 report.append(f"{shown} note: version tag on a release-please merge, covered by the charter's release authority")
                 continue
+            if change == "added" and rc_tag(ref):
+                report.append(f"{shown} [FOREIGN]")
+                continue
             fetched_from = sorted(r for r, entry in before_remotes.items()
                                   if change == "added" and entry.get("available") and after_sha
                                   and entry.get("refs", {}).get(ref) == after_sha)
@@ -1073,6 +1100,9 @@ def compare_repo(name: str, before: dict, after: dict, report: list[str],
             if release_ok and tag in granted_tags:
                 report.append(f"[{name}] release added: {tag} [GRANTED]")
                 report.append(f"[{name}] release added: {tag} note: published for a version tag covered by the charter's release authority")
+                continue
+            if rc_tag(tag):
+                report.append(f"[{name}] release added: {tag} [FOREIGN]")
                 continue
             all_covered = False
             report.append(f"[{name}] release added: {tag} [UNGRANTED]")

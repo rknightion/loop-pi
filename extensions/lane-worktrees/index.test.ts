@@ -752,6 +752,130 @@ test("failed launch rollback preserves commits on its branch and only deletes an
   }
 });
 
+/** A lane's candidate patch at the lane policy's path, made the way the policy says: `git diff --binary <base>`. */
+function writeCandidate(runDir: string, lane: string, path: string, base: string): string {
+  writeFileSync(join(path, "work.txt"), "the lane's work\n");
+  git(path, "add", "-N", "--", "work.txt");
+  mkdirSync(join(runDir, lane), { recursive: true });
+  const patch = join(runDir, lane, "candidate.patch");
+  writeFileSync(patch, execFileSync("git", ["diff", "--binary", base], { cwd: path }));
+  return patch;
+}
+
+test("an unverifiable retained worktree is kept and the lane is rebuilt from its base and candidate patch", async () => {
+  const s = setup();
+  try {
+    const base = git(s.repo, "rev-parse", "HEAD");
+    const a = await s.launch(brief("L1", "T1"));
+    await s.end(a.id, { runId: "run-1" });
+    const old = s.path("L1");
+    const patch = writeCandidate(s.runDir, "L1", old, base);
+    // Ownership becomes unknown: the lane's checkout no longer sits on its allocation branch.
+    git(old, "checkout", "-q", "--detach");
+    s.reload();
+    s.emit("subagent:async-complete", { runId: "run-1" });
+
+    const resume = await s.handlers.get("tool_call")!({ toolName: "subagent", toolCallId: "resume-1", input: { action: "resume", id: "run-1" } }, s.ctx);
+    assert.equal(resume?.block, true, "a session cannot move to another cwd");
+    const rebuilt = s.path("L1");
+    assert.notEqual(rebuilt, old);
+    assert.match(resume.reason, new RegExp(`rebuilt at ${rebuilt.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} from base ${base} and `));
+    assert.ok(resume.reason.includes(patch));
+    assert.equal(readFileSync(join(rebuilt, "work.txt"), "utf8"), "the lane's work\n", "the candidate patch is applied");
+    assert.equal(git(rebuilt, "rev-parse", "HEAD"), base);
+    assert.equal(git(old, "rev-parse", "--abbrev-ref", "HEAD"), "HEAD", "the unverified worktree is left untouched");
+    assert.equal(readFileSync(join(old, "work.txt"), "utf8"), "the lane's work\n");
+    const retry = await s.handlers.get("tool_call")!({ toolName: "subagent", toolCallId: "resume-2", input: { action: "resume", id: "run-1" } }, s.ctx);
+    assert.equal(retry?.block, true);
+    assert.ok(retry.reason.includes(`replaced by one rebuilt at ${rebuilt}`), retry.reason);
+    assert.equal(s.path("L1"), rebuilt, "a second resume rebuilds nothing more");
+
+    // The root carries on: a fresh launch of the lane into the rebuilt worktree is accepted.
+    const again = await s.launch(brief("L1", "T1"), { cwd: rebuilt });
+    assert.equal(again.result, undefined);
+    assert.equal(again.input.cwd, rebuilt);
+    await s.end(again.id, { runId: "run-2" });
+    s.emit("subagent:async-complete", { runId: "run-2" });
+
+    // Closeout keeps the unverified worktree and names it, and keeps the dirty rebuilt one too.
+    const lines: string[] = [];
+    const pending: Promise<unknown>[] = [];
+    s.emit("loop-closeout", { lines, pending });
+    await Promise.all(pending);
+    assert.equal(existsSync(old), true);
+    assert.match(lines.join("\n"), /kept unknown: L1~unverified-/);
+  } finally {
+    s.restore();
+  }
+});
+
+test("concurrent resumes of an unverifiable worktree rebuild it once and point at the same rebuilt worktree", async () => {
+  const s = setup();
+  const path = process.env.PATH;
+  try {
+    const base = git(s.repo, "rev-parse", "HEAD");
+    const a = await s.launch(brief("L1", "T1"));
+    await s.end(a.id, { runId: "run-1" });
+    const old = s.path("L1");
+    writeCandidate(s.runDir, "L1", old, base);
+    git(old, "checkout", "-q", "--detach");
+    s.reload();
+    s.emit("subagent:async-complete", { runId: "run-1" });
+    // Hold the first HEAD read (the step a detached allocation fails) until the other resume has
+    // verified and rebuilt, so that verification completes after the lane's record was replaced.
+    const realGit = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+    const bin = fresh("lw-slow-git-");
+    const slots = fresh("lw-slow-git-slots-");
+    writeFileSync(join(bin, "git"), [
+      "#!/bin/sh",
+      'case " $* " in *" symbolic-ref --quiet HEAD "*)',
+      `  i=1; while ! mkdir "${slots}/$i" 2>/dev/null; do i=$((i+1)); done`,
+      '  [ "$i" = 1 ] && sleep 4;;',
+      "esac",
+      `exec "${realGit}" "$@"`,
+      "",
+    ].join("\n"), { mode: 0o755 });
+    process.env.PATH = `${bin}:${path}`;
+    const resume = (id: string) => s.handlers.get("tool_call")!({ toolName: "subagent", toolCallId: id, input: { action: "resume", id: "run-1" } }, s.ctx);
+    const results = await Promise.all([resume("resume-a"), resume("resume-b")]);
+    process.env.PATH = path;
+
+    const current = s.path("L1");
+    assert.notEqual(current, old);
+    const worktrees = git(s.repo, "worktree", "list", "--porcelain").split("\n").filter((l) => l.startsWith("worktree "));
+    assert.equal(worktrees.length, 3, `the main checkout, the kept worktree and one rebuild\n${worktrees.join("\n")}`);
+    for (const r of results) {
+      assert.equal(r?.block, true);
+      const named = /rebuilt at (\S+?)[;\s]/.exec(r.reason)?.[1];
+      assert.equal(named, current, r.reason);
+    }
+    const again = await s.launch(brief("L1", "T1"), { cwd: current });
+    assert.equal(again.result, undefined, "the named worktree is the lane's recorded one");
+  } finally {
+    process.env.PATH = path;
+    s.restore();
+  }
+});
+
+test("an unverifiable retained worktree with no candidate patch is refused and nothing is rebuilt", async () => {
+  const s = setup();
+  try {
+    const a = await s.launch(brief("L1", "T1"));
+    await s.end(a.id, { runId: "run-1" });
+    const old = s.path("L1");
+    git(old, "checkout", "-q", "--detach");
+    s.reload();
+    s.emit("subagent:async-complete", { runId: "run-1" });
+    const resume = await s.handlers.get("tool_call")!({ toolName: "subagent", toolCallId: "resume-1", input: { action: "resume", id: "run-1" } }, s.ctx);
+    assert.equal(resume?.block, true);
+    assert.match(resume.reason, /ownership or confinement is unknown, and no worktree was rebuilt: there is no candidate patch to rebuild from/);
+    assert.equal(s.path("L1"), old);
+    assert.deepEqual(git(s.repo, "worktree", "list", "--porcelain").split("\n").filter((l) => l.startsWith("worktree ")).length, 2);
+  } finally {
+    s.restore();
+  }
+});
+
 test("simultaneous resumes retain single-flight ownership during asynchronous identity verification", async () => {
   const s = setup();
   try {

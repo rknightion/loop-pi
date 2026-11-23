@@ -27,7 +27,7 @@ Your brief is a header line, Why, Done when, Scope, Others live in, Root-owned a
   the commit, or the tip of the stack, as `"sha"` in place of `patch` and `patch_sha256`. You never
   run `git push`; the guard refuses it. With no commit, omit `"sha"`.
 - You spawn no children. Wait on a long command with one `watch_process` call (`deadline_s` at most
-  3600). Never background a process.
+  14400, enough for a gate's queue wait plus its timeout). Never background a process.
 - A merge-judgement call you cannot settle from the patches and evidence, or a decision the brief
   does not cover, is a question in your return, never a guess.
 - Your final message starts with the return block LANE.md defines. If the brief names no LANE.md,
