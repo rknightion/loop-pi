@@ -19,9 +19,9 @@
   "extensions": [
     "-builtin:mcp",
     "-builtin:llama.cpp",
-    "-builtin:codemode",
     "-builtin:tool-search"
   ],
+  "defaultTools": ["+codemode"],
   "packages": [
     { "source": "{{PREFIX}}/node_modules/pi-subagents", "skills": [] }
   ],

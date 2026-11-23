@@ -1,13 +1,15 @@
 # loop-pi home
 
 This is `{{HOME}}`, a dedicated pi home used only for loop roots and their children. It is
-not a Claude or Codex home: there is no hook runner, no MCP, no code-mode exec cell and no
-`wait_agent`. The loop protocol's pi harness file governs loop mechanics; where these instructions
+not a Claude or Codex home: there is no hook runner, no MCP and no `wait_agent`. The loop protocol's pi harness file governs loop mechanics; where these instructions
 mention Codex- or Claude-only tools, use the pi equivalent.
 
 - Long waits: lanes use `watch_process`; the root uses `watch_start` and `wake_at` and ends its turn
   with `WAITING: <what> until <deadline>`. Never background a process with `&`, `nohup`, `disown`
   or `setsid`.
+- `codemode` (root only): one script can make many tool calls at once, such as a batch of reads or
+  checks, in one turn. It has no timers: never wait or poll inside a script; waits stay on
+  `watch_start` and `wake_at`.
 - Models: only the model family this home's settings allow (`loopPi.modelFamily`, by default
   `gpt-6.2-sol`, `gpt-6.1-terra` and `gpt-6.2-astra`). Never pass a `model` override to `subagent`.
 - Delegation rights are fixed per agent file: `senior` is the only agent that spawns children
