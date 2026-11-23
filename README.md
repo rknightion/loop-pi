@@ -24,6 +24,9 @@ Three pi extensions, a home template and an installer:
 - `extensions/loop-wait` gives lanes `watch_process` and the root `watch_start`, `wake_at` and
   `wake_cancel`, so a wait is a timer or a process watcher rather than a polling loop. A fired
   timer or a finished watcher starts the next root turn.
+- The root also gets pi's built-in `codemode` tool: one script can make many tool calls at once
+  in a single turn. Each call the script makes passes the same loop-guard checks as a direct one.
+  Lanes do not get it, and it has no timers, so waits still go through loop-wait.
 - `extensions/loop-continuation` arms the root on a v3 launch ("You are the root" plus one
   `codex/closeout-<name>-loop<N>.md` path, or a bare `launch-*` file path), checks it against the
   run's `codex/charter-*` file and appends the state log's `open` itself. It re-prompts a root that
