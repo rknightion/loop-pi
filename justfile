@@ -31,6 +31,11 @@ lint:
 [group('check')]
 test:
     npm test
+    just test-python
+
+# Run the Python tool tests on the python3 first on PATH
+[group('check')]
+test-python:
     python3 -m unittest {{ python_tests }}
     python3 -m unittest bin.test_loop_smoke
 
