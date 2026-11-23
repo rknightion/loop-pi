@@ -20,7 +20,7 @@ import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { CustomEntry, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -437,6 +437,40 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  /** Nothing at the path, not even a dangling link; any other read error is not proof of absence. */
+  function pathAbsent(path: string): boolean {
+    try {
+      lstatSync(path);
+      return false;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "ENOENT";
+    }
+  }
+
+  /**
+   * Drop a kept failed rebuild the operator has removed: its path is gone and git lists neither the
+   * path nor its branch in any worktree. Removes no files; its branch goes only if still at the base.
+   */
+  async function reconcileFailedRebuild(failed: Tree): Promise<boolean> {
+    if (allocating.has(failed.lane) || releasing.has(failed.lane) || !pathAbsent(failed.path)) return false;
+    allocating.add(failed.lane);
+    try {
+      const list = await git(failed.repo, ["worktree", "list", "--porcelain"]);
+      if (list.code !== 0) return false;
+      const canonical = (path: string) => join(real(dirname(path)), basename(path));
+      const lines = list.stdout.split("\n");
+      const listed = lines.some((line) => line.startsWith("worktree ") && canonical(line.slice(9)) === canonical(failed.path));
+      if (listed || lines.includes(`branch refs/heads/${failed.branch}`)) return false;
+      if (trees.get(failed.lane) !== failed || !pathAbsent(failed.path)) return false;
+      trees.delete(failed.lane);
+      persist();
+      await deleteUnusedBranch(failed);
+      return true;
+    } finally {
+      allocating.delete(failed.lane);
+    }
+  }
+
   /**
    * A retained allocation that can no longer be verified is never reused, removed or repaired: it is
    * kept, recorded as unknown under its own key, and the lane gets a fresh allocation rebuilt from the
@@ -451,9 +485,6 @@ export default function (pi: ExtensionAPI) {
     if (!tree.base) return { why: "its base was not recorded" };
     if (allocating.has(tree.lane)) return { why: "an allocation for this lane is already in progress" };
     if (trees.get(tree.lane) !== tree) return { why: "the lane's allocation changed before the rebuild" };
-    // A failed rebuild that could not be undone stays recorded; never add another orphan beside it.
-    const failed = [...trees.values()].find((t) => t.rebuildOf === tree.lane && !allocating.has(t.lane));
-    if (failed) return { why: `an earlier rebuild could not be undone and is kept at ${failed.path} (${failed.lane}); recover it first` };
     allocating.add(tree.lane);
     const allocation = randomUUID();
     // The new allocation is journalled under its own key before any fallible setup, so a rebuild that
@@ -462,6 +493,12 @@ export default function (pi: ExtensionAPI) {
     allocating.add(key);
     let made: Tree | undefined;
     try {
+      // A failed rebuild that could not be undone stays recorded; never add another orphan beside it.
+      for (const failed of [...trees.values()].filter((t) => t.rebuildOf === tree.lane && t.lane !== key)) {
+        if (!await reconcileFailedRebuild(failed)) {
+          return { why: `an earlier rebuild could not be undone and is kept at ${failed.path} (${failed.lane}); remove it with git worktree remove, or delete it and run git worktree prune, then resume` };
+        }
+      }
       const root = prepareParent(dir);
       const path = lanePath(root, tree.lane, allocation);
       const branch = laneBranch(root, tree.lane, allocation);

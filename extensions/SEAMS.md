@@ -1276,7 +1276,8 @@ source sends a `loop-*` custom message type the set does not name.
   moves to the lane's key only once it is set up. A failed rebuild is rolled back; one that cannot
   be (a hook left it dirty, say) stays recorded under that key as kept dirty or kept unknown, so
   closeout reports it, and later resumes of the lane are refused, naming it, instead of rebuilding
-  again until it is gone.
+  again. Once its path is gone and git lists neither that path nor its branch in any worktree, the
+  next resume drops the record, deletes the branch only if still at its base, and rebuilds.
   A root `land` or `park`, or explicit root closeout, may release a clean terminal
   tree; session quit/reload alone never releases candidates. Live, unknown and dirty trees remain
   kept. Branch/path components use neutral stable opaque run/lane identifiers, not brief text,

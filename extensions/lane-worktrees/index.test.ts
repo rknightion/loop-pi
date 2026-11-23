@@ -924,6 +924,47 @@ test("a rebuild whose rollback fails is recorded, never repeated, and reported a
   }
 });
 
+test("a failed rebuild the operator removed stops blocking the lane once git no longer lists it", async () => {
+  const s = setup();
+  try {
+    const base = git(s.repo, "rev-parse", "HEAD");
+    const a = await s.launch(brief("L1", "T1"));
+    await s.end(a.id, { runId: "run-1" });
+    const old = s.path("L1");
+    writeCandidate(s.runDir, "L1", old, base);
+    git(old, "checkout", "-q", "--detach");
+    const hook = join(git(s.repo, "rev-parse", "--path-format=absolute", "--git-common-dir"), "hooks", "post-checkout");
+    writeFileSync(hook, "#!/bin/sh\necho generated > work.txt\n", { mode: 0o755 });
+    s.reload();
+    s.emit("subagent:async-complete", { runId: "run-1" });
+    const resume = (id: string) => s.handlers.get("tool_call")!({ toolName: "subagent", toolCallId: id, input: { action: "resume", id: "run-1" } }, s.ctx);
+    assert.equal((await resume("resume-1"))?.block, true);
+    const trees = () => (s.entries.filter((e) => Array.isArray(e.data?.trees)).at(-1)?.data.trees ?? []) as { lane: string; path: string; branch: string; rebuildOf?: string }[];
+    const record = trees().find((t) => t.rebuildOf === "L1");
+    assert.ok(record, "the failed rebuild is recorded");
+    rmSync(hook);
+
+    // Deleted but still listed by git: absence is not confirmed, so the lane stays refused.
+    rmSync(record.path, { recursive: true, force: true });
+    const listedStill = await resume("resume-2");
+    assert.equal(listedStill?.block, true);
+    assert.ok(listedStill.reason.includes(record.path), listedStill.reason);
+    assert.equal(s.path("L1"), old);
+
+    git(s.repo, "worktree", "prune");
+    s.reload();
+    s.emit("subagent:async-complete", { runId: "run-1" });
+    const recovered = await resume("resume-3");
+    assert.equal(recovered?.block, true, "a resumed session still cannot move to the new worktree");
+    assert.match(recovered.reason, /was rebuilt at /);
+    assert.notEqual(s.path("L1"), old);
+    assert.equal(trees().some((t) => t.lane === record.lane), false, "the absent record is reconciled away");
+    assert.equal(branches(s.repo).includes(record.branch), false, "its unused branch is gone");
+  } finally {
+    s.restore();
+  }
+});
+
 test("simultaneous resumes retain single-flight ownership during asynchronous identity verification", async () => {
   const s = setup();
   try {
