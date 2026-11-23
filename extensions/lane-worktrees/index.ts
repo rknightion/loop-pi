@@ -72,6 +72,8 @@ interface Tree {
   keptUnknown?: boolean;
   /** This allocation could not be verified and the lane was rebuilt at this path instead. */
   rebuiltAs?: string;
+  /** A rebuild of this lane in progress, or one that failed and could not be undone (kept). */
+  rebuildOf?: string;
 }
 
 interface NativeName {
@@ -449,8 +451,15 @@ export default function (pi: ExtensionAPI) {
     if (!tree.base) return { why: "its base was not recorded" };
     if (allocating.has(tree.lane)) return { why: "an allocation for this lane is already in progress" };
     if (trees.get(tree.lane) !== tree) return { why: "the lane's allocation changed before the rebuild" };
+    // A failed rebuild that could not be undone stays recorded; never add another orphan beside it.
+    const failed = [...trees.values()].find((t) => t.rebuildOf === tree.lane && !allocating.has(t.lane));
+    if (failed) return { why: `an earlier rebuild could not be undone and is kept at ${failed.path} (${failed.lane}); recover it first` };
     allocating.add(tree.lane);
     const allocation = randomUUID();
+    // The new allocation is journalled under its own key before any fallible setup, so a rebuild that
+    // fails and cannot be rolled back is still a recorded allocation for later resumes and closeout.
+    const key = `${tree.lane}~rebuild-${allocation.slice(0, 8)}`;
+    allocating.add(key);
     let made: Tree | undefined;
     try {
       const root = prepareParent(dir);
@@ -460,9 +469,11 @@ export default function (pi: ExtensionAPI) {
       if (existsSync(path) || (await git(tree.repo, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`])).code === 0) {
         return { why: "the new allocation identity already exists" };
       }
+      made = { lane: key, task: tree.task, path, branch, repo: tree.repo, runs: [], allocation, base: tree.base, rebuildOf: tree.lane };
+      trees.set(key, made);
+      persist();
       const add = await git(tree.repo, ["worktree", "add", "-b", branch, path, tree.base]);
-      if (add.code !== 0) return { why: `git worktree add failed: ${add.stderr.trim()}` };
-      made = { lane: tree.lane, task: tree.task, path, branch, repo: tree.repo, runs: [], allocation, base: tree.base };
+      if (add.code !== 0) throw new Error(`git worktree add failed: ${add.stderr.trim()}`);
       registerAllocation(root, path, allocation);
       const preimage = await relativeGitdir(path, async () => {
         const head = await git(path, ["rev-parse", "--verify", "HEAD"]);
@@ -477,15 +488,32 @@ export default function (pi: ExtensionAPI) {
       const stale: Tree = { ...tree, lane: `${tree.lane}~unverified-${(tree.allocation ?? randomUUID()).slice(0, 8)}`, keptUnknown: true, rebuiltAs: path };
       delete stale.release;
       trees.set(stale.lane, stale);
+      trees.delete(key);
+      made.lane = tree.lane;
+      delete made.rebuildOf;
       trees.set(tree.lane, made);
       persist();
       return { tree: made, patch };
     } catch (error) {
-      if (made && (await removeWorktree(made)) === "removed") await deleteUnusedBranch(made);
-      else if (made) warn(`kept ${made.path}: a failed rebuild could not be undone`);
+      if (made) {
+        // Nothing was made when neither the path nor the branch exists; otherwise undo it or keep it recorded.
+        const branchExists = (await git(tree.repo, ["show-ref", "--verify", "--quiet", `refs/heads/${made.branch}`])).code === 0;
+        const outcome = existsSync(made.path) ? await removeWorktree(made) : "absent";
+        if (outcome === "removed" || outcome === "absent") {
+          if (outcome === "removed" || branchExists) await deleteUnusedBranch(made);
+          trees.delete(key);
+          persist();
+        } else {
+          if (outcome === "dirty") made.keptDirty = true;
+          if (outcome === "unknown") made.keptUnknown = true;
+          persist();
+          warn(`kept ${made.path} (${key}): a failed rebuild could not be undone`);
+        }
+      }
       return { why: String(error instanceof Error ? error.message : error) };
     } finally {
       allocating.delete(tree.lane);
+      allocating.delete(key);
     }
   }
 

@@ -1272,6 +1272,11 @@ source sends a `loop-*` custom message type the set does not name.
   worktree: a resumed session cannot change its cwd, so the root launches the lane again with its
   brief and that `cwd`. A later resume of the old run names the same worktree. With no patch, no
   recorded base or a patch that does not apply, nothing is rebuilt and the resume is refused.
+  The fresh allocation is recorded under `<lane>~rebuild-<id>` before `git worktree add`, and
+  moves to the lane's key only once it is set up. A failed rebuild is rolled back; one that cannot
+  be (a hook left it dirty, say) stays recorded under that key as kept dirty or kept unknown, so
+  closeout reports it, and later resumes of the lane are refused, naming it, instead of rebuilding
+  again until it is gone.
   A root `land` or `park`, or explicit root closeout, may release a clean terminal
   tree; session quit/reload alone never releases candidates. Live, unknown and dirty trees remain
   kept. Branch/path components use neutral stable opaque run/lane identifiers, not brief text,
