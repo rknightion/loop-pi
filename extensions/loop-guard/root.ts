@@ -18,7 +18,7 @@ import { installRequestCeiling, installRetryBackoff } from "../request-ceiling/i
 import { bindLaneIdentity } from "./push-grant.ts";
 import { C3_AGENTS, SUBAGENT_LAUNCH_TOOL, evaluateBashCommand, evaluateBgWait, evaluateBriefHeader, evaluateSubagentCall, evaluateSubagentLaunchTool, evaluateWatchProcess, isAsyncSubagentLaunch, isSubagentLaunch, wrappedGateCommands, bindGateExecution } from "./rules.ts";
 import { bindRequiredLauncher, pinLaneDefinitions, readManagedLabel, unpinnedLaneReason, type LanePin } from "./launcher-pin.ts";
-import { loadGateDeclarations } from "./gates.ts";
+import { loadGateDeclarations, worktreeContains } from "./gates.ts";
 import { isSubagentWakeRun } from "../loop-continuation/state.ts";
 import { bashProtectedPath, protoActive, runDirFromEnv, toolWriteRefusal } from "./guard-paths.ts";
 import { capturePushExecutions, planPushes, recordPushes, unloggedPushRefusal, type PlannedPush, type PushExecutionEvidence } from "./push-log.ts";
@@ -219,6 +219,7 @@ export default function (pi: ExtensionAPI) {
     const decision = evaluateBashCommand(command, "root", 0, {
       gates,
       cwd: ctx.cwd,
+      inWorktree: worktreeContains(ctx.cwd),
       proto: p2,
       protectedPath: p2 ? bashProtectedPath("root", ctx.cwd, runDir) : undefined,
     });

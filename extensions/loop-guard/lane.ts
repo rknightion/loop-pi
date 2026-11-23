@@ -12,7 +12,7 @@ import { installModelFamily, subagentOverrideBlock } from "./model-family.ts";
 import { hasSubagentField } from "./subagent-view.ts";
 import { installRequestCeiling, installRetryBackoff } from "../request-ceiling/index.ts";
 import { SUBAGENT_LAUNCH_TOOL, evaluateBashCommand, evaluateSubagentLaunchTool, evaluateSubagentPolicyFields, wrappedGateCommands, bindGateExecution } from "./rules.ts";
-import { loadGateDeclarations } from "./gates.ts";
+import { loadGateDeclarations, worktreeContains } from "./gates.ts";
 import { parseLaneBinding } from "./push-grant.ts";
 import { bashProtectedPath, isLoopControlToolPath, protoActive, runDirFromEnv, toolWriteRefusal } from "./guard-paths.ts";
 import { laneIdFromBrief, planPushes, recordPushes, unloggedPushRefusal, type PlannedPush } from "./push-log.ts";
@@ -47,6 +47,7 @@ export default function (pi: ExtensionAPI) {
     const decision = evaluateBashCommand(command, "lane", 0, {
       gates,
       cwd: ctx.cwd,
+      inWorktree: worktreeContains(ctx.cwd),
       proto: p2,
       protectedPath: p2 ? bashProtectedPath("lane", ctx.cwd, runDir) : undefined,
     });
