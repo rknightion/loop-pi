@@ -318,7 +318,10 @@ export default function (pi: ExtensionAPI): void {
       const requested = typeof input.id === "string" ? input.id : typeof input.runId === "string" ? input.runId : undefined;
       if (requested === undefined) {
         if (event.isError || event.content?.some((part) => part.type !== "text")) return;
-        const section = formatNestedRuns(listNestedRuns(asyncRunsDir(), sessionKey).filter((run) => !text.includes(`[${run.id}]`)));
+        // Only a native nested row ("↳ <label> [<id>] <state>") counts as listed; an id in a lane's
+        // progress text or a warning does not.
+        const shown = new Set(text.split("\n").filter((line) => /^\s*↳ /.test(line)).flatMap((line) => [...line.matchAll(/\[([^\]\s]+)\]/g)].map((m) => m[1])));
+        const section = formatNestedRuns(listNestedRuns(asyncRunsDir(), sessionKey).filter((run) => !shown.has(run.id)));
         if (section) return { content: [{ type: "text" as const, text: `${text}\n\n${section}` }] };
         return;
       }

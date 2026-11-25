@@ -1134,6 +1134,7 @@ test("a governed implementation lane may name an explicit cwd inside the tree al
       assert.equal(again.input.worktree, false, "the package's own worktree default is suppressed");
       assert.equal("isolation" in again.input, false);
       assert.equal(again.input.cwd, cwd);
+      assert.equal(again.input.label, "L1", "a launch into the retained cwd is named by its lane id");
       await s.end(again.id, { runId: `again-${basename(cwd)}` });
     }
     const recorded = s.entries.at(-1)!.data.trees.find((t: any) => t.lane === "L1");
@@ -1148,6 +1149,7 @@ test("a governed implementation lane may name an explicit cwd inside the tree al
     await s.end(flagged.id, { runId: "run-flagged" });
     const conflicting = await s.launch(brief("L1", "T1"), { cwd: s.path("L1"), isolation: "none" });
     assert.equal(conflicting.result?.block, true);
+    assert.equal(conflicting.input.label, undefined, "a refused launch gets no label");
     // A second writer is refused while the lane's run is live, and admitted once it has finished.
     const live = await s.launch(brief("L1", "T1"), { cwd: s.path("L1") });
     assert.equal(live.result, undefined);

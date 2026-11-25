@@ -15,9 +15,11 @@ export const DEFAULT_RATE_LIMIT_DELAY_MS = 60_000;
 /** Extra jitter is drawn from [0, ratio * the applicable delay floor). */
 export const SERVER_JITTER_RATIO = 0.5;
 /**
- * The longest wait a server's `retry-after` can ask for. A longer hint (a usage limit hours away)
- * is cut to this, so the run stays well inside the request ceiling's inactivity limit and pi's own
- * retries still end the run when the server keeps refusing.
+ * The longest wait a server's `retry-after` can ask for; a longer hint (a usage limit hours away) is
+ * cut to this. Jitter is drawn on the capped total, so one wait is at most 1.5 times this plus pi's
+ * delay. The request ceiling's timers do not run during the wait (they re-arm at `turn_start`); on
+ * a route opted into retry recovery the episode deadline (`retryRecovery.episodeMs`) still ends
+ * the run, and elsewhere pi's `retry.maxRetries` bounds the number of waits.
  */
 export const RETRY_AFTER_MAX_MS = 300_000;
 /** Node fires a longer setTimeout delay after 1 ms. */

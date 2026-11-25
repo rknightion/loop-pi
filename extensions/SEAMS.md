@@ -40,7 +40,12 @@ public statement of those contracts.
   native launches, and `workflow-scripts` stays enabled and guarded, because disabling it swaps
   `workflow` for unguarded `tasks` / `chain`. `session-sharing` (pi-subagents 0.90.0) is disabled, so the
   `subagent` tool carries no `share` and no run can upload a session to a GitHub Gist; a resume whose
-  saved launch had `share` is refused before it starts (`subagent-session-sharing.test.ts`).
+  saved launch had `share` is refused before it starts (package behaviour, pi-subagents 0.90.0
+  CHANGELOG; `subagent-session-sharing.test.ts` pins the fresh-launch refusal). Releases of pi-subagents
+  before 0.90.0 reject the name: `disabledFeatures` is fail-closed there, so a root or child still
+  running such a build throws when it reads the new home config (extension load, child start and
+  the preflight's `loadConfig`). Install this build into a home only once no root or child on an
+  older pi-subagents runs there, or restart those roots.
 - **codemode (pi 1.6.1), root only:** the built-in `codemode` extension loads and
   `defaultTools: ["+codemode"]` activates it at session start, so the tool list never changes
   mid-conversation. A lane's agent-file `tools:` reaches its child as a plain `--tools` allowlist,
@@ -1335,12 +1340,15 @@ source sends a `loop-*` custom message type the set does not name.
   workflows, conflicting shapes and RPC launches keep their existing handling. Existing lane
   fields are preserved; malformed lane version/key is refused before naming is changed, and
   the package still validates all other fields. The original brief, task identity and guard-owned
-  `extensionBindings` are unchanged. Every launch this hook accepts and rewrites (retained cwd,
-  retained resume by cwd, or native lane metadata) without a top-level or `options` `label` gets
-  `label: <lane id>` (pi-subagents 0.90.0), so the run's session, status row and
-  `subagent:async-started` description carry the lane name. The task id never goes into the label,
-  as it never goes into the key, and the key, not the label, names a native worktree and branch
-  (`buildWorktreeNaming` prefers `laneKey`). Refused, shared-cwd and untouched launches get no label. Optional `nativeNames [{key,lane,task,runs}]` in
+  `extensionBindings` are unchanged. Every launch this hook accepts and rewrites (a new or
+  relaunched retained allocation, a launch into a retained cwd, or native lane metadata) without a
+  top-level or `options` `label` gets `label: <lane id>` (pi-subagents 0.90.0), so the run's
+  session, status row and `subagent:async-started` description carry the lane name. The task id
+  never goes into the label, as it never goes into the key. The label never names a worktree or
+  branch: retained launches run with `worktree: false`, and on the native path the package passes
+  `lane.key` ahead of `params.label` as the naming label (`subagent-executor.js`,
+  `async-execution.js`). Refused, shared-cwd and untouched launches, and `action: "resume"`, get no
+  label. Optional `nativeNames [{key,lane,task,runs}]` in
   `lane-worktrees-state` records native launch and tool-resume run correlations when results provide
   a run id; multiple naming-identity prefix matches refuse, while package validation remains
   authoritative for target resolution, ownership and revival. This map is best-effort correlation,

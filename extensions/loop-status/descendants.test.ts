@@ -154,6 +154,10 @@ test("a nested run the native listing already shows under its lane is not listed
     // A child the native listing could not project (for example a failed nested reconciliation) is still added.
     const result = startRoot(f)({ action: "status" }, `Active async runs: 1\n\n- ${LANE} senior`);
     assert.match(result.content[0].text, new RegExp(`- ${CHILD} worker \\(single, running\\) parent ${LANE}`));
+    // An id in other native text (a lane's own progress line, a warning) is not a nested row.
+    const mentioned = `Active async runs: 1\n\n- ${LANE} senior\n  progress: worker [${CHILD}] running\n  Warning: Nested status unavailable`;
+    const kept = startRoot(f)({ action: "status" }, mentioned);
+    assert.match(kept.content[0].text, new RegExp(`- ${CHILD} worker \\(single, running\\) parent ${LANE}`));
   } finally {
     if (previous === undefined) delete process.env.PI_SUBAGENTS_TEMP_ROOT;
     else process.env.PI_SUBAGENTS_TEMP_ROOT = previous;
