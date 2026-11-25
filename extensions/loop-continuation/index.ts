@@ -9,7 +9,7 @@
 // `/loop-closeout` runs the closeout audit itself (closeout-audit.ts).
 
 import { execFile } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type {
   AgentBeforeSettleEvent,
@@ -56,7 +56,7 @@ import {
 } from "./state.ts";
 import { nudgeTextFor } from "./nudge-text.ts";
 import { createTranscriptSync } from "./transcript-sync.ts";
-import { CONTEXT_OVERFLOW_CLASS, runOnIncident, writeIncident, writeRootIncident } from "./incident.ts";
+import { CONTEXT_OVERFLOW_CLASS, incidentStamp, runOnIncident, writeIncident, writeRootIncident } from "./incident.ts";
 import { loopStateBinary, readDigest, stateLogPath } from "./close-out.ts";
 import { freezeStanding, STANDING_REJECTED_CLASS } from "./standing.ts";
 import { lastAssistantText } from "./stop-controls.ts";
@@ -64,11 +64,13 @@ import {
   classifyRootStop,
   judgementText,
   lastAssistantMessage,
+  RECOVERY_LOG,
   RECOVERY_STOPPED_CLASS,
   RESUME_CUSTOM_TYPE,
-  RESUME_EVENT,
   resumeDelayMs,
+  resumesInWindow,
   resumeText,
+  resumeTimesFromBranch,
   rootRecoveryConfig,
   type SettleEvidence,
 } from "./root-recovery.ts";
@@ -114,7 +116,7 @@ export default function (pi: ExtensionAPI) {
   // The relaunch warning is for a session's first input only (S3).
   let sawInput = false;
   // Automatic root recovery (root-recovery.ts). `harnessAbort` attributes this run's abort to the
-  // request ceiling or the recovery controller (their synchronous pre-abort events), never the operator.
+  // request ceiling (its synchronous pre-abort event), never the operator.
   let harnessAbort: SettleEvidence["harnessAbort"] = null;
   let ceilingLimit: SettleEvidence["ceilingLimit"] = null;
   /** Resumes sent since the root last completed a healthy model request. */
@@ -128,8 +130,14 @@ export default function (pi: ExtensionAPI) {
   let resumeEpoch = 0;
   /** The failed message a stop incident was written for, so one failure writes one incident. */
   let stoppedFor: string | null = null;
+  /** When each automatic resume was sent (epoch ms), for the rolling-window cap. */
+  let resumeTimes: number[] = [];
+  /** A pi-subagents child (a lane) never auto-resumes; its root repairs it. Captured at load. */
+  const isLane = process.env.PI_SUBAGENT_CHILD === "1";
 
   const runDir = (): string | undefined => process.env.LOOP_PI_RUN_DIR || undefined;
+  /** Automatic resume is armed for every root with a run folder, v3 launch text or not. */
+  const resumeArmed = (): boolean => !isLane && (state.armed || runDir() !== undefined);
   let protocolSeen = false;
   const protocolRequired = (): boolean => {
     const dir = runDir();
@@ -298,9 +306,19 @@ export default function (pi: ExtensionAPI) {
     return stateLogPath(resolveReportPath(state.launch.report, cwd));
   }
 
+  /** The judgement goes to the v3 state log when there is one, else to `$LOOP_PI_RUN_DIR/root-recovery.jsonl`. */
   async function recordJudgement(ctx: ExtensionContext, text: string) {
     const log = armedLog(ctx.cwd);
-    if (!log) return;
+    if (!log) {
+      const dir = runDir();
+      if (!dir) return;
+      try {
+        appendFileSync(join(dir, RECOVERY_LOG), `${JSON.stringify({ v: 1, ts: new Date().toISOString(), session: sessionId || "unknown", ev: "judgement", text })}\n`);
+      } catch (error) {
+        notify(ctx, `loop-continuation: could not record "${text}" in ${join(dir, RECOVERY_LOG)}: ${String(error)}`, "warning");
+      }
+      return;
+    }
     try {
       const result = await appendEvent(getAgentDir(), log, { ev: "judgement", text }, ctx.cwd);
       if (!result.ok) notify(ctx, `loop-continuation: could not record "${text}" in ${log}: ${result.detail}`, "warning");
@@ -318,9 +336,14 @@ export default function (pi: ExtensionAPI) {
     const at = new Date().toISOString();
     try {
       const agentDir = getAgentDir();
-      const file = writeRootIncident(agentDir, sessionId, at, "recovery-stopped", {
-        v: 1, session: sessionId || "unknown", class: RECOVERY_STOPPED_CLASS, at, home: agentDir, cwd: ctx.cwd, cause, detail,
-      });
+      const payload = { v: 1, session: sessionId || "unknown", class: RECOVERY_STOPPED_CLASS, at, home: agentDir, cwd: ctx.cwd, cause, detail };
+      const file = writeRootIncident(agentDir, sessionId, at, "recovery-stopped", payload);
+      // The same record in the run folder, beside the run's own files.
+      const dir = runDir();
+      if (dir) {
+        mkdirSync(join(dir, "incidents"), { recursive: true });
+        writeFileSync(join(dir, "incidents", `${sessionId || "unknown"}-${incidentStamp(at)}-recovery-stopped.json`), JSON.stringify(payload));
+      }
       if (file) runOnIncident(agentDir, file);
     } catch {
       // Incident bookkeeping must never trap the session.
@@ -330,10 +353,9 @@ export default function (pi: ExtensionAPI) {
   }
 
   /** Arm (or re-arm, keeping its due time) the resume timer for the next attempt. */
-  function scheduleResume(ctx: ExtensionContext, cause: string, detail: string) {
-    const config = rootRecoveryConfig(recoverySettings());
-    if (!config.enabled) return;
+  function scheduleResume(ctx: ExtensionContext, cause: string, detail: string, config: ReturnType<typeof rootRecoveryConfig>) {
     const delay = resumeDelayMs(resumeAttempt + 1, config);
+    if (resumeDueAt === null) notify(ctx, `loop-continuation: automatic resume ${resumeAttempt + 1} in ${Math.round(delay / 1000)} s (${cause}: ${detail}); any input of yours cancels it`, "info");
     resumeDueAt ??= Date.now() + delay;
     resumeCause = { cause, detail };
     clearResumeTimer();
@@ -344,15 +366,15 @@ export default function (pi: ExtensionAPI) {
     resumeTimer.unref?.();
   }
 
-  /** The backoff elapsed: resume only an armed, idle root that is still stopped on a failed request. */
+  /** The backoff elapsed: resume only an armed, idle root that is still stopped on a failed request or harness abort. */
   async function fireResume(ctx: ExtensionContext, delay: number) {
     const cause = resumeCause;
     resumeDueAt = null;
     resumeCause = null;
     const stillStopped = (): boolean => {
       try {
-        if (!state.armed || !state.launch || !ctx.isIdle()) return false; // A running turn decides again when it settles.
-        if (reportCounts(state.launch, ctx.cwd)) return false;
+        if (!resumeArmed() || !ctx.isIdle()) return false; // A running turn decides again when it settles.
+        if (state.armed && state.launch && reportCounts(state.launch, ctx.cwd)) return false;
         const last = lastAssistantMessage(ctx.sessionManager.getBranch());
         return !!last && (last.stopReason === "error" || last.stopReason === "aborted");
       } catch {
@@ -372,14 +394,14 @@ export default function (pi: ExtensionAPI) {
       pi.appendEntry(QUOTA_RETRY_ENTRY, { v: 1, attempts: quotaResumeAttempts });
     }
     resumeAttempt = attempt;
-    // Reset the recovery episode as an owner's idle input would; only this event does so.
-    pi.events.emit(RESUME_EVENT, {});
+    const at = Date.now();
+    resumeTimes.push(at);
     pi.sendMessage(
       {
         customType: RESUME_CUSTOM_TYPE,
         content: resumeText(attempt, cause.cause as never, cause.detail, delay),
         display: true,
-        details: { attempt, cause: cause.cause, detail: cause.detail, delayMs: delay },
+        details: { attempt, cause: cause.cause, detail: cause.detail, delayMs: delay, at },
       },
       { triggerTurn: true },
     );
@@ -390,10 +412,10 @@ export default function (pi: ExtensionAPI) {
     const evidence: SettleEvidence = { harnessAbort, ceilingLimit, contextWindow: ctx.model?.contextWindow };
     harnessAbort = null;
     ceilingLimit = null;
-    if (!state.armed || !state.launch) return;
+    if (!resumeArmed()) return;
     let last: ReturnType<typeof lastAssistantMessage>;
     try {
-      if (reportCounts(state.launch, ctx.cwd)) return cancelResume();
+      if (state.armed && state.launch && reportCounts(state.launch, ctx.cwd)) return cancelResume();
       last = lastAssistantMessage(ctx.sessionManager.getBranch());
     } catch {
       return;
@@ -404,7 +426,15 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     if (decision.action === "stop") return recordRecoveryStop(ctx, last, decision.cause, decision.detail);
-    scheduleResume(ctx, decision.cause, decision.detail);
+    const config = rootRecoveryConfig(recoverySettings());
+    if (!config.enabled) return;
+    // Only sent resumes fill the window; re-arming a pending one is not a new resume.
+    const recent = resumesInWindow(resumeTimes, Date.now(), config.windowMs);
+    if (resumeDueAt === null && recent >= config.maxResumes) {
+      return recordRecoveryStop(ctx, last, "resume-cap",
+        `${recent} automatic resumes in ${Math.round(config.windowMs / 60_000)} min; last ${decision.cause} ${decision.detail}`);
+    }
+    scheduleResume(ctx, decision.cause, decision.detail, config);
   }
 
   async function runCloseout(lines: string[], pending: unknown[]) {
@@ -492,9 +522,6 @@ export default function (pi: ExtensionAPI) {
     const limit = (data as { limitType?: unknown } | null)?.limitType;
     ceilingLimit = limit === "inactivity" || limit === "absolute" ? limit : null;
   });
-  pi.events.on("loop-recovery:abort", () => {
-    harnessAbort ??= "recovery-abort";
-  });
 
   pi.events.on(LOOP_CLOSEOUT_EVENT, (data) => {
     if (!protocolRequired()) return;
@@ -522,6 +549,7 @@ export default function (pi: ExtensionAPI) {
     harnessAbort = null;
     ceilingLimit = null;
     stoppedFor = null;
+    resumeTimes = resumeTimesFromBranch(ctx.sessionManager.getBranch());
     for (const entry of ctx.sessionManager.getBranch()) {
       if (entry.type === "custom" && entry.customType === STATE_CUSTOM_TYPE) {
         state = (entry as CustomEntry<ContinuationState>).data ?? INITIAL_STATE;

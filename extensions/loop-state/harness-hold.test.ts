@@ -85,7 +85,7 @@ test("compaction input: a held notice inside a loop-pi abort window is neutralis
   const r = root();
   r.fire("session_start");
   const outsideBefore = heldNotice(Date.now() - 60_000);
-  r.pi.events.emit("loop-recovery:abort", {});
+  r.pi.events.emit("loop-recovery:request-timeout", { limitType: "inactivity" });
   const user = { role: "user", content: "go", timestamp: Date.now() - 10 };
   const inside = heldNotice(Date.now() + 1);
   const prefix = heldNotice(Date.now() + 2);
@@ -124,7 +124,7 @@ test("an operator Esc keeps the package's held text verbatim", () => {
 test("the next run closes the window: a later operator-Esc notice is not rewritten", async () => {
   const r = root();
   r.fire("session_start");
-  r.pi.events.emit("loop-recovery:abort", {});
+  r.pi.events.emit("loop-recovery:request-timeout", { limitType: "inactivity" });
   const during = heldNotice(Date.now());
   await new Promise((resolve) => setTimeout(resolve, 5));
   r.fire("agent_start");
@@ -171,10 +171,10 @@ function rootProcess(branch: { type: string; customType: string; data: unknown }
 test("a window open at exit is closed for good at the next resume: a later owner Esc is never rewritten", () => {
   const branch: { type: string; customType: string; data: unknown }[] = [];
   const clock = { now: 1_000 };
-  // Process A: a recovery stop with no follow-up run, then the root exits mid-window.
+  // Process A: a ceiling abort with no follow-up run, then the root exits mid-window.
   const a = rootProcess(branch, clock);
   a.fire("session_start");
-  a.emit("loop-recovery:abort");
+  a.emit("loop-recovery:request-timeout");
   // Process B: resumed later; the owner runs a turn and presses Esc; a held notice lands at 3000.
   clock.now = 2_000;
   const b = rootProcess(branch, clock);

@@ -22,7 +22,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { newProgress, observeAssistantEvent, type RequestProgress } from "../call-timing/progress.ts";
 import { publishCeilingPolicy } from "../call-timing/writer.ts";
-import { installRecovery } from "./recovery.ts";
+import { hardStopFor, hardStopText } from "./hard-stop.ts";
 import { backoffConfig, classifyRetryError, extraRetryDelayMs, retryPolicy } from "./backoff.ts";
 import {
   type CeilingConfig,
@@ -38,8 +38,8 @@ import {
 function readSettings(ctx?: ExtensionContext): unknown {
   if (ctx) {
     const settings = SettingsManager.create(ctx.cwd, getAgentDir(), { projectTrusted: ctx.isProjectTrusted() });
-    // Unknown effective retry configuration cannot authorize unobservable HTTP retries.
-    if (settings.drainErrors().length) return { ...settings.getGlobalSettings(), retry: { provider: { maxRetries: "unknown" } } };
+    // A settings file pi could not read falls back to the home's own settings, as pi itself does.
+    if (settings.drainErrors().length) return settings.getGlobalSettings();
     return settings.getSettings();
   }
   try {
@@ -158,25 +158,15 @@ export function installRequestCeiling(pi: ExtensionAPI, supplied: CeilingConfig 
     pending = undefined;
     if (!incident) return;
     consecutive++;
-    let recoveryAllowsFollowUp = true;
-    pi.events.emit("loop-recovery:may-follow-up", { reply: (allowed: boolean) => { recoveryAllowsFollowUp = allowed; } });
-    let decision = { managed: false, allowed: recoveryAllowsFollowUp, attempts: 0, maxAttempts: 0 };
-    pi.events.emit("loop-recovery:ceiling-decision", {
-      consecutive, maxFollowUps: config.maxFollowUps,
-      reply: (value: typeof decision) => { decision = value; },
-    });
-    const continuing = recoveryAllowsFollowUp && decision.allowed && consecutive <= config.maxFollowUps;
+    const continuing = consecutive <= config.maxFollowUps;
     const attempt = continuing ? consecutive : config.maxFollowUps;
-    writeRequestIncident(getAgentDir(), sessionId, ctx.cwd, incident, decision.managed ? decision.attempts : consecutive, !continuing);
-    // Managed denial/exhaustion owns its one actionable notice. Still retain the
-    // incident file, but do not double-report it or accidentally trigger a turn.
-    if (decision.managed && !continuing) return;
+    writeRequestIncident(getAgentDir(), sessionId, ctx.cwd, incident, consecutive, !continuing);
     pi.sendMessage(
       {
         customType: INCIDENT_CUSTOM_TYPE,
-        content: incidentText(incident, attempt, config.maxFollowUps, continuing, decision.managed ? { attempts: decision.attempts, maxAttempts: decision.maxAttempts } : undefined),
+        content: incidentText(incident, attempt, config.maxFollowUps, continuing),
         display: true,
-        details: { limitType: incident.limitType ?? null, inactivityMs: incident.inactivityMs ?? config.inactivityMs, absoluteMs: incident.absoluteMs ?? config.absoluteMs, wallClockMs: incident.wallClockMs, idleMs: incident.idleMs ?? null, lastModelEventAt: incident.lastModelEventAt ?? null, kind: incident.kind, attempt: decision.managed ? decision.attempts : consecutive, exhausted: !continuing, elapsedMs: incident.elapsedMs },
+        details: { limitType: incident.limitType ?? null, inactivityMs: incident.inactivityMs ?? config.inactivityMs, absoluteMs: incident.absoluteMs ?? config.absoluteMs, wallClockMs: incident.wallClockMs, idleMs: incident.idleMs ?? null, lastModelEventAt: incident.lastModelEventAt ?? null, kind: incident.kind, attempt: consecutive, exhausted: !continuing, elapsedMs: incident.elapsedMs },
       },
       { triggerTurn: continuing },
     );
@@ -189,6 +179,10 @@ export function installRequestCeiling(pi: ExtensionAPI, supplied: CeilingConfig 
 }
 
 /**
+ * Retry and hard stops (SEAMS.md "Retry and hard stops"): pi's native retry handles every transient
+ * failure; a failure on the hard-stop list (hard-stop.ts) is rewritten at `message_end` so pi's
+ * classifier rejects it and the run stops for the owner.
+ *
  * Retry backoff (SEAMS.md "Retry backoff"): jitter on all retries and a minimum wait on 429, added in
  * front of pi's own agent-level retry wait. pi awaits `agent_end` handlers before it decides to
  * retry and sleeps its own `retryDelayMs`, so a wait here delays the retry without touching pi's
@@ -199,7 +193,6 @@ export function installRequestCeiling(pi: ExtensionAPI, supplied: CeilingConfig 
  * assistant message, and is always back at zero once the run settles.
  */
 export function installRetryBackoff(pi: ExtensionAPI, loadSettings: (ctx?: ExtensionContext) => unknown = readSettings): void {
-  installRecovery(pi, loadSettings);
   let attempt = 0;
 
   pi.on("session_start", () => {
@@ -207,8 +200,12 @@ export function installRetryBackoff(pi: ExtensionAPI, loadSettings: (ctx?: Exten
   });
 
   pi.on("message_end", (event) => {
-    const message = event.message as { role?: string; stopReason?: string };
-    if (message.role === "assistant" && message.stopReason !== "error") attempt = 0;
+    const message = event.message as { role?: string; stopReason?: string; errorMessage?: string };
+    if (message.role !== "assistant") return;
+    if (message.stopReason !== "error") { attempt = 0; return; }
+    const stop = hardStopFor(message);
+    if (!stop) return;
+    return { message: { ...event.message, errorMessage: hardStopText(stop), loopPiHardStop: stop } as unknown as typeof event.message };
   });
 
   pi.on("agent_settled", () => {

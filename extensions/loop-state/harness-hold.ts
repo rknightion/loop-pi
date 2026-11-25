@@ -1,10 +1,10 @@
 // pi-subagents 0.78.0 holds the parent after any aborted turn (`ctx.hasUI && ctx.signal.aborted` at
 // agent_end) until the next agent_start. While held, a completion notice starts no turn and ends with
 // HELD_COMPLETION_ACTION: "The user stopped the parent turn ... do not resume the stopped task unless
-// asked". The package cannot tell an operator Esc from loop-pi's own request-ceiling or recovery abort,
-// so after a harness abort the root would read a stop the owner never gave. loop-pi announces its
-// aborts synchronously on the event bus first (`loop-recovery:request-timeout`, `loop-recovery:abort`);
-// each opens a window that the next agent_start closes. Held notices timestamped inside a window are
+// asked". The package cannot tell an operator Esc from loop-pi's own request-ceiling abort, so after a
+// harness abort the root would read a stop the owner never gave. The ceiling announces its abort
+// synchronously on the event bus first (`loop-recovery:request-timeout`), which opens a window that
+// the next agent_start closes. Held notices timestamped inside a window are
 // rewritten for the model only; the session keeps the package's text, and an operator Esc (no window)
 // keeps it verbatim. Native compaction never runs the `context` hook (pi 1.3.0 `emitContext` has the
 // single caller `transformContext` in core/sdk.js, the agent loop's request path; compaction builds its
@@ -19,7 +19,7 @@ export const HELD_COMPLETION_ACTION =
 export const HARNESS_HELD_ACTION =
   "loop-pi stopped the parent turn automatically (request ceiling or recovery), not the owner. Follow the loop-pi incident or recovery notice in this session.";
 export const HARNESS_HOLD_STATE = "loop-pi-harness-hold";
-const ABORT_EVENTS = ["loop-recovery:request-timeout", "loop-recovery:abort"] as const;
+const ABORT_EVENTS = ["loop-recovery:request-timeout"] as const;
 
 type Window = { start: number; end?: number };
 type HoldEntry = { start?: unknown; end?: unknown };
