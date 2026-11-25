@@ -7,6 +7,7 @@ import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { spawn as nodeSpawn } from "node:child_process";
+import { python315 } from "../python-start/core.ts";
 
 export const SYNC_INTERVAL_MS = 5 * 60 * 1000;
 export const STATE_NAME = ".transcript-checkpoint-state.json";
@@ -67,7 +68,6 @@ export function createTranscriptSync(deps: SyncDeps) {
   const now = deps.now ?? Date.now;
   const spawn = deps.spawn ?? defaultSpawn;
   const lockf = deps.lockf === undefined ? (existsSync("/usr/bin/lockf") ? "/usr/bin/lockf" : null) : deps.lockf;
-  const python = deps.python ?? (existsSync("/usr/bin/python3") ? "/usr/bin/python3" : "python3");
   // Same lock file transcript-checkpoint.py takes for a Claude/Codex home of the same name.
   const lockPath = join(deps.lockDir ?? tmpdir(), `.agent-transcript-sync-${basename(deps.agentDir).replace(/^\.+/, "")}.flock`);
   let inFlight = 0;
@@ -83,6 +83,9 @@ export function createTranscriptSync(deps: SyncDeps) {
     try {
       const script = join(deps.agentDir, "scripts", "sync-transcripts.py");
       if (!existsSync(script)) return false;
+      // Python 3.15 only: with none found there is nothing to start, and a missed upload is ignored.
+      const python = deps.python ?? python315();
+      if (!python) return false;
       if (!lifecycle && (inFlight > 0 || now() - readLastSuccessMs(deps.agentDir) < SYNC_INTERVAL_MS)) return false;
       const timeout = String(lifecycle ? LIFECYCLE_TIMEOUT_S : CHECKPOINT_TIMEOUT_S);
       const sync = [python, "-c", BOUNDED, timeout, python, script, "--home", deps.agentDir];

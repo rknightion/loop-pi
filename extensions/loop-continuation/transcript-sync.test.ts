@@ -46,6 +46,32 @@ function fixture() {
   };
 }
 
+test("the default interpreter is Python 3.15 from the lookup, never the system python3", (t) => {
+  const f = fixture();
+  t.after(f.cleanup);
+  const bin = mkdtempSync(join(tmpdir(), "loop-pi-py-"));
+  t.after(() => rmSync(bin, { recursive: true, force: true }));
+  for (const name of ["python3.15", "python3"]) writeFileSync(join(bin, name), "#!/bin/sh\n", { mode: 0o755 });
+  const saved = process.env.PATH;
+  process.env.PATH = bin;
+  t.after(() => {
+    process.env.PATH = saved;
+  });
+  const sync = createTranscriptSync({
+    agentDir: f.home,
+    lockf: null,
+    lockDir: f.home,
+    spawn: (command, args) => {
+      const child = new FakeChild();
+      f.calls.push({ command, args, child });
+      return child;
+    },
+  });
+  assert.equal(sync.trigger(true), true);
+  assert.equal(f.calls[0].command, join(bin, "python3.15"));
+  assert.equal(f.calls[0].args.includes("/usr/bin/python3"), false);
+});
+
 test("a checkpoint is throttled only after a successful upload, and the throttle is shared per home", (t) => {
   const f = fixture();
   t.after(f.cleanup);
