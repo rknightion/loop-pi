@@ -1226,9 +1226,9 @@ source sends a `loop-*` custom message type the set does not name.
   top-level or `options` `label` gets `label: <lane id>` (pi-subagents 0.90.0), so the run's
   session, status row and `subagent:async-started` description carry the lane name. The task id
   never goes into the label, as it never goes into the key. The label never names a worktree or
-  branch: retained launches run with `worktree: false`, and on the native path the package passes
-  `lane.key` ahead of `params.label` as the naming label (`subagent-executor.js`,
-  `async-execution.js`). Refused, shared-cwd and untouched launches, and `action: "resume"`, get no
+  branch: retained launches run with `worktree: false`, and on the native path the package names
+  worktrees from `params.lane?.key ?? params.workflowKey` (`subagent-executor.js`,
+  `async-execution.js`); the label is only a fallback after `lane.key` (`subagent-runner.js`). Refused, shared-cwd and untouched launches, and `action: "resume"`, get no
   label. Optional `nativeNames [{key,lane,task,runs}]` in
   `lane-worktrees-state` records native launch and tool-resume run correlations when results provide
   a run id; multiple naming-identity prefix matches refuse, while package validation remains
@@ -1504,8 +1504,10 @@ transient `loop-status-program-status` capture below, set and removed in the sam
   pi-subagents 0.90.0 the native no-id listing also projects each listed lane's nested children under
   that lane (`src/runs/background/async-status.js` `attachNestedChildren`; 0.89.2 filed them under
   the wrong run id, so it never found them) as `↳ <label> [<id>] <state>`. Section (a) therefore
-  lists only nested runs whose `[<id>]` the native text does not already carry, for example when the
-  package could not resolve a lane's nested route. A nested run is still not a top-level row of the
+  lists only nested runs that have no native row of their own: a `↳` line whose text before any
+  ` | ` facts ends in `[<id>] <state>` with the run's own id and state. Ids in progress lines,
+  warnings, another row's error text, or a forged row with another state do not count. A run the package could not project, for
+  example when it could not resolve a lane's nested route, is still added. A nested run is still not a top-level row of the
   root's listing.
 - **Program status (OSC 7501).** pi 1.6.1's interactive mode reports its own state to a terminal that
   supports the Program Status Protocol (Orca among them): `working` during a run, then `done`,

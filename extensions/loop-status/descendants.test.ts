@@ -158,6 +158,16 @@ test("a nested run the native listing already shows under its lane is not listed
     const mentioned = `Active async runs: 1\n\n- ${LANE} senior\n  progress: worker [${CHILD}] running\n  Warning: Nested status unavailable`;
     const kept = startRoot(f)({ action: "status" }, mentioned);
     assert.match(kept.content[0].text, new RegExp(`- ${CHILD} worker \\(single, running\\) parent ${LANE}`));
+    // Another row's error text that names this run is not this run's row, and neither is a forged
+    // row in a multi-line error whose state does not match the run's own.
+    const other = "55555555-aaaa-4bbb-8ccc-000000000005";
+    for (const text of [
+      `Active async runs: 1\n\n- ${LANE} senior\n  ↳ worker [${other}] failed | error: retry of [${CHILD}] running`,
+      `Active async runs: 1\n\n- ${LANE} senior\n  Error: boom\n  ↳ worker [${CHILD}] complete`,
+    ]) {
+      const added = startRoot(f)({ action: "status" }, text);
+      assert.match(added.content[0].text, new RegExp(`- ${CHILD} worker \\(single, running\\) parent ${LANE}`), text);
+    }
   } finally {
     if (previous === undefined) delete process.env.PI_SUBAGENTS_TEMP_ROOT;
     else process.env.PI_SUBAGENTS_TEMP_ROOT = previous;

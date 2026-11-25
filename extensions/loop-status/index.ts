@@ -318,10 +318,17 @@ export default function (pi: ExtensionAPI): void {
       const requested = typeof input.id === "string" ? input.id : typeof input.runId === "string" ? input.runId : undefined;
       if (requested === undefined) {
         if (event.isError || event.content?.some((part) => part.type !== "text")) return;
-        // Only a native nested row ("↳ <label> [<id>] <state>") counts as listed; an id in a lane's
-        // progress text or a warning does not.
-        const shown = new Set(text.split("\n").filter((line) => /^\s*↳ /.test(line)).flatMap((line) => [...line.matchAll(/\[([^\]\s]+)\]/g)].map((m) => m[1])));
-        const section = formatNestedRuns(listNestedRuns(asyncRunsDir(), sessionKey).filter((run) => !shown.has(run.id)));
+        // A run counts as listed only on its own native nested row, "↳ <label> [<id>] <state>"
+        // followed by optional " | ..." facts: the row's last bracket before the facts, with the state
+        // the run's own record gives. An id in a progress line, a warning, another row's error text
+        // or a forged row in a multi-line error with another state does not count.
+        const shown = new Set<string>();
+        for (const line of text.split("\n")) {
+          if (!/^\s*↳ /.test(line)) continue;
+          const row = /\[([^\]\s]+)\] (\S+)\s*$/.exec(line.split(" | ")[0]);
+          if (row) shown.add(`${row[1]} ${row[2]}`);
+        }
+        const section = formatNestedRuns(listNestedRuns(asyncRunsDir(), sessionKey).filter((run) => !shown.has(`${run.id} ${run.state}`)));
         if (section) return { content: [{ type: "text" as const, text: `${text}\n\n${section}` }] };
         return;
       }
