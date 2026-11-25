@@ -57,7 +57,7 @@ public statement of those contracts.
 - Home dir: `getAgentDir()` exported by `@earendil-works/pi-coding-agent` (honours
   `PI_CODING_AGENT_DIR`). Guard hook scripts: `<agentDir>/scripts/backlog-guard.py` and
   `<agentDir>/scripts/staging-guard.py`, each run only when present or listed in settings
-  `loopPi.requiredHookScripts` (a required one that is absent is an adapter failure), run as `python3 <script>` with a Codex-format JSON payload on
+  `loopPi.requiredHookScripts` (a required one that is absent is an adapter failure), run on Python 3.15 (`python-start/core.ts`: `python3.15` on PATH, Homebrew's, then a 3.15 uv resolves; with none the call is an adapter failure) with a Codex-format JSON payload on
   stdin (`{"hookEventName":"PreToolUse","toolName":...,"toolInput":{...},"cwd":...}`); a deny is
   exit 0 with `hookSpecificOutput.permissionDecision == "deny"` on stdout.
 ### Child runtime
@@ -876,7 +876,7 @@ before any `await`. A missing reply means the provider extension is not loaded; 
   follow-up chain is used up. A subdirectory, because the watchdog moves any top-level incident
   whose class is not the continuation class to `bad/`.
 - Transcript sync trigger (loop-continuation, `transcript-sync.ts`), aligned with the Claude/Codex
-  hooks: spawn detached `python3 <agentDir>/scripts/sync-transcripts.py --home <agentDir>` under
+  hooks: spawn detached Python 3.15 (same lookup; none found means no upload) on `<agentDir>/scripts/sync-transcripts.py --home <agentDir>` under
   `/usr/bin/lockf -k` on the same `$TMPDIR/.agent-transcript-sync-<home>.flock` those hooks use, when
   the script exists. Checkpoints on `input`, `tool_execution_end` and a 60-second session ticker run
   at most once per 5 minutes after the last successful upload of either kind

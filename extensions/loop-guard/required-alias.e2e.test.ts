@@ -19,7 +19,7 @@ test("a required lane guard named through a symlink alias still refuses the chil
   const agentDir = freshDir("loop-guard-alias-agentdir-");
   const cwd = freshDir("loop-guard-alias-cwd-");
   const fixture = freshDir("loop-guard-alias-extension-");
-  for (const dir of ["loop-guard", "request-ceiling", "loop-state", "loop-continuation", "call-timing"]) {
+  for (const dir of ["loop-guard", "request-ceiling", "loop-state", "loop-continuation", "call-timing", "python-start"]) {
     cpSync(join(dirname(ROOT_EXTENSION), "..", dir), join(fixture, "extensions", dir), { recursive: true });
   }
   symlinkSync(dirname(PI_SUBAGENTS_PACKAGE_DIR), join(fixture, "node_modules"), "dir");

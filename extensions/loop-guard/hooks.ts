@@ -13,6 +13,7 @@
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { python315 } from "../python-start/core.ts";
 
 /** The guard scripts loop-guard knows how to run, in the order it runs them. */
 export const KNOWN_HOOK_SCRIPTS = ["backlog-guard.py", "staging-guard.py"] as const;
@@ -81,8 +82,13 @@ export function runHookScript(options: RunHookOptions): Promise<HookScriptResult
 
   return new Promise((resolve) => {
     let child: ReturnType<typeof spawn>;
+    const python = python315();
+    if (!python) {
+      resolve({ denied: false, adapterFailure: "Python 3.15 not found: install it (brew install python@3.15) so the guard scripts can run" });
+      return;
+    }
     try {
-      child = spawn("python3", [options.script], {
+      child = spawn(python, [options.script], {
         cwd: options.cwd,
         env: { ...process.env, PWD: options.cwd, CODEX_PROJECT_DIR: options.cwd },
         stdio: ["pipe", "pipe", "pipe"],

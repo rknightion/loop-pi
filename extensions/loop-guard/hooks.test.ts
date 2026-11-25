@@ -26,6 +26,25 @@ async function setupHooks(): Promise<{ backlogGuard: string; stagingGuard: strin
   return { backlogGuard: join(hooksDir, "backlog-guard.py"), stagingGuard: join(hooksDir, "staging-guard.py"), cwd: dir };
 }
 
+test("runHookScript starts the script on python3.15 from PATH, not the system python3", async () => {
+  const { backlogGuard, cwd } = await setupHooks();
+  const bin = join(cwd, "stub-bin");
+  await mkdir(bin);
+  const deny = '{"hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"from 3.15"}}';
+  await writeFile(join(bin, "python3.15"), `#!/bin/sh\necho '${deny}'\n`, { mode: 0o755 });
+  await writeFile(join(bin, "python3"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  const saved = process.env.PATH;
+  process.env.PATH = bin;
+  try {
+    const result = await runHookScript({ script: backlogGuard, toolName: "bash", toolInput: { command: "ls" }, cwd });
+    assert.equal(result.denied, true);
+    assert.equal(result.reason, "from 3.15");
+  } finally {
+    process.env.PATH = saved;
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test("runHookScript: backlog-guard.py denies a bare --notes flag", async () => {
   const { backlogGuard, cwd } = await setupHooks();
   try {
