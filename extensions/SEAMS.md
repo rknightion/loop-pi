@@ -397,7 +397,10 @@ child extension (including children declaring `extensions: []`).
   `openai_input_transformations` diagnostic (pi-ai 1.6.0) on the assistant message, one count per
   removed reasoning item (`type: "reasoning"`, `action: "removed"`), keyed by its reason (e.g.
   `prefix_mismatch`; a missing or non-string reason is `unknown`, a reason longer than 64 characters is
-  cut to 64, and past 16 distinct reasons the rest count under `other`). The count is per request: pi
+  cut to 64, and past 16 distinct reasons the rest count under `other`). Keys merge: a server reason that is literally
+  `other` or `unknown` shares a key with the overflow or missing-reason bucket, and reasons that share
+  their first 64 characters share one key; the total `count` stays right. A reason first seen before the
+  16-key cap keeps counting under its own key when it reappears after the cap. The count is per request: pi
   reports a removal again on every later request that replays the item, so summing it across a
   session's calls counts one dropped item once per replay. Item ids and content are never copied. The key is absent when no such diagnostic was
   observed. Readers treat absent as none observed or an older build, never as zero, and ignore it
