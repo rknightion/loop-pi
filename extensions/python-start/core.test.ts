@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { findPython315 } from "./core.ts";
+import { cachedResolver, findPython315 } from "./core.ts";
 
 const none = () => null;
 const only = (...files: string[]) => (file: string) => files.includes(file);
@@ -30,4 +30,28 @@ test("a 3.15 that uv resolves is used last, and a virtual environment's is refus
 test("the system python3 is never a fallback", () => {
   const found = findPython315({ path: "/usr/bin", homebrew: [], uvFind: none, executable: only("/usr/bin/python3") });
   assert.equal(found, null);
+});
+
+test("a cached resolver asks once and keeps the answer, a miss included", () => {
+  let asked = 0;
+  const hit = cachedResolver(() => (asked++, "/p/python3.15"));
+  assert.equal(hit(), "/p/python3.15");
+  assert.equal(hit(), "/p/python3.15");
+  assert.equal(asked, 1);
+  let missed = 0;
+  const miss = cachedResolver(() => (missed++, null));
+  assert.equal(miss(), null);
+  assert.equal(miss(), null);
+  assert.equal(missed, 1);
+});
+
+test("a cached resolver looks again when its key changes", () => {
+  let key = "a";
+  let asked = 0;
+  const find = cachedResolver(() => (asked++, null), () => key);
+  find();
+  find();
+  key = "b";
+  find();
+  assert.equal(asked, 2);
 });

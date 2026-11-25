@@ -46,6 +46,34 @@ function fixture() {
   };
 }
 
+test("a suppressed checkpoint never resolves the interpreter", () => {
+  const f = fixture();
+  try {
+    let resolved = 0;
+    const sync = createTranscriptSync({
+      agentDir: f.home,
+      now: () => 10 * SYNC_INTERVAL_MS,
+      lockf: null,
+      lockDir: f.home,
+      resolvePython: () => (resolved++, "/usr/bin/python3"),
+      spawn: (command, args) => {
+        const child = new FakeChild();
+        f.calls.push({ command, args, child });
+        return child;
+      },
+    });
+    assert.equal(sync.trigger(false), true);
+    assert.equal(resolved, 1);
+    assert.equal(sync.trigger(false), false); // in flight
+    assert.equal(resolved, 1);
+    f.calls[0].child.finish(0);
+    assert.equal(sync.trigger(false), false); // throttled
+    assert.equal(resolved, 1);
+  } finally {
+    f.cleanup();
+  }
+});
+
 test("the default interpreter is Python 3.15 from the lookup, never the system python3", (t) => {
   const f = fixture();
   t.after(f.cleanup);

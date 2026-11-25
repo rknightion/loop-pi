@@ -71,8 +71,21 @@ export function findPython315(deps: FindPythonDeps = {}): string | null {
   return null;
 }
 
-/** findPython315 for the running process. Not cached: the first two steps are stat calls, and uv is
- *  only asked when neither finds one. */
-export function python315(): string | null {
-  return findPython315();
+/** A resolver that asks `find` once per `key` and reuses the answer, a miss included, so a host where
+ *  only uv has a 3.15 pays for its synchronous subprocess once per process, not on every hook or
+ *  checkpoint. The key defaults to PATH, so a changed PATH looks again. */
+export function cachedResolver(find: () => string | null, key: () => string = () => process.env.PATH ?? ""): () => string | null {
+  let seen: string | undefined;
+  let value: string | null = null;
+  return () => {
+    const now = key();
+    if (seen !== now) {
+      value = find();
+      seen = now;
+    }
+    return value;
+  };
 }
+
+/** findPython315 for the running process, resolved on first use. */
+export const python315 = cachedResolver(() => findPython315());

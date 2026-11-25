@@ -37,6 +37,8 @@ export interface SyncDeps {
   spawn?: (command: string, args: string[]) => SyncChild;
   lockf?: string | null;
   python?: string;
+  /** Looks the interpreter up when `python` is not given; only asked once an upload is due. */
+  resolvePython?: () => string | null;
   lockDir?: string;
 }
 
@@ -83,10 +85,11 @@ export function createTranscriptSync(deps: SyncDeps) {
     try {
       const script = join(deps.agentDir, "scripts", "sync-transcripts.py");
       if (!existsSync(script)) return false;
-      // Python 3.15 only: with none found there is nothing to start, and a missed upload is ignored.
-      const python = deps.python ?? python315();
-      if (!python) return false;
+      // Suppressed checkpoints return before the interpreter lookup, which can run a uv subprocess.
       if (!lifecycle && (inFlight > 0 || now() - readLastSuccessMs(deps.agentDir) < SYNC_INTERVAL_MS)) return false;
+      // Python 3.15 only: with none found there is nothing to start, and a missed upload is ignored.
+      const python = deps.python ?? (deps.resolvePython ?? python315)();
+      if (!python) return false;
       const timeout = String(lifecycle ? LIFECYCLE_TIMEOUT_S : CHECKPOINT_TIMEOUT_S);
       const sync = [python, "-c", BOUNDED, timeout, python, script, "--home", deps.agentDir];
       const [command, ...args] = lockf
