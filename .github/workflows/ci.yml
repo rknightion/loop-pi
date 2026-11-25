@@ -109,6 +109,9 @@ jobs:
           NODE
           npm audit signatures
 
+      - name: Audit the shipped dependency tree
+        run: just audit
+
       # The leak leg of `just check` runs in the leak-scan job, which holds the term list; a CI
       # checkout has no installed hooks to verify.
       - name: just fmt-check lint test

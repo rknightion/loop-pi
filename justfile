@@ -39,6 +39,12 @@ test-python:
     python3 -m unittest {{ python_tests }}
     python3 -m unittest bin.test_loop_smoke
 
+# Audit what ships: the installer builds with --omit=dev --omit=peer, so audit exactly that tree
+# (a full audit also walks agento11y-pi's retired @mariozechner peers, which no build contains)
+[group('check')]
+audit:
+    npm audit --omit=dev --omit=peer
+
 # The pre-commit gate: formatting, types, tests and the leak scan
 [group('check')]
 check: fmt-check lint test leak

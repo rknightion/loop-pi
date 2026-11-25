@@ -20,6 +20,7 @@
   "intercomBridge": { "mode": "off" },
   "worktreeBaseDir": "{{HOME}}/worktrees",
   "artifactDir": "session",
+  "artifactConfig": { "cleanupDays": 30 },
   "authorityPolicy": {
     "discardWorktree": "forbid",
     "destructiveCleanup": "forbid",

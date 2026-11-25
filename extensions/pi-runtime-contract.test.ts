@@ -96,10 +96,13 @@ test("bash: a shell that exits 0 while a quiet descendant holds the output pipes
 test("bash: a shell that exits 0 while a descendant keeps writing times out and reports the shell exit code", { timeout: 90_000 }, async () => {
   // The writer never ends on its own; the deadline's process-group kill stops it. pi finishes 100 ms
   // after the shell exits unless output keeps arriving, so the writer must already be writing when the
-  // shell exits: one process writes every 5 ms (no fork per tick), and the shell waits 0.5 s for it to
-  // start before exiting. Without that wait, process startup alone can outlast the grace on a loaded runner.
-  const writer = `${JSON.stringify(process.execPath)} -e 'setInterval(() => console.log("tick"), 5)'`;
-  const { isError, text } = await runBash(`echo shell_done; ${writer} & sleep 0.5; exit 0`, 2);
+  // shell exits: one process writes every 5 ms (no fork per tick). It creates a marker file on its
+  // first tick and the shell waits (bounded) for that marker before exiting, so the shell never exits
+  // ahead of a slow writer start, however loaded the runner.
+  const marker = join(freshDir("pi-contract-marker-"), "writing");
+  const writer = `${JSON.stringify(process.execPath)} -e 'let first = true; setInterval(() => { if (first) { require("node:fs").writeFileSync(${JSON.stringify(marker)}, "1"); first = false; } console.log("tick"); }, 5)'`;
+  const waitForWriter = `i=0; while [ ! -e ${JSON.stringify(marker)} ] && [ $i -lt 1000 ]; do i=$((i+1)); sleep 0.005; done`;
+  const { isError, text } = await runBash(`echo shell_done; ${writer} & ${waitForWriter}; exit 0`, 2);
   assert.equal(isError, true, `a descendant that keeps writing past the deadline is still a timeout: ${text}`);
   assert.match(text, /shell_done/);
   assert.match(text, /tick/, "the writer was writing before the deadline");

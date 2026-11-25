@@ -50,6 +50,19 @@ test("authentication, quota, policy, context-length and configuration stop the r
   }
 });
 
+test("a proxy tunnel refusal in a connection error's cause stops the run as authentication, while a refused connection resumes", () => {
+  // A 403 from the proxy's CONNECT is a standing refusal the owner must fix; resuming would only repeat it.
+  for (const errorMessage of ["Connection error. (cause: Proxy response (403) !== 200 when HTTP Tunneling)",
+    "Connection error. (cause: tunneling socket could not be established, statusCode=403)"]) {
+    assert.deepEqual(classifyRootStop({ stopReason: "error", errorMessage } as never, none),
+      { action: "stop", cause: "authentication", detail: "error" }, errorMessage);
+  }
+  for (const errorMessage of ["Connection error.", "fetch failed (cause: connect ECONNREFUSED 127.0.0.1:9)"]) {
+    const decision = classifyRootStop({ stopReason: "error", errorMessage } as never, none);
+    assert.deepEqual([decision.action, (decision as { cause?: string }).cause], ["resume", "provider-error"], errorMessage);
+  }
+});
+
 test("provider errors, stalled requests and request-ceiling aborts resume", () => {
   const cases: [string, unknown, SettleEvidence][] = [
     ["provider-error", managed("attempt-limit", "stream_incomplete", 503), none],
