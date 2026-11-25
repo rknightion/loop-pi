@@ -6,7 +6,8 @@ import { installRecovery } from "./recovery.ts";
 // structured error: "Connection closed." (#12064) and bare Node socket codes (#12128).
 // On the opted route an unstarted, portable request with such a failure is now a native
 // retry from completed history instead of an unclassified-failure stop; partial output
-// still stops because it cannot be replayed.
+// still stops because it cannot be replayed. pi-ai 1.6.1 adds Cloudflare's HTTP 525 (#12206),
+// which reaches the extension as error text only.
 function harness(id: string) {
   const handlers = new Map<string, any>();
   const model = { provider: "fixture", id: "fixture", api: "openai-responses", baseUrl: "http://localhost", contextWindow: 100000 };
@@ -24,7 +25,7 @@ function harness(id: string) {
   return { fire };
 }
 
-const WORDINGS = ["Connection closed.", "read ECONNRESET", "write EPIPE", "connect ETIMEDOUT", "read ECONNABORTED", "connect ECONNREFUSED", "recv failure: Connection reset by peer"];
+const WORDINGS = ["Connection closed.", "read ECONNRESET", "write EPIPE", "connect ETIMEDOUT", "read ECONNABORTED", "connect ECONNREFUSED", "recv failure: Connection reset by peer", "OpenAI API error (525): <html>SSL handshake failed</html>"];
 
 for (const errorMessage of WORDINGS) {
   test(`a transport failure "${errorMessage}" before any output retries the portable request`, (t) => {
