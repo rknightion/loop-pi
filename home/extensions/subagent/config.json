@@ -12,7 +12,7 @@
   "disabledFeatures": [
     "agent-management", "watchdog", "panes", "missions", "lane-management", "spawn-budget-grants",
     "preflight", "gates", "usage-budgets", "tool-budgets", "control-overrides",
-    "external-machines"
+    "external-machines", "session-sharing"
   ],
   "control": { "activeNoticeAfterMs": 3600000, "failedToolAttemptsBeforeAttention": 1000000 },
   "scheduledRuns": { "enabled": false },

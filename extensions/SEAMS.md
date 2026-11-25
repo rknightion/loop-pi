@@ -38,7 +38,9 @@ public statement of those contracts.
   `subagents_enable` are excluded at the launcher. Unused pi-subagents feature groups are in
   `disabledFeatures`; `lane-metadata` stays enabled because lane-worktrees binds `lane.key` on governed
   native launches, and `workflow-scripts` stays enabled and guarded, because disabling it swaps
-  `workflow` for unguarded `tasks` / `chain`.
+  `workflow` for unguarded `tasks` / `chain`. `session-sharing` (pi-subagents 0.90.0) is disabled, so the
+  `subagent` tool carries no `share` and no run can upload a session to a GitHub Gist; a resume whose
+  saved launch had `share` is refused before it starts (`subagent-session-sharing.test.ts`).
 - **codemode (pi 1.6.1), root only:** the built-in `codemode` extension loads and
   `defaultTools: ["+codemode"]` activates it at session start, so the tool list never changes
   mid-conversation. A lane's agent-file `tools:` reaches its child as a plain `--tools` allowlist,
