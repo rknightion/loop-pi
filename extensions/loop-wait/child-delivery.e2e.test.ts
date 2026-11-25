@@ -85,6 +85,15 @@ function setupHome(): { agentDir: string; subagentTemp: string; cwd: string } {
   return { agentDir, subagentTemp, cwd };
 }
 
+// Readiness barrier: the scout's result row is really in its session file. This is production of the
+// result, not its delivery: the senior's own session only holds the seed after delivery.
+const scoutWrote = (sessions: string, seed = SEED) => ({ dir: sessions, contains: `"text":"${seed}"` });
+
+// The same barrier for a shell command: the bash tool returns only once the scout's result row is
+// written, bounded at 60 seconds. The bracket keeps the pattern from matching this command's own row.
+const waitForScoutResult = (sessions: string) =>
+  `for i in $(seq 600); do grep -rqE --include=*.jsonl '"text":"CHILD_SEED_424[2]"' '${sessions}' && break; sleep 0.1; done`;
+
 const LAUNCH_SCOUT = { match: "SENIOR_GO", once: true, toolCalls: [{ name: "subagent", args: { agent: "scout", task: "SCOUT_GO report the seed" } }] };
 const FINAL_REPORT = 'FINAL_REPORT\n```lane-return\n{"v":3,"lane":"L1","status":"complete","exit":0}\n```';
 
@@ -92,9 +101,9 @@ const SHAPES = [
   {
     name: "the child finishes before the senior ends its turn",
     order: "child-first",
-    senior: [
+    senior: (sessions: string) => [
       { match: `loop-pi: child run .*${SEED}`, text: `SENIOR_GOT ${SEED}` },
-      { match: "Async: scout", delayMs: 4000, text: "WAITING_FOR_SCOUT" },
+      { match: "Async: scout", waitForSession: scoutWrote(sessions), text: "WAITING_FOR_SCOUT" },
       LAUNCH_SCOUT,
     ],
     scoutMs: 0,
@@ -102,9 +111,22 @@ const SHAPES = [
     last: `SENIOR_GOT ${SEED}`,
   },
   {
+    // The scout is slow to start under load: the senior must still wait for its written result.
+    name: "the child finishes before the senior ends its turn, however late the scout is",
+    order: "child-first",
+    senior: (sessions: string) => [
+      { match: `loop-pi: child run .*${SEED}`, text: `SENIOR_GOT ${SEED}` },
+      { match: "Async: scout", waitForSession: scoutWrote(sessions), text: "WAITING_FOR_SCOUT" },
+      LAUNCH_SCOUT,
+    ],
+    scoutMs: 6000,
+    marker: "WAITING_FOR_SCOUT",
+    last: `SENIOR_GOT ${SEED}`,
+  },
+  {
     name: "the child finishes while the senior's end-of-run drain holds it",
     order: "senior-first",
-    senior: [
+    senior: () => [
       { match: `loop-pi: child run .*${SEED}`, text: `SENIOR_GOT ${SEED}` },
       { match: "Async: scout", text: "WAITING_FOR_SCOUT" },
       LAUNCH_SCOUT,
@@ -122,7 +144,7 @@ const SHAPES = [
     // acceptance-report blocks out of its interim waiting turns).
     name: "the senior's waiting reply carries an acceptance-report fence, which locks its steer queue",
     order: "senior-first",
-    senior: [
+    senior: () => [
       { match: `loop-pi: child run .*${SEED}`, text: `SENIOR_GOT ${SEED}` },
       { match: "Async: scout", text: "WAITING_FOR_SCOUT\n```acceptance-report\nnot json\n```" },
       LAUNCH_SCOUT,
@@ -137,9 +159,9 @@ const SHAPES = [
     // recorded but the run is not continued, so the root still receives that return.
     name: "the senior already wrote its return when the child result arrives",
     order: "child-first",
-    senior: [
+    senior: (sessions: string) => [
       { match: `loop-pi: child run .*${SEED}`, text: "AFTER_RETURN_REPLY" },
-      { match: "Async: scout", toolCalls: [{ name: "bash", args: { command: "echo BASH_DONE; sleep 6" } }] },
+      { match: "Async: scout", toolCalls: [{ name: "bash", args: { command: `echo BASH_DONE; ${waitForScoutResult(sessions)}` } }] },
       { match: "BASH_DONE", text: FINAL_REPORT },
       LAUNCH_SCOUT,
     ],
@@ -152,10 +174,10 @@ const SHAPES = [
     // arrives in the same run before the senior returns.
     name: "the senior delegates twice in sequence and returns after the second result",
     order: "child-first",
-    senior: [
+    senior: (sessions: string) => [
       { match: `loop-pi: child run .*${SEED2}`, text: `SENIOR_GOT_BOTH ${SEED} ${SEED2}` },
       { match: `loop-pi: child run .*${SEED}`, toolCalls: [{ name: "subagent", args: { agent: "scout", task: "SCOUT2_GO report the second seed" } }] },
-      { match: "Async: scout", delayMs: 4000, text: "WAITING_FOR_SCOUT" },
+      { match: "Async: scout", waitForSession: scoutWrote(sessions), text: "WAITING_FOR_SCOUT" },
       LAUNCH_SCOUT,
     ],
     scoutMs: 0,
@@ -172,7 +194,7 @@ for (const shape of SHAPES) {
       // Root: launch the senior once, then acknowledge everything.
       { match: "LAUNCH_SENIOR", once: true, toolCalls: [{ name: "subagent", args: { agent: "senior", task: "SENIOR_GO delegate to a scout" } }] },
       { match: "Async: senior", text: "root ok" },
-      ...shape.senior,
+      ...shape.senior(join(agentDir, "sessions")),
       // Scouts: return the value only each knows.
       { match: "SCOUT2_GO", text: SEED2 },
       { match: "SCOUT_GO", delayMs: shape.scoutMs, text: SEED },
