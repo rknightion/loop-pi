@@ -23,22 +23,6 @@ one exception and stays stdlib and version-agnostic, because the git hooks run i
 scanning on a host without 3.15. The hooks prefer 3.15 and fall back to `python3`; never make them
 refuse a commit for want of 3.15. No shims or CI legs for older versions.
 
-## Cursor Cloud specific instructions
-
-The pinned [environment](.cursor/environment.json) uses [the Node wrapper](.cursor/just.sh)
-to select the version declared by CI. It runs `just setup` to install the locked
-npm dependencies and Git hooks.
-The installer and live pi homes are separate from this development setup.
-
-- The pinned image ships Python 3.12 and its egress allowlist reaches only the Node and npm hosts, so
-  it cannot fetch Python 3.15: the Python tests (`just test`, `just check`) need an image that has it.
-- Run `.cursor/just.sh fmt-check lint </dev/null` for a fast check.
-- Run `.cursor/just.sh fmt-check lint test </dev/null` for the
-  source checks. The pi tests use the scripted provider.
-- The full `.cursor/just.sh check </dev/null` gate also needs
-  full Git history and an approved leak-term source. Use the hosted leak scan
-  or a maintainer environment with that source available.
-
 ## Task tracking
 
 This repository has no task board and does not use GitHub Issues for planned work: the maintainer

@@ -9,19 +9,19 @@ public statement of those contracts.
 
 ## Runtime facts
 
-- pi 1.6.0 loads `.ts` extensions through jiti. An entry file default-exports
+- pi 1.6.1 loads `.ts` extensions through jiti. An entry file default-exports
   `(pi: ExtensionAPI) => void | Promise<void>`. Type imports come from
   `@earendil-works/pi-coding-agent`; `@earendil-works/pi-ai` and `typebox` are pi's dependencies,
-  not ours, and resolve through pi's loader at runtime. pi 1.6.0 publishes no
+  not ours, and resolve through pi's loader at runtime. pi 1.6.1 publishes no
   `npm-shrinkwrap.json`, so npm hoists them to the top-level `node_modules`; never rely on either
   layout (`tsconfig.json` lists both, and the loop-wait test hook resolves from pi's directory).
-- **Project trust (pi-subagents 0.89.2):** children follow the parent session's project trust, so
+- **Project trust (pi-subagents 0.90.0):** children follow the parent session's project trust, so
   with `defaultProjectTrust: "never"` a child no longer loads the target repository's `.pi/`
   settings, system prompt files, skills or extensions. Agent discovery is trust-gated too
   (`src/agents/agents.js` `buildAgentDiscoverySources`): an untrusted project contributes no
   `.agents` / `.pi/agents` or chain directories and no project agent settings, so repository agents
   no longer outrank the home's. `loop-pi-preflight` stays as the check for a trusted project.
-- **Model catalogue (pi 1.6.0):** pi bundles a model catalogue and overlays a remote one cached in
+- **Model catalogue (pi 1.6.1):** pi bundles a model catalogue and overlays a remote one cached in
   `<agent dir>/models-store.json`. Only interactive mode refreshes that cache in the background;
   print and RPC sessions, so child lanes, use the saved list, and `modelOverrides` for an id pi
   cannot resolve are dropped. `loop-pi-preflight` therefore runs the build's own
@@ -29,7 +29,7 @@ public statement of those contracts.
   that home when an id is missing, and refuses the launch if it is still missing. The launcher
   passes `--node` and `--pi-cli`; without them the check is skipped, so an older launcher still
   works against a newer build. The installer writes the launcher and the preflight together.
-- **Tool list (pi 1.6.0 / pi-subagents 0.89.2):** `toolActivation` is `"eager"`; never `"auto"`.
+- **Tool list (pi 1.6.1 / pi-subagents 0.90.0):** `toolActivation` is `"eager"`; never `"auto"`.
   pi sends an `additional_tools` item for a mid-conversation tool addition when a model's
   `compat.supportsAdditionalTools` is true. The overlay sets that and `supportsToolSearch` false for
   every family model, so a changed tool list is resent whole. A proxy route never acknowledged the
@@ -38,8 +38,15 @@ public statement of those contracts.
   `subagents_enable` are excluded at the launcher. Unused pi-subagents feature groups are in
   `disabledFeatures`; `lane-metadata` stays enabled because lane-worktrees binds `lane.key` on governed
   native launches, and `workflow-scripts` stays enabled and guarded, because disabling it swaps
-  `workflow` for unguarded `tasks` / `chain`.
-- **codemode (pi 1.6.0), root only:** the built-in `codemode` extension loads and
+  `workflow` for unguarded `tasks` / `chain`. `session-sharing` (pi-subagents 0.90.0) is disabled, so the
+  `subagent` tool carries no `share` and no run can upload a session to a GitHub Gist; a resume whose
+  saved launch had `share` is refused before it starts (package behaviour, pi-subagents 0.90.0
+  CHANGELOG; `subagent-session-sharing.test.ts` pins the fresh-launch refusal). Releases of pi-subagents
+  before 0.90.0 reject the name: `disabledFeatures` is fail-closed there, so a root or child still
+  running such a build throws when it reads the new home config (extension load, child start and
+  the preflight's `loadConfig`). Install this build into a home only once no root or child on an
+  older pi-subagents runs there, or restart those roots.
+- **codemode (pi 1.6.1), root only:** the built-in `codemode` extension loads and
   `defaultTools: ["+codemode"]` activates it at session start, so the tool list never changes
   mid-conversation. A lane's agent-file `tools:` reaches its child as a plain `--tools` allowlist,
   which overrides `defaultTools`, so no lane registers it. A script's `tools.<name>()` calls run
@@ -73,7 +80,7 @@ public statement of those contracts.
   `pi-subagents/required-child-extensions`; returns `{ dispose() }`; one registration per parent
   session; call at `session_start` with `ctx.sessionManager.getSessionId()`, dispose at
   `session_shutdown`. The e2e child-block test (`loop-guard/e2e.test.ts`) proves an import from this extension shares
-  the module instance pi-subagents itself uses. pi-subagents 0.89.2 fails the child launch closed
+  the module instance pi-subagents itself uses. pi-subagents 0.90.0 fails the child launch closed
   when a required child extension fails to load or throws during startup ("Required child extension
   failed during startup"), so a lane-guard startup error aborts the lane rather than running it unguarded.
   From 0.82.0 a required extension is matched by file identity (device and inode), so a symlink or
@@ -89,7 +96,7 @@ public statement of those contracts.
   shutdown disposes it. A failed ceiling registration terminates the root at startup: native
   extension errors are swallowed, so logging or a model-tool guard alone cannot close delegation.
   Required child-extension registrations are refreshed on session start and disposed on shutdown.
-- pi-subagents 0.89.2 writes no `run-history.jsonl` (0.77.0 appended one row per async child). The
+- pi-subagents 0.90.0 writes no `run-history.jsonl` (0.77.0 appended one row per async child). The
   run record is each child's `status.json` and `process-terminal.json` under its async dir. From
   0.89.2 the stale-run reconciler may add `process-terminal-unobserved.json` (state `unknown`, reason
   `observer-unavailable`) for a run whose status is already terminal, whose recorded runner pid is dead
@@ -101,7 +108,7 @@ public statement of those contracts.
   `loop-wait/lane-children.ts`, and that no proof is written for a running lane or a live recorded pid.
   Retention prunes resumable run directories after 90 days and other eligible runs after 30 days;
   `lane-patches` is the durable patch record outside that prunable tree.
-- **Child settle (pi-subagents 0.89.2):** after a child's final `agent_end` with a clean stop, the
+- **Child settle (pi-subagents 0.90.0):** after a child's final `agent_end` with a clean stop, the
   runner waits 1 s (longer while a queued message or compaction is pending), then ends the child and
   force-settles within 3 s, and bounds `session_shutdown` handlers at 5 s
   (`src/runs/background/run-child-session.js`, `src/runs/shared/child-session.js`). The result is
@@ -114,19 +121,19 @@ public statement of those contracts.
   so a senior's child results still arrive after the lock; the root's completion notice, though, is
   the latest fence-bearing reply (`getFinalOutput`), which is why interim waiting turns carry no
   `acceptance-report` block. `steer-recovery.e2e.test.ts` and `loop-wait/child-delivery.e2e.test.ts` pin both.
-- **Bash timeout with a descendant on the pipes (pi 1.6.0):** a shell that exits while a quiet
+- **Bash timeout with a descendant on the pipes (pi 1.6.1):** a shell that exits while a quiet
   background process holds stdout/stderr returns its own exit code after pi's 100 ms idle grace, with no
   timeout. Only a descendant that keeps writing holds the call to its deadline: that is a timeout, and
   the message now also reports the shell's exit code (`core/tools/bash.js`); the call is still an error.
   `pi-runtime-contract.test.ts` pins both.
-- **Custom-message runs (pi 1.6.0):** `before_agent_start` also fires for runs started by
+- **Custom-message runs (pi 1.6.1):** `before_agent_start` also fires for runs started by
   `pi.sendMessage(..., { triggerTurn: true })` (loop-wait wakes, request-ceiling incidents, recovery
   and continuation nudges). The event is a union on `messageType`: `"user"` carries `prompt`,
   `"custom"` carries `message` and no prompt. A handler that reads the brief must skip `"custom"`
   (`loop-guard/lane.ts`). Such runs now pass through pi's full run preparation (system-prompt
   rebuild, `nextTurn` flush, compaction check), and `ctx.isIdle()` is false from the moment a run
   starts, including during `before_agent_start`; a second trigger in that window queues into the run.
-- **Mutating-tool failure guard (pi-subagents 0.89.2):** child tool failures are determined by
+- **Mutating-tool failure guard (pi-subagents 0.90.0):** child tool failures are determined by
   the result's `isError === true`, so successful output containing "failed" or "error" no longer
   counts as a failure. `home/extensions/subagent/config.json` retains its prior 1,000,000
   `control.failedToolAttemptsBeforeAttention` threshold; restoring finite attention is a separate
@@ -141,10 +148,10 @@ public statement of those contracts.
 - **No output cap on Sign in with ChatGPT (pi-ai 1.6.0):** pi omits `max_output_tokens`,
   `temperature` and the prompt-cache retention fields for a ChatGPT sign-in token
   (`omitUnsupportedFields`), so a model `maxTokens` override bounds nothing on that route; the
-  request ceiling's wall clock is the only bound on one response. pi-subagents 0.89.2 fails a child
+  request ceiling's wall clock is the only bound on one response. pi-subagents 0.90.0 fails a child
   whose final reply stops on `length` without a valid `structured_output` ("Response was truncated"),
   keeping the partial reply; request-ceiling still turns an empty `length` stop into an error first.
-- **Declaration pinning (pi-subagents 0.89.2):** `pinToolDeclarations` defaults to true, so a resumed
+- **Declaration pinning (pi-subagents 0.90.0):** `pinToolDeclarations` defaults to true, so a resumed
   root keeps the `subagent` tool definition it recorded. 0.78.0 also declares a `contact_supervisor`
   stub at the root whenever `subagent` is registered (`extension/index.js`
   `registerPinnedTool(pi, topLevelSupervisorTool())`); it only errors there. The launcher passes
@@ -164,7 +171,7 @@ public statement of those contracts.
   nothing. Lane `subagent` calls that supply any `extensionBindings` are refused before launch. This
   is an honest-mistake fence, not an OS security boundary. Installed homes adopt it only after a
   lock bump.
-- **Non-push launcher (pi-subagents 0.89.2):** every shipped agent names `launcher: nopush`. The user subagent config maps `runnerLaunchers.nopush`
+- **Non-push launcher (pi-subagents 0.90.0):** every shipped agent names `launcher: nopush`. The user subagent config maps `runnerLaunchers.nopush`
   to `<agentDir>/bin/loop-pi-nopush`, managed by the installer. The wrapper sets Git environment
   `pushInsteadOf` rewrites for HTTPS, HTTP, SSH, `git@` and `git://` to an unknown helper scheme,
   disables terminal credential prompts, then execs the background runner's argv. Fetch and local
@@ -177,7 +184,7 @@ public statement of those contracts.
   one background runner must use the same launcher or none. **The name `nopush` is frozen:**
   native resume uses the recorded launcher name (including recorded absence), not the current agent
   file; removing the name refuses resumes, and runs launched before adoption remain unwrapped.
-- **Launcher pin (pi-subagents 0.89.2 `requireLauncher`):** when the root's session starts,
+- **Launcher pin (pi-subagents 0.90.0 `requireLauncher`):** when the root's session starts,
   loop-guard pins each roster agent to the digest pi-subagents' own preflight
   (`resolveSubagentLaunchContract`, `contract.agent.definitionDigest`) computes for it; the
   definition must be a file under the home's `agents/` directory (`launcher-pin.ts`). Every root
@@ -199,12 +206,12 @@ public statement of those contracts.
   resumed lane runs under `nopush` and is refused if the definition changed since.
   `launcher-pin.e2e.test.ts` proves each case on the pinned runtime. Nested lane launches are not
   pinned; their own agent's `launcher` still applies.
-- **Workflow child starts (`subagent_launch`, pi-subagents 0.89.2):** the package offers each
+- **Workflow child starts (`subagent_launch`, pi-subagents 0.90.0):** the package offers each
   workflow child start to `tool_call` handlers as a nested `subagent_launch` call; its only callers
   are the scripted and foreground workflow child launches. Loop-pi runs no workflows, so both the
   root and the lane guard refuse the tool outright. Starts with no tool call behind them (schedule
   ticks, auto-resume, RPC) are not offered; `scheduledRuns` and `autoResume` stay off.
-- **Lane boot id (pi-subagents 0.89.2):** pi-subagents records a boot id with a run's pid so a pid
+- **Lane boot id (pi-subagents 0.90.0):** pi-subagents records a boot id with a run's pid so a pid
   from before a reboot reads as dead (`runs/background/stale-run-reconciler.js`
   `checkRecordedPidLiveness`), but omits it for launcher runs (`async-execution.js:474`), since a
   broker may start the runner under another kernel. `loop-pi-nopush` execs on the same machine, so
@@ -216,11 +223,11 @@ public statement of those contracts.
   leaves the config as it was and removes the step's temporary file; that is the upstream
   behaviour. A pi binary host passes the config in `PI_SUBAGENT_RUNNER_CONFIG` and execs the pi
   binary as `$1`, so the wrapper leaves that form alone: never run `"$1" -e` against it.
-- **Workflow auto-resume (pi-subagents 0.89.2):** the home sets `autoResume: false`. 0.82.0
+- **Workflow auto-resume (pi-subagents 0.90.0):** the home sets `autoResume: false`. 0.82.0
   relaunches an interrupted top-level workflow on session reopen through the executor, outside the
   model `subagent` call loop-guard checks (`src/extension/index.js:964`). loop-guard refuses
   workflows anyway; the setting keeps a stray one from relaunching unguarded.
-- **Results delivered on reopen (pi-subagents 0.89.2):** a background run that finishes while its
+- **Results delivered on reopen (pi-subagents 0.90.0):** a background run that finishes while its
   root is dead is delivered when the root's session is reopened (`result-delivery-ownership.js`),
   appended without a turn (`index.js:983`), with the usual `subagent:async-complete` event, so
   loop-state records the lane's `return` (`loop-state/reopen-delivery-e2e.test.ts`). 0.81.0 never
@@ -249,13 +256,13 @@ or an OS sandbox. Ordinary installations without the paired flags keep their exi
 ## Senior nesting
 
 `senior` sets `maxSubagentDepth: 2` and `allowedAgents: scout, worker, reviewer`, matching the home's
-global maximum of 2; no other agent has the `subagent` tool. pi-subagents 0.89.2 counts the root at
+global maximum of 2; no other agent has the `subagent` tool. pi-subagents 0.90.0 counts the root at
 depth 0, its lane at 1 and that lane's child at 2, and intersects the parent's maximum with the
 selected agent's maximum. A senior delegates only when its brief grants a count.
 
 ### Child results in a senior lane
 
-A child runtime has no completion notifier in pi-subagents 0.89.2: `fanout-child.js` gives it the
+A child runtime has no completion notifier in pi-subagents 0.90.0: `fanout-child.js` gives it the
 `subagent` tool but no result watcher, poller or `sendMessage` path, and the package's own route,
 a blocking child `bg_wait` (`wait-tool.js:6`), is off because the home sets `waitTool: false`
 (passed explicitly to every child, `child-launch.js:177-181`). Its `agent_end` drain
@@ -321,7 +328,7 @@ telemetry code of its own and adds no configuration on top of the vendor's.
   into `process.env`, so tool subprocesses and lane tool environments inherit them, credential
   included. A non-empty inherited value wins over the file (vendor precedence), so a calling
   shell's `AGENTO11Y_*` (guards included) applies to the loop.
-- **Runtime fit (pi 1.6.0):** the bundle (`dist/index.js`) imports only Node built-ins and
+- **Runtime fit (pi 1.6.1):** the bundle (`dist/index.js`) imports only Node built-ins and
   `@grpc/grpc-js` / `@grpc/proto-loader` at run time. Its `@mariozechner/pi-*` and typebox peer
   dependencies are type-only; it names `@earendil-works/pi-coding-agent` only to read pi's
   version. Every `npm ci` passes `--omit=peer` so the old pi tree those peers name is never
@@ -380,9 +387,12 @@ arguments last, after its provider, model and thinking flags, so explicit caller
 The root launcher loads it, and loop-guard root registers it as a required
 child extension (including children declaring `extensions: []`).
 
-- pi 1.6.0 supports `after_provider_response` with response headers before stream consumption,
+- pi 1.6.1 supports `after_provider_response` with response headers before stream consumption,
   `message_update` with normalized assistant deltas, and `message_end` replacement before session
-  persistence. No provider, request payload, retry policy or upstream behavior is changed.
+  persistence. No provider, request payload, retry policy or upstream behavior is changed. From pi 1.6.1
+  the `openai` Responses route also fires `after_provider_response` for each HTTP error response and
+  each attempt pi-ai retries internally (`utils/provider-retry.js` `onErrorResponse`); 1.6.0 fired it
+  on success only. A failed HTTP turn therefore records the error response's headers.
 - `firstTokenAt` is the local `Date.now()` at the first nonempty text, thinking or tool-call delta,
   not stream start, an empty delta, or a guessed timestamp from final content. It measures extension
   delivery of normalized content, not raw HTTP bytes or a provider's token clock. A response without
@@ -431,7 +441,9 @@ Fields. Times are local `Date.now()` epoch ms at the moment the extension observ
   `providerResponses` counts `after_provider_response` events in the record (a provider-internal
   retry that reaches headers again increments it; it is an observation, not an attempt count);
   `firstResponseAt` is the first of them; `providerRequestId` is the latest response's
-  `x-request-id`, or null.
+  `x-request-id`, or null. From pi 1.6.1 an HTTP error response counts too, so a turn that failed
+  with an HTTP status has `providerResponses` of at least 1 and a set `firstResponseAt`: a
+  response was observed, not necessarily a successful one.
 - Writer and loaded policy (additive, `extensions/call-timing/writer.ts`; a reader treats an absent
   or null value as unknown, never as a default): `pidStartedAt` is the writing process's start
   (`performance.timeOrigin`, floored epoch ms), so a reader can tell the writer from a later process
@@ -511,7 +523,7 @@ numbers (counts and times); every other value prints only as its type, such as `
 ## Request ceiling
 
 `extensions/request-ceiling/` is installed by both loop-guard entries (`installRequestCeiling`), so
-the root and every lane carry it. pi 1.6.0 has no wall-clock bound on a streaming request:
+the root and every lane carry it. pi 1.6.1 has no wall-clock bound on a streaming request:
 `httpIdleTimeoutMs` is an idle timer reset by every streamed event, so a model that keeps streaming
 reasoning never trips it, and the provider `timeoutMs` (`retry.provider.timeoutMs`) is cleared once
 response headers arrive. The output budget is pi's model `maxTokens` (sent as `max_output_tokens`),
@@ -546,7 +558,7 @@ set per model in the home's `models.json` `modelOverrides`.
 
 ## Retry and hard stops
 
-pi's native retry is the only per-request retry. pi 1.6.0 repeats a run whose last assistant
+pi's native retry is the only per-request retry. pi 1.6.1 repeats a run whose last assistant
 message is an error that pi-ai's `isRetryableAssistantError` (`utils/retry.js`) deems transient
 (429, 5xx, overloaded, network and stream cuts) and that is not a context overflow, up to
 `retry.maxRetries` times with `retryDelayMs` between attempts; any success resets its counter.
@@ -578,7 +590,8 @@ the request ceiling.
 - Budget: the shipped `home/settings.json` sets `retry` to `maxRetries: 16`, `baseDelayMs: 2000`,
   `maxAgentDelayMs: 60000`. pi's waits then sum to 722 s (2, 4, 8, 16 and 32 s, then eleven at 60 s);
   the retry backoff below adds a mean of a quarter more, about 15 minutes per request in all. A 429
-  waits at least 60 s each time. The request ceiling still bounds each attempt.
+  waits at least 60 s each time, and a server's `retry-after` can lengthen any one wait to at most
+  300 s (see "Retry backoff"). The request ceiling still bounds each attempt.
 - Lanes get exactly this per-request retry and no automatic resume; their root repairs them.
 
 ## Automatic root recovery
@@ -633,7 +646,7 @@ on a failed model request, so an owner's "continue" is not needed.
 ## Retry backoff
 
 `installRetryBackoff` (in `extensions/request-ceiling/`, `backoff.ts` for the pure delay function)
-is installed by both loop-guard entries next to `installRequestCeiling`. pi 1.6.0's agent-level
+is installed by both loop-guard entries next to `installRequestCeiling`. pi 1.6.1's agent-level
 retry waits `retryDelayMs(settings.retry, attempt)` (`pi-ai` `utils/retry.js`): `baseDelayMs *
 2^(n-1)` capped at `maxAgentDelayMs`, no jitter and no split by status. That wait cannot be replaced
 from an extension, so the extension adds a wait in front of it.
@@ -643,27 +656,42 @@ from an extension, so the extension adds a wait in front of it.
   The retry decision uses pi-ai's public `isRetryableAssistantError`, `isContextOverflow` and
   `retryDelayMs`. pi's attempt counter is private; the extension mirrors it (increment per retried
   error, reset on any non-error assistant `message_end` and at `agent_settled`, when pi's is zero).
-- Totals: a 429 (`429`, `rate limit`, `too many requests` in the error text) waits at least
+- Totals: a 429 (`429`, `rate limit`, `too many requests`, `rate increased too quickly` in the error text) waits at least
   `loopPi.retryBackoff.rateLimitDelayMs` (default 60000) including pi's delay, plus up to 50% jitter. A 5xx (a `5xx`
   status, `overloaded`, `service unavailable`, `server error`, `internal error`, `bad gateway`,
   `temporarily unavailable`, `unable to forward upstream`, `upstream provider returned an error`)
   waits pi's delay plus a random extra in `[0, 0.5 * pi's delay)`. Every other retryable error also adds up to 50% jitter to
   pi's delay. Errors pi does not retry get no wait. `settings.retry` and `httpIdleTimeoutMs` stay
   pi's own; without the extension pi's backoff is unchanged.
+- Server hint: pi 1.6.1 fires `after_provider_response` for HTTP error responses, so the extension
+  keeps the last error response's `retry-after-ms`, else `retry-after` (whole seconds or an HTTP date),
+  for the turn; a later response replaces it and `turn_start` clears it. The hint only lengthens the
+  wait: the total is at least the hint, capped at `RETRY_AFTER_MAX_MS` (300000), and never below the
+  class floor above; jitter is drawn on that total. A provider without error-response headers, or a
+  transport failure, leaves the wait as above. Each hinted wait is still one of pi's
+  `retry.maxRetries` attempts, so hints lengthen a request's retry budget by at most 300 s per attempt.
 - pi's `auto_retry_start` event still reports only pi's own `delayMs`, and is emitted after the
   extension's wait.
 
 The `server` class in `backoff.ts` (`SERVER_PATTERN`) mirrors the upstream-failure wordings that
-pi-ai 1.6.0's `isRetryableAssistantError` (`utils/retry.js`) retries natively. pi-ai 1.2.0 added
+pi-ai 1.6.1's `isRetryableAssistantError` (`utils/retry.js`) retries natively. pi-ai 1.2.0 added
 "The upstream provider returned an error"; 1.3.0 "The service is temporarily unavailable" and
 "Unable to forward upstream"; 1.4.0 the gateway codes `upstream_request_failed` and
 `upstream_stream_read_error`, "stream was interrupted", "HTTP/2 stream failed" and the Codex-proxy
 "stream disconnected before completion"; 1.5.1 the gateway relay wording "cut short after the reply
-had begun"; 1.6.0 "Connection closed.", the bare socket codes above, "connection reset by peer" and
-the Codex WebSocket "connection limit reached". Those 1.6.0 transport wordings stay `other`
-deliberately: they are not upstream server failures, and both classes get the same jitter. Its node-fetch "request to ... failed, reason:" is a
-network failure and stays `other`. A pi-ai bump re-reads that list: a wording pi retries natively but
-this pattern misses is classed `other`, not `server`. The class only chooses the extra jitter.
+had begun"; 1.6.0 "Connection closed.", the bare Node socket codes (`ECONNRESET`, `EPIPE`,
+`ETIMEDOUT`, `ECONNABORTED`, `ECONNREFUSED`), "connection reset by peer" and the Codex WebSocket
+"connection limit reached"; 1.6.1 HTTP 525 (already a 5xx), "provider is temporarily unavailable",
+Anthropic's `"type":"api_error"`, "admission ceiling", the OpenAI-compatible and Mistral
+`finish_reason` errors, OpenRouter's "returned an empty response" and "stopped before completing the
+response", the gateway SSE wordings "ended the response before it was complete", "connection to the
+provider was reset" and "reported a failure while generating the response", and "repeat the request
+later" (all `server`), and "rate increased too quickly" (`rate-limit`). Those 1.6.0 transport
+wordings stay `other` deliberately: they are not upstream server failures, and both classes get the
+same jitter. Its node-fetch "request to ... failed, reason:" is a network failure and stays `other`.
+A pi-ai bump re-reads that list: a wording pi retries natively but this pattern misses is classed
+`other`, not `server`. Between `server` and `other` the class only chooses the extra jitter;
+`rate-limit` also sets the wait floor (`rateLimitDelayMs`).
 
 ## Delivery after an operator abort
 
@@ -930,7 +958,7 @@ paths are exact, bash write detection is best-effort.
   the audit reports it UNGRANTED; `standing.md`;
   `returns/<runId>.md`; `worktrees/l<32 hex>/`; `root-recovery.jsonl` and `incidents/` (see
   "Automatic root recovery"). The lane binding carries optional `runDir`.
-- **Idle-parent wake (pi-subagents 0.89.2):** a turn-starting notice to an idle root is sent as
+- **Idle-parent wake (pi-subagents 0.90.0):** a turn-starting notice to an idle root is sent as
   `sendMessage(notice, { triggerTurn: true })` (`src/shared/parent-wake.js`), which pi runs as a
   custom-message run: `before_agent_start` with `messageType: "custom"`, then the notice's own
   `message_start` / `message_end`. No `input` event and no user-role wake text exist (0.80.0 removed
@@ -939,7 +967,7 @@ paths are exact, bash write detection is best-effort.
   `triggerTurn: false` and no extension message events. In the model request only, pi-subagents wraps every
   pi-subagents message in `<pi_subagents_notice type=... origin="automated message from the
   pi-subagents extension, not typed by the user">`; the stored message is unchanged. From 0.83.0 the
-  wrapper runs in a `context_with_system` hook. pi 1.6.0 runs every `context` hook, then every
+  wrapper runs in a `context_with_system` hook. pi 1.6.1 runs every `context` hook, then every
   `context_with_system` hook in extension load order (`dist/core/extensions/runner.js` `emitContext`),
   and loads `--extension` paths before package extensions, so loop-state's own `context_with_system`
   pass, launched with `--extension`, sees the notice unwrapped. A test that reads the request must read what the provider receives
@@ -952,7 +980,7 @@ paths are exact, bash write detection is best-effort.
   for a root on an older home; `wake.test.ts` pins the wake shape and the type list against the
   installed package. loop-guard releases a run for `watch_process` on `subagent:async-complete`,
   never on a notify message; and the lane caps its own return (below).
-  pi-subagents 0.89.2 holds the parent after an aborted interactive turn unless pi-subagents tracked
+  pi-subagents 0.90.0 holds the parent after an aborted interactive turn unless pi-subagents tracked
   the abort as compaction. Manual compaction of an idle parent does not itself start a turn. A hold
   lasts until the next `agent_start`: while held, a completion starts no turn and ends with
   "The user stopped the parent turn ... do not resume the stopped task unless asked". It cannot tell
@@ -966,7 +994,7 @@ paths are exact, bash write detection is best-effort.
   - **No window for an owner abort.** The ceiling timer emits its abort marker only while
     `ctx.signal` is not already aborted. An owner Esc in the same run (a race
     of milliseconds) is the owner's stop: it opens no window and its held notices keep the package's text.
-  - **Compaction.** pi 1.6.0 runs the request hooks (`context`, `context_with_system`) only on the agent loop's request path
+  - **Compaction.** pi 1.6.1 runs the request hooks (`context`, `context_with_system`) only on the agent loop's request path
     (`core/sdk.js` `transformContext` is the single caller of `emitContext`). Native compaction, manual
     and automatic, summarises the stored messages from `prepareCompaction` and never passes through it.
     loop-state therefore rewrites the same held notices in the `session_before_compact` preparation
@@ -977,7 +1005,7 @@ paths are exact, bash write detection is best-effort.
     window (the `session_start` replay closes any open window) before `agent_end` re-sets
     pi-subagents' hold. That abort's held notices then keep the package's owner-stop text. This is the
     safe direction: the root reads a stop that may not have been the owner's, never the reverse.
-- **Completion reminders (pi-subagents 0.89.2):** when a completion-woken turn ends with no tool call
+- **Completion reminders (pi-subagents 0.90.0):** when a completion-woken turn ends with no tool call
   and no text, pi-subagents' own `agent_before_settle` handler appends a
   `subagent-completion-unanswered` reminder and continues the run once; if that turn is silent too it
   appends a terminal `subagent-completion-unhandled` notice without continuing
@@ -985,7 +1013,7 @@ paths are exact, bash write detection is best-effort.
   settle that an earlier handler already continues, and loop-continuation skips its nudge when
   `continue` is already set, so one silent turn never gets both; after the terminal notice the nudge
   chain still applies.
-- **Subagent `options` (pi-subagents 0.89.2):** a model `subagent` call carries most fields inside
+- **Subagent `options` (pi-subagents 0.90.0):** a model `subagent` call carries most fields inside
   one `options` object, which the package flattens to `{...topLevel, ...options}` only inside its
   execute (`src/extension/subagent-options.js`). Every loop-pi `tool_call` reader of a subagent call
   (loop-guard root and lane, lane-worktrees, loop-state) reads the merged view from
@@ -1048,7 +1076,7 @@ paths are exact, bash write detection is best-effort.
     preserve that failure exactly by declining an unsafe cut, and still retain the full copy.
     These deterministic oversized/unsafe-cut fallbacks, like a missing run dir, do not promise
     the byte cap. Malformed or annotated trailing fences that change neither outcome may still cap.
-  - Root preview (pi-subagents 0.89.2): the notify itself keeps only the first 2,000 characters of
+  - Root preview (pi-subagents 0.90.0): the notify itself keeps only the first 2,000 characters of
     each child's output inline (cut at a line end), then `…` and `Full output: <path> (<size>,
     <lines>). Read it if needed.`, where the path is the saved output or the run's artifact file
     (`src/runs/shared/single-output.js` `capInlineOutput`). Output is left whole only when it is
@@ -1078,13 +1106,13 @@ loop-state's request hook wraps every loop-pi notice type in `LOOP_PI_NOTICE_TYP
 `<loop_pi_notice type="<customType>" origin="automated message from the loop-pi harness, not typed by
 the user">`, newline, the content, newline, `</loop_pi_notice>`; a parts array gains a text part on
 each side. It runs after the return cap and the harness-hold rewrite, which read the notices' own text,
-and matches pi-subagents 0.89.2's `<pi_subagents_notice>` shape, which pi-subagents applies later, in
+and matches pi-subagents 0.90.0's `<pi_subagents_notice>` shape, which pi-subagents applies later, in
 its `context_with_system` hook. The marker depends only on the
 message, so cached prefixes stay valid; the stored message, the chat view and native compaction input
 are unchanged. Lanes do not load loop-state and are not marked.
 
 The request hook is `context_with_system`, not `context`. When a `context` handler returns a changed
-list, pi 1.6.0 replaces every system message with one new leading message holding the current prompt
+list, pi 1.6.1 replaces every system message with one new leading message holding the current prompt
 (`runner.js` `restoreSystemMessages`). pi-subagents updates its `advertised_subagents` prompt section
 several times a session and pi records each update as a mid-conversation system message, so a
 `context` rewrite would change the request from its first token at each update and miss the whole
@@ -1193,7 +1221,15 @@ source sends a `loop-*` custom message type the set does not name.
   workflows, conflicting shapes and RPC launches keep their existing handling. Existing lane
   fields are preserved; malformed lane version/key is refused before naming is changed, and
   the package still validates all other fields. The original brief, task identity and guard-owned
-  `extensionBindings` are unchanged. Optional `nativeNames [{key,lane,task,runs}]` in
+  `extensionBindings` are unchanged. Every launch this hook accepts and rewrites (a new or
+  relaunched retained allocation, a launch into a retained cwd, or native lane metadata) without a
+  top-level or `options` `label` gets `label: <lane id>` (pi-subagents 0.90.0), so the run's
+  session, status row and `subagent:async-started` description carry the lane name. The task id
+  never goes into the label, as it never goes into the key. The label never names a worktree or
+  branch: retained launches run with `worktree: false`, and on the native path the package passes
+  `lane.key` ahead of `params.label` as the naming label (`subagent-executor.js`,
+  `async-execution.js`). Refused, shared-cwd and untouched launches, and `action: "resume"`, get no
+  label. Optional `nativeNames [{key,lane,task,runs}]` in
   `lane-worktrees-state` records native launch and tool-resume run correlations when results provide
   a run id; multiple naming-identity prefix matches refuse, while package validation remains
   authoritative for target resolution, ownership and revival. This map is best-effort correlation,
@@ -1338,7 +1374,7 @@ The native system prompt remains Pi-owned. No authority is inferred from a model
 - The summary opens with a `Compaction trigger:` line naming the loop-pi context-budget
   extension (loop-state), that it was automatic, and the reason (a landed push at N% past the
   push share, or the 80% backstop), so the root knows why its context changed.
-- `loop-state` checks pi 1.6.0's public `ctx.getContextUsage()` at `agent_settled`, only when
+- `loop-state` checks pi 1.6.1's public `ctx.getContextUsage()` at `agent_settled`, only when
   not aborted, `ctx.isIdle()`, no pending messages and no queued/running native async children.
   Active async work defers proactive compaction until a later settled boundary after completion;
   it does not consume an attempt or suppress the normal child completion wake. Quiet requires a
@@ -1353,7 +1389,7 @@ The native system prompt remains Pi-owned. No authority is inferred from a model
   32-KiB bounds. This avoids the
   pinned package treating proactive compaction as an operator request to resume the root. `percent` is a percentage, so the proactive
   trigger is **80%** (fraction 0.8), not 0.8%. It does not guess tokens from provider clocks.
-  pi 1.6.0 exposes no estimated/measured discriminator. A recovery omission of a later zero-usage
+  pi 1.6.1 exposes no estimated/measured discriminator. A recovery omission of a later zero-usage
   failed assistant invalidates its earlier successful usage anchor and re-estimates all history.
   The backstop and push trigger retain the unaffected measured anchor only when public session
   projection/branch evidence shows every intervening edit omits a later failed/aborted assistant
@@ -1386,7 +1422,7 @@ The native system prompt remains Pi-owned. No authority is inferred from a model
   `ExtensionContext` in `dist/core/extensions/types.d.ts`; `AgentSession.getContextUsage`,
   `compact`, `isIdle`, `_emitAgentSettled` in `dist/core/agent-session.js`; metadata cut points in
   `dist/core/session-manager.js`. Physical model limits are Pi's responsibility, including virtual
-  routes. pi-subagents 0.89.2's existing 2,000-character preview/full-file transport is unchanged.
+  routes. pi-subagents 0.90.0's existing 2,000-character preview/full-file transport is unchanged.
   The full-return boundary is the resolved native package artifact written by `resolveSingleOutput`,
   not raw provider/session terminal text: `stripAcceptanceReport` extracts structured acceptance
   metadata and removes terminal whitespace before resolution. Substantive text and internal
@@ -1415,7 +1451,7 @@ transient `loop-status-program-status` capture below, set and removed in the sam
   beside the launch closeout. The closeout path (`reportPath`), and `concurrency` for the slot cap, come from
   `loop-continuation:query-launch` once per launch.
 - There is no timer. The line is rebuilt, coalesced to one microtask, on `subagent:async-started`,
-  `subagent:async-complete`, `subagent:jobs-changed` (pi-subagents 0.89.2; emitted when one of this
+  `subagent:async-complete`, `subagent:jobs-changed` (pi-subagents 0.90.0; emitted when one of this
   session's background runs changes, checked about every 5 s and only with a UI), `session_start`,
   `agent_start`, `agent_settled` and `tool_execution_end`, so heartbeat age and nudge count are as of
   that rebuild. Nothing is set
@@ -1452,7 +1488,7 @@ transient `loop-status-program-status` capture below, set and removed in the sam
   the pairing is dropped at `agent_settled`. A wake that reaches a busy
   root as a steer starts no run and carries no notice. The notice is advisory text only: no request
   is blocked, wrapped or retried, and the wake text, push detection and nudge chain are unchanged.
-- **Nested runs (pi-subagents 0.89.2).** `subagent status` lists the runs whose `status.json`
+- **Nested runs (pi-subagents 0.90.0).** `subagent status` lists the runs whose `status.json`
   `sessionId` is the asking session's file. A run a lane launches (depth 2) carries the lane's
   session file, so the root's own listing omits it and `status id=<run>` answers "Async run not
   found". Every child session sits under the launching session's directory
@@ -1464,8 +1500,14 @@ transient `loop-status-program-status` capture below, set and removed in the sam
   names it, to a no-id `subagent status` result; (b) answers `status id=<nested run or unique
   prefix>` in any state in place of "Async run not found", leaving every other result untouched;
   and (c) shows `(+N nested)` beside the lane count. Views (`fleet`, `transcript`) and `dir`
-  lookups are never altered. An unset `PI_SUBAGENTS_TEMP_ROOT` shows no nested runs.
-- **Program status (OSC 7501).** pi 1.6.0's interactive mode reports its own state to a terminal that
+  lookups are never altered. An unset `PI_SUBAGENTS_TEMP_ROOT` shows no nested runs. From
+  pi-subagents 0.90.0 the native no-id listing also projects each listed lane's nested children under
+  that lane (`src/runs/background/async-status.js` `attachNestedChildren`; 0.89.2 filed them under
+  the wrong run id, so it never found them) as `↳ <label> [<id>] <state>`. Section (a) therefore
+  lists only nested runs whose `[<id>]` the native text does not already carry, for example when the
+  package could not resolve a lane's nested route. A nested run is still not a top-level row of the
+  root's listing.
+- **Program status (OSC 7501).** pi 1.6.1's interactive mode reports its own state to a terminal that
   supports the Program Status Protocol (Orca among them): `working` during a run, then `done`,
   `error` or `idle` (after an abort) at `agent_settled`, and `blocked` while a dialog waits. A loop
   root settles every time it goes back to waiting, so the terminal would show a finished task, and

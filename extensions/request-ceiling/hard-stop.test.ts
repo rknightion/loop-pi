@@ -41,6 +41,9 @@ test("transient failures, quota and context overflow are left to pi", () => {
     [http(500, "server_error", "server_error"), true],
     ["read ECONNRESET", true],
     ["Connection closed.", true],
+    // pi-ai 1.6.1 retries Cloudflare's HTTP 525 natively (#12206); it carries no hard-stop token.
+    ["OpenAI API error (525): <html>SSL handshake failed</html>", true],
+    ["The provider is temporarily unavailable. Retry shortly.", true],
     ["stream_incomplete: Upstream websocket closed before response.completed", true],
     [http(429, "insufficient_quota", "insufficient_quota"), false],
     [http(429, "subscription_sharing_usage_limit_exceeded", "usage_limit_reached"), false],
