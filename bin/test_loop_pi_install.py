@@ -505,6 +505,53 @@ print(label)
         self.escape_fixture("unreadable")
 
 
+def status_records_for_session(tmp_root, session):
+    """The (path, record) pairs of every readable status.json under tmp_root that names session.
+
+    A run names its session in steps[].sessionFile from launch, but only writes the top-level
+    sessionFile in its final status write. pi-subagents' stale-run reconciler can publish the
+    terminal record itself from the launch-time record and the result file, which keeps the steps and
+    never gains the top-level field. Matching only the top-level field made the nopush canary
+    intermittently find no record for a run that had finished.
+    """
+    found = []
+    for path in Path(tmp_root).rglob("status.json"):
+        try:
+            data = json.loads(path.read_text())
+        except ValueError:
+            continue  # mid-write; the next poll reads it whole
+        named = [data.get("sessionFile")] + [step.get("sessionFile") for step in data.get("steps") or []
+                                             if isinstance(step, dict)]
+        if str(session) in named:
+            found.append((path, data))
+    return found
+
+
+class StatusRecordLookupTests(unittest.TestCase):
+    def test_a_reconciler_published_terminal_record_is_found_by_its_step_session(self):
+        with tempfile.TemporaryDirectory(prefix="status-lookup-") as tmp:
+            session = Path(tmp) / "sessions/run-0/session.jsonl"
+            run = Path(tmp) / "tmp/async-subagent-runs/abc"
+            run.mkdir(parents=True)
+            # Terminal, repaired from the launch-time record: steps keep the session, no top-level field.
+            (run / "status.json").write_text(json.dumps(
+                {"runId": "abc", "state": "complete", "steps": [{"agent": "senior", "sessionFile": str(session)}]}))
+            other = Path(tmp) / "tmp/async-subagent-runs/def"
+            other.mkdir()
+            (other / "status.json").write_text(json.dumps(
+                {"runId": "def", "state": "complete", "sessionFile": "/elsewhere/session.jsonl",
+                 "steps": [{"agent": "worker", "sessionFile": "/elsewhere/session.jsonl"}]}))
+            (other.parent / "ghi").mkdir()
+            (other.parent / "ghi/status.json").write_text("{not json")
+            found = status_records_for_session(Path(tmp) / "tmp", session)
+            self.assertEqual([p.parent.name for p, _ in found], ["abc"])
+            # The final write names it at the top level as well: still exactly one record.
+            (run / "status.json").write_text(json.dumps(
+                {"runId": "abc", "state": "complete", "sessionFile": str(session),
+                 "steps": [{"agent": "senior", "sessionFile": str(session)}]}))
+            self.assertEqual(len(status_records_for_session(Path(tmp) / "tmp", session)), 1)
+
+
 class NopushNativeCanary(unittest.TestCase):
     """No hosted model or mutable network remote: installed native runners against faux.
 
@@ -648,15 +695,7 @@ class NopushNativeCanary(unittest.TestCase):
             # status writes, so a record can read terminal before it names its session (seen
             # intermittently on Linux CI). Wait for the record that names this session.
             def records():
-                found = []
-                for p in (home / "tmp").rglob("status.json"):
-                    try:
-                        data = json.loads(p.read_text())
-                    except ValueError:
-                        continue  # mid-write; the next poll reads it whole
-                    if data.get("sessionFile") == str(session):
-                        found.append((p, data))
-                return found
+                return status_records_for_session(home / "tmp", session)
             deadline = time.monotonic() + 20
             matches = records()
             while len(matches) != 1 and time.monotonic() < deadline:
