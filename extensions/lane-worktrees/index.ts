@@ -37,6 +37,19 @@ import { allocationIdentity, confinedPath, prepareParent, registerAllocation, ve
 import { deleteSubagentField, subagentCallView } from "../loop-guard/subagent-view.ts";
 
 const PROTO_FILE = "loop-pi-proto";
+
+/**
+ * pi-subagents 0.90.0 names a run's session, its status row and the `subagent:async-started`
+ * description by a top-level `label` (1 to 80 characters). An accepted governed launch without one
+ * is named by its lane id. The task id stays out, as it does in the opaque native lane key, and the
+ * key, not the label, still names a native worktree and branch. A caller's own label is kept.
+ */
+function labelLane(input: Record<string, unknown>, lane: string): void {
+  const options = input.options;
+  const nested = options && typeof options === "object" && !Array.isArray(options) ? (options as Record<string, unknown>).label : undefined;
+  if (input.label !== undefined || nested !== undefined) return;
+  input.label = lane.slice(0, 80);
+}
 export const SCRATCH_TOOL = "scratch_register";
 const ScratchParams = Type.Object({
   path: Type.String({ description: "The scratch directory, absolute or relative to the session cwd. It must already exist." }),
@@ -202,6 +215,7 @@ export default function (pi: ExtensionAPI) {
       deleteSubagentField(input, "cwd");
       input.cwd = requested;
       input.worktree = false; // Omission would re-enable the package's configured worktree default.
+      labelLane(input, lane);
       pending.set(callId, { lane, created: false, branchCreated: false, cwd: nested });
       return undefined;
     } catch (error) {
@@ -828,6 +842,7 @@ export default function (pi: ExtensionAPI) {
       // One lane, at the top level: a caller's `options.lane` would conflict with the bound key.
       deleteSubagentField(input, "lane");
       input.lane = { ...declared, version: 1, key };
+      labelLane(input, governed.lane);
       if (!nativeNames.has(key)) nativeNames.set(key, { key, lane: governed.lane, task: governed.task, runs: [] });
       pendingNames.set(event.toolCallId, key);
       persist();
@@ -896,6 +911,7 @@ export default function (pi: ExtensionAPI) {
       input.cwd = cwd;
       delete input.isolation;
       input.worktree = false; // Omission would re-enable the package's configured worktree default.
+      labelLane(input, brief.lane);
       trees.set(brief.lane, { ...allocationTree!, gitdirPreimage: preimage });
       pending.set(event.toolCallId, { lane: brief.lane, created, branchCreated, cwd: nested });
       persist();

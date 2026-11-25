@@ -125,6 +125,7 @@ test("a candidate launch with isolation worktree gets a loop-owned worktree, its
     assert.equal(input.cwd, path);
     assert.equal("isolation" in input, false);
     assert.equal(input.worktree, false, "native default allocation is explicitly suppressed");
+    assert.equal(input.label, "L1", "the run is named by its lane id, never its task id");
     assert.equal(git(path, "rev-parse", "--abbrev-ref", "HEAD"), s.branch("L1"));
     assert.equal(git(path, "rev-parse", "HEAD"), git(s.repo, "rev-parse", "HEAD"));
 
@@ -293,8 +294,9 @@ test("a relaunch of the same lane id reuses its worktree; an unsafe lane id is r
     const first = await s.launch(brief("L1", "T1"));
     await s.end(first.id, { runId: "run-1" });
     writeFileSync(join(s.path("L1"), "wip.txt"), "uncommitted");
-    const again = await s.launch(brief("L1", "T1"));
+    const again = await s.launch(brief("L1", "T1"), { isolation: "worktree", label: "Fix login redirect" });
     assert.equal(again.input.cwd, s.path("L1"));
+    assert.equal(again.input.label, "Fix login redirect", "a caller's own label is kept");
     assert.equal(existsSync(join(s.path("L1"), "wip.txt")), true, "the candidate's work is still there");
     const bad = await s.launch(brief("../x", "T9"));
     assert.equal(bad.result?.block, true);
@@ -991,6 +993,7 @@ test("native naming is opaque, scoped and retains exact task/run identity throug
       assert.equal(a.result, undefined);
       assert.equal(a.input.task, text, "do not redact the governed brief or context");
       assert.equal(a.input.cwd, undefined, "native/default allocations keep package-owned cwd binding");
+      assert.equal(a.input.label, "N1", "the run is named by its lane id; the private task id stays out");
       assert.equal(metadata.key, nativeLaneKey(realpathSync(s.runDir), "N1", task));
       assert.match(String(metadata.key), /^r[0-9a-f]{32}l[0-9a-f]{32}$/);
       if ("lane" in extra) {
@@ -1037,6 +1040,7 @@ test("native naming refuses a top-level lane and a different options.lane, as pi
     assert.match(String(conflict.result?.reason), /lane/);
     assert.deepEqual(conflict.input.lane, top, "a refused input must not be healed");
     assert.deepEqual(conflict.input.options, { lane: inner }, "a refused input must not be healed");
+    assert.equal(conflict.input.label, undefined, "a refused input gets no label");
     const same = await s.launch(text, { agent: "reviewer", worktree: true, lane: { ...top }, options: { lane: { ...top } } });
     assert.equal(same.result, undefined, "equal values in both places are one lane, as the package accepts");
     assert.equal((same.input.lane as Record<string, unknown>).key, nativeLaneKey(realpathSync(s.runDir), "N1", "T1"));
