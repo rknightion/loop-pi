@@ -1457,6 +1457,16 @@ class InstallerTests(unittest.TestCase):
         (prefix / "home/settings.json").write_text(json.dumps({}))
         m.check_hook_scripts(prefix)
 
+    def test_the_build_refuses_the_legacy_pi_peer(self):
+        # agento11y-pi declares the retired @mariozechner pi packages as peers ("*"). The build omits
+        # peers, so a tree that holds one means the omit was lost and its advisories now ship.
+        prefix = fake_prefix(self.tmp)
+        m.check_no_legacy_pi_peers(prefix)
+        legacy = prefix / "node_modules/@mariozechner/pi-coding-agent"
+        legacy.mkdir(parents=True)
+        with self.assertRaisesRegex(m.InstallError, "@mariozechner/pi-coding-agent"):
+            m.check_no_legacy_pi_peers(prefix)
+
     def test_external_managed_files_are_recorded_and_never_stale(self):
         prefix = fake_prefix(self.tmp)
         tgt = target(self.tmp, external=(".binding.json",))

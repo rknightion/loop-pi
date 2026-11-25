@@ -664,6 +664,17 @@ def check_hook_scripts(prefix: Path) -> None:
             raise InstallError(f"required hook script {name} is missing from the build (add it to overlay/scripts/)")
 
 
+LEGACY_PI_PEERS = ("@mariozechner/pi-coding-agent", "@mariozechner/pi-ai")
+
+
+def check_no_legacy_pi_peers(prefix: Path) -> None:
+    """The build installs with --omit=peer: agento11y-pi's "*" peers on the retired @mariozechner pi
+    packages must not be in it (a full install pulls them, with their advisories)."""
+    for name in LEGACY_PI_PEERS:
+        if (prefix / "node_modules" / name).exists():
+            raise InstallError(f"{name} is in the build: agento11y-pi's legacy peer must stay omitted (npm ci --omit=peer)")
+
+
 def smoke_extensions(prefix: Path, node: str, entries: Tuple[str, ...]) -> None:
     """Load the entries in a throwaway pi home (RPC mode) and require pi to answer get_commands."""
     with tempfile.TemporaryDirectory(prefix="loop-pi-smoke-") as home:
@@ -704,6 +715,7 @@ def validate(prefix: Path, pin: Dict[str, str], node: str, allow_missing: bool) 
     reported = run([node, str(prefix / PI_CLI), "--version"], prefix).strip()
     if reported != pin[PI_PACKAGE]:
         raise InstallError(f"pi --version printed {reported!r}, pinned {pin[PI_PACKAGE]}")
+    check_no_legacy_pi_peers(prefix)
     missing = missing_extensions(prefix)
     if missing and not allow_missing:
         raise InstallError("missing extension entries: " + ", ".join(missing))
