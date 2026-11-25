@@ -7,11 +7,16 @@
 // A rule with `once: true` is used at most once per process. Rule shape:
 //   {"match": "regex", "once"?: bool, "text"?: "reply", "thinking"?: "...",
 //    "toolCalls"?: [{"name": "bash", "args": {...}}], "stopReason"?: "stop" | "toolUse" | "error",
-//    "errorMessage"?: "...", "delayMs"?: number, "hang"?: bool}
+//    "errorMessage"?: "...", "delayMs"?: number, "hang"?: bool,
+//    "waitForSession"?: {"dir": "...", "contains": "..."}}
+// `waitForSession` holds the reply until a `.jsonl` file under `dir` contains `contains` (a readiness
+// barrier on something another process really wrote), polling for at most 60 seconds, then replies anyway
+// so a missing signal fails the test's own assertions instead of hanging it.
 // `stopReason: "length"` scripts an output-budget stop. `hang: true` never answers: the request
 // stays open until it is aborted, like a model that keeps streaming reasoning.
 // With no matching rule the reply is the text "FAUX: no rule matched".
-import { appendFileSync, readFileSync } from "node:fs";
+import { appendFileSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { fauxAssistantMessage, fauxProvider, fauxText, fauxThinking, fauxToolCall } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -25,7 +30,28 @@ type Rule = {
   errorMessage?: string;
   delayMs?: number;
   hang?: boolean;
+  waitForSession?: { dir: string; contains: string };
 };
+
+function sessionContains(dir: string, needle: string): boolean {
+  let names: string[] = [];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return false;
+  }
+  for (const name of names) {
+    const path = join(dir, name);
+    try {
+      if (statSync(path).isDirectory()) {
+        if (sessionContains(path, needle)) return true;
+      } else if (name.endsWith(".jsonl") && readFileSync(path, "utf8").includes(needle)) return true;
+    } catch {
+      // A file replaced mid-scan: the next poll sees it.
+    }
+  }
+  return false;
+}
 
 function latestText(context: any): string {
   const messages: any[] = context?.messages ?? [];
@@ -57,6 +83,11 @@ export default function (pi: ExtensionAPI) {
       if (index < 0) return fauxAssistantMessage("FAUX: no rule matched");
       used.add(index);
       const rule = rules[index];
+      if (rule.waitForSession) {
+        const { dir, contains } = rule.waitForSession;
+        const deadline = Date.now() + 60_000;
+        while (Date.now() < deadline && !sessionContains(dir, contains)) await new Promise((resolve) => setTimeout(resolve, 100));
+      }
       if (rule.delayMs) await new Promise((resolve) => setTimeout(resolve, rule.delayMs));
       if (rule.hang) {
         const signal: AbortSignal | undefined = options?.signal;
