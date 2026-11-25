@@ -769,9 +769,9 @@ class NopushNativeCanary(unittest.TestCase):
             nested_status_path, nested_status = run_for_session(nested_session)
             self.assertEqual(nested_status_path.parent.parent.parent.name, "nested-subagent-runs")
             # 0.79 keys retained session storage by the async status id so completed
-            # children can be resumed. The nested event route still uses the launch id.
-            # Read that identity from its native started event and route receipt, never
-            # from the session directory or the nested child's output path.
+            # children can be resumed. From 0.90.0 the nested event route is keyed by that
+            # same async status id. Read that identity from its native started event and
+            # route receipt, never from the session directory or the nested child's output path.
             parent_session_root = Path(parent_recovery["sessionDir"]).parent
             self.assertEqual(parent_session_root.name, parent_status["runId"])
             started = []
@@ -786,16 +786,16 @@ class NopushNativeCanary(unittest.TestCase):
                     started.append(event)
             self.assertEqual(len(started), 1, "one native launch event binds the parent and nested child")
             parent_route_id = started[0]["rootRunId"]
+            self.assertEqual(parent_route_id, parent_status["runId"])
             self.assertEqual(Path(parent_recovery["sessionFile"]), parent_session)
             self.assertEqual(parent_session.parent.parent, parent_session_root)
             def assert_nested_scope(route_id):
                 self.assertEqual(nested_status_path, home / "tmp/nested-subagent-runs" /
                                  route_id / nested_status["runId"] / "status.json")
             assert_nested_scope(parent_route_id)
-            # The former (wrong) outer-status identity and an unrelated root must fail.
-            for wrong_id in (parent_status["runId"], "wrong-parent-root"):
-                with self.assertRaises(AssertionError):
-                    assert_nested_scope(wrong_id)
+            # An unrelated root must fail.
+            with self.assertRaises(AssertionError):
+                assert_nested_scope("wrong-parent-root")
             with nested_session.open() as session_file:
                 nested_header = json.loads(session_file.readline())
             self.assertEqual(nested_header["type"], "session")
@@ -823,7 +823,7 @@ class NopushNativeCanary(unittest.TestCase):
                 "sentinelIntact": True, "complexParentMaxDepth": parent_recovery["maxSubagentDepth"],
                 "nestedParentRunId": parent_status["runId"], "nestedChildRunId": nested_status["runId"],
                 "nestedParentRouteId": parent_route_id, "nestedParentSession": str(parent_session),
-                "wrongParentIdentityControlsRejected": True,
+                "wrongParentRootControlRejected": True,
                 "nestedStatusPath": str(nested_status_path)}, indent=2) + "\n")
             print("ROOT PUSH: the root alone pushed a local bare ref, receipt matches fixture SHA, no lane receipt", flush=True)
             print(f"CANARY PASS: scratch install, full transcripts and receipt at {root}", flush=True)

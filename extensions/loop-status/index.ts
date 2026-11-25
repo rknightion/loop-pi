@@ -304,9 +304,10 @@ export default function (pi: ExtensionAPI): void {
       // A notice failure must never hold up the wake.
     }
   });
-  // pi-subagents' `subagent status` lists only runs this session launched. A run a lane launched
-  // (depth 2) is neither listed nor resolvable by id, so the root cannot see the capacity it holds:
-  // append those runs to the listing, and answer an id that is one of them instead of "not found".
+  // pi-subagents' `subagent status` lists only runs this session launched as rows. A run a lane
+  // launched (depth 2) is not a row; from 0.90.0 the listing projects it under its lane as
+  // "↳ <label> [<id>] <state>" when it can resolve the lane's nested route. Append the nested runs
+  // the listing does not already show, and answer an id that is one of them instead of "not found".
   pi.on("tool_result", (event) => {
     try {
       if (event.toolName !== "subagent") return;
@@ -317,7 +318,10 @@ export default function (pi: ExtensionAPI): void {
       const requested = typeof input.id === "string" ? input.id : typeof input.runId === "string" ? input.runId : undefined;
       if (requested === undefined) {
         if (event.isError || event.content?.some((part) => part.type !== "text")) return;
-        const section = formatNestedRuns(listNestedRuns(asyncRunsDir(), sessionKey));
+        // Only a native nested row ("↳ <label> [<id>] <state>") counts as listed; an id in a lane's
+        // progress text or a warning does not.
+        const shown = new Set(text.split("\n").filter((line) => /^\s*↳ /.test(line)).flatMap((line) => [...line.matchAll(/\[([^\]\s]+)\]/g)].map((m) => m[1])));
+        const section = formatNestedRuns(listNestedRuns(asyncRunsDir(), sessionKey).filter((run) => !shown.has(run.id)));
         if (section) return { content: [{ type: "text" as const, text: `${text}\n\n${section}` }] };
         return;
       }

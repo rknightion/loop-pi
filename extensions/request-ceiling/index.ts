@@ -23,7 +23,7 @@ import { getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { newProgress, observeAssistantEvent, type RequestProgress } from "../call-timing/progress.ts";
 import { publishCeilingPolicy } from "../call-timing/writer.ts";
 import { installRecovery } from "./recovery.ts";
-import { backoffConfig, classifyRetryError, extraRetryDelayMs, retryPolicy } from "./backoff.ts";
+import { backoffConfig, classifyRetryError, extraRetryDelayMs, retryAfterMs, retryPolicy } from "./backoff.ts";
 import {
   type CeilingConfig,
   EMPTY_LENGTH_ERROR,
@@ -201,9 +201,22 @@ export function installRequestCeiling(pi: ExtensionAPI, supplied: CeilingConfig 
 export function installRetryBackoff(pi: ExtensionAPI, loadSettings: (ctx?: ExtensionContext) => unknown = readSettings): void {
   installRecovery(pi, loadSettings);
   let attempt = 0;
+  // The last error response's retry hint in this turn. pi 1.6.1 fires after_provider_response for
+  // HTTP error responses too, so a 429 or 503 carries its retry-after here; a later response in the
+  // same turn replaces it, and a new turn (pi's retry) starts without one.
+  let serverRetryAfterMs: number | undefined;
 
   pi.on("session_start", () => {
     attempt = 0;
+    serverRetryAfterMs = undefined;
+  });
+
+  pi.on("turn_start", () => {
+    serverRetryAfterMs = undefined;
+  });
+
+  pi.on("after_provider_response", (event) => {
+    serverRetryAfterMs = event.status >= 400 ? retryAfterMs(event.headers) : undefined;
   });
 
   pi.on("message_end", (event) => {
@@ -226,7 +239,7 @@ export function installRetryBackoff(pi: ExtensionAPI, loadSettings: (ctx?: Exten
     if (!isRetryableAssistantError(last) || isContextOverflow(last, ctx.model?.contextWindow ?? 0)) return;
     if (attempt + 1 > policy.maxRetries) return;
     attempt++;
-    const extra = extraRetryDelayMs(classifyRetryError(last.errorMessage), retryDelayMs(policy, attempt), backoffConfig(settings));
+    const extra = extraRetryDelayMs(classifyRetryError(last.errorMessage), retryDelayMs(policy, attempt), backoffConfig(settings), Math.random, serverRetryAfterMs);
     if (extra > 0) await abortableSleep(extra, ctx.signal);
   });
 }

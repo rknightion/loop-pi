@@ -460,9 +460,9 @@ test("real policy and authentication refusals retain sanitized upstream identity
     const metadata = (failure?.message as any)?.loopPiRecovery;
     assert.equal(metadata.upstream.code, code);
     assert.equal(metadata.upstream.status, status ?? 200);
-    // The pinned HTTP-error path never emits after_provider_response; the client
-    // correlation is still authoritative, while unavailable server headers stay null.
-    assert.equal(metadata.upstream.requestId, status ? null : "fixture-correlation");
+    // pi 1.6.1 emits after_provider_response for HTTP error responses too, so the
+    // server correlation is read from the error response's headers on every path.
+    assert.equal(metadata.upstream.requestId, "fixture-correlation");
     assert.match(metadata.upstream.clientRequestId, /^[0-9a-f-]{36}$/);
     assert.equal(metadata.reason, reason);
     assert.equal(metadata.disposition, "stop");

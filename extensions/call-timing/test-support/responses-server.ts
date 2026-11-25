@@ -8,7 +8,8 @@ export type Step =
   | { frame: Record<string, unknown>; mark?: string }
   | { comment: string }
   | { sleepMs: number }
-  | { hang: true };
+  | { hang: true }
+  | { httpError: number; headers?: Record<string, string> };
 
 export interface ResponsesServer {
   baseUrl: string;
@@ -29,10 +30,18 @@ export async function startResponsesServer(scripts: Step[][], fallback: Step[]):
       const script = scripts[served++] ?? fallback;
       open.add(res);
       res.on("close", () => open.delete(res));
+      const failure = script.find((step): step is { httpError: number; headers?: Record<string, string> } => "httpError" in step);
+      if (failure) {
+        // An HTTP error before any stream: a JSON error body with the same correlation headers.
+        res.writeHead(failure.httpError, { "content-type": "application/json", "x-request-id": `fixture-request-${served}`, "x-ratelimit-remaining-requests": "0", ...failure.headers });
+        res.end(JSON.stringify({ error: { message: "fixture bad request", type: "invalid_request_error", code: "fixture_bad_request" } }));
+        return;
+      }
       res.writeHead(200, { "content-type": "text/event-stream", "x-request-id": `fixture-request-${served}` });
       res.flushHeaders();
       for (const step of script) {
         if (res.destroyed) return;
+        if ("httpError" in step) continue;
         if ("sleepMs" in step) await pause(step.sleepMs);
         else if ("hang" in step) return;
         else if ("comment" in step) res.write(`: ${step.comment}\n\n`);
