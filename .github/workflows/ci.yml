@@ -45,7 +45,7 @@ jobs:
         run: python3 -c 'import sys; print(sys.version); sys.exit(sys.version_info[:2] != (3, 15))'
 
       - name: Set up just
-        uses: rknightion/.github/.github/actions/setup-just@7ed87713176ccae972b0143071b0196ff370d804 # v1.32.3
+        uses: rknightion/.github/.github/actions/setup-just@20533b678728ec119e52401c1e48b31f3c8b83c4 # v1.32.5
 
       - name: just setup
         run: just setup
@@ -102,7 +102,7 @@ jobs:
           python-version-file: .python-version
 
       - name: Set up just
-        uses: rknightion/.github/.github/actions/setup-just@7ed87713176ccae972b0143071b0196ff370d804 # v1.32.3
+        uses: rknightion/.github/.github/actions/setup-just@20533b678728ec119e52401c1e48b31f3c8b83c4 # v1.32.5
 
       - name: just setup
         run: just setup
@@ -189,7 +189,7 @@ jobs:
     name: actionlint
     permissions:
       contents: read
-    uses: rknightion/.github/.github/workflows/actionlint.yml@7ed87713176ccae972b0143071b0196ff370d804 # v1.32.3
+    uses: rknightion/.github/.github/workflows/actionlint.yml@20533b678728ec119e52401c1e48b31f3c8b83c4 # v1.32.5
 
   zizmor:
     name: zizmor
@@ -197,4 +197,4 @@ jobs:
       contents: read
       security-events: write
       actions: read
-    uses: rknightion/.github/.github/workflows/zizmor.yml@7ed87713176ccae972b0143071b0196ff370d804 # v1.32.3
+    uses: rknightion/.github/.github/workflows/zizmor.yml@20533b678728ec119e52401c1e48b31f3c8b83c4 # v1.32.5
