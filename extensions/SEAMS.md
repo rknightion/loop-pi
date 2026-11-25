@@ -612,8 +612,9 @@ separate from the recovery disposition; known policy refusals (including `cyber_
 authentication refusals remain distinct and nonretryable, even if their body mentions a transient
 error or context overflow. The visible stop includes its allowlisted upstream code. Server
 correlation comes from the response-header event, which pi 1.6.1 also fires for HTTP error
-responses; it stays null only when a failure has no HTTP response (a transport error). The
-unique client request id remains available separately. Recovery metadata and stop notices never
+responses; it stays null when a failure has no HTTP response (a transport error) or the response
+carries no `x-request-id` that `correlation()` accepts. The unique client request id remains
+available separately. Recovery metadata and stop notices never
 retain error bodies or credentials; the existing native compaction diagnostic is unchanged.
 Stop messages name the reason and ask the operator to inspect saved work
 before resuming; one non-triggering `loop-recovery-required` notice surfaces the stop. On an armed
@@ -698,7 +699,9 @@ response", and "repeat the request later" (all `server`), and "rate increased to
 (`rate-limit`). Those 1.6.0 transport wordings stay `other`
 deliberately: they are not upstream server failures, and both classes get the same jitter. Its node-fetch "request to ... failed, reason:" is a
 network failure and stays `other`. A pi-ai bump re-reads that list: a wording pi retries natively but
-this pattern misses is classed `other`, not `server`. The class only chooses the extra jitter.
+this pattern misses is classed `other`, not `server`. Between `server` and `other` the class only
+chooses the extra jitter; `rate-limit` also sets the wait floor (`rateLimitDelayMs`, see "Retry
+backoff") and names the class in recovery's rewritten "server error: rate-limit" text.
 
 ## Encrypted reasoning recovery
 
@@ -791,6 +794,13 @@ from an extension, so the extension adds a wait in front of it.
   waits pi's delay plus a random extra in `[0, 0.5 * pi's delay)`. Every other retryable error also adds up to 50% jitter to
   pi's delay. Errors pi does not retry get no wait. `settings.retry` and `httpIdleTimeoutMs` stay
   pi's own; without the extension pi's backoff is unchanged.
+- Server hint: pi 1.6.1 fires `after_provider_response` for HTTP error responses, so the extension
+  keeps the last error response's `retry-after-ms`, else `retry-after` (whole seconds or an HTTP date),
+  for the turn; a later response replaces it and `turn_start` clears it. The hint only lengthens the
+  wait: the total is at least the hint, capped at `RETRY_AFTER_MAX_MS` (300000), and never below the
+  class floor above; jitter is drawn on that total. A provider without error-response headers, or a
+  transport failure, leaves the wait as above. A long hint can outlast a recovery episode
+  (`retryRecovery.episodeMs`), which then stops the run as it would after any slow retry.
 - pi's `auto_retry_start` event still reports only pi's own `delayMs`, and is emitted after the
   extension's wait.
 
@@ -1325,7 +1335,12 @@ source sends a `loop-*` custom message type the set does not name.
   workflows, conflicting shapes and RPC launches keep their existing handling. Existing lane
   fields are preserved; malformed lane version/key is refused before naming is changed, and
   the package still validates all other fields. The original brief, task identity and guard-owned
-  `extensionBindings` are unchanged. Optional `nativeNames [{key,lane,task,runs}]` in
+  `extensionBindings` are unchanged. Every launch this hook accepts and rewrites (retained cwd,
+  retained resume by cwd, or native lane metadata) without a top-level or `options` `label` gets
+  `label: <lane id>` (pi-subagents 0.90.0), so the run's session, status row and
+  `subagent:async-started` description carry the lane name. The task id never goes into the label,
+  as it never goes into the key, and the key, not the label, names a native worktree and branch
+  (`buildWorktreeNaming` prefers `laneKey`). Refused, shared-cwd and untouched launches get no label. Optional `nativeNames [{key,lane,task,runs}]` in
   `lane-worktrees-state` records native launch and tool-resume run correlations when results provide
   a run id; multiple naming-identity prefix matches refuse, while package validation remains
   authoritative for target resolution, ownership and revival. This map is best-effort correlation,

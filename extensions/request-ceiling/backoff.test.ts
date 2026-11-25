@@ -7,12 +7,15 @@ import { writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { FAUX_EXTENSION, cleanupAll, freshDir, startPiRpc, writeFauxScript } from "../loop-guard/rpc-test-helpers.ts";
+import { startResponsesServer } from "../call-timing/test-support/responses-server.ts";
 import {
   DEFAULT_RATE_LIMIT_DELAY_MS,
+  RETRY_AFTER_MAX_MS,
   SERVER_JITTER_RATIO,
   backoffConfig,
   classifyRetryError,
   extraRetryDelayMs,
+  retryAfterMs,
   retryPolicy,
 } from "./backoff.ts";
 
@@ -84,6 +87,28 @@ test("all retry classes add bounded jitter without reducing rate-limit floor", (
   assert.equal(extraRetryDelayMs("rate-limit", 90_000, config, () => 0), 0);
 });
 
+test("retry-after is read in seconds, as an HTTP date or as retry-after-ms, and nothing else", () => {
+  const now = Date.parse("2026-11-25T12:00:00Z");
+  assert.equal(retryAfterMs({ "retry-after": "120" }, now), 120_000);
+  assert.equal(retryAfterMs({ "Retry-After": " 7 " }, now), 7_000, "names match case-insensitively");
+  assert.equal(retryAfterMs({ "retry-after": "Wed, 25 Nov 2026 12:00:30 GMT" }, now), 30_000);
+  assert.equal(retryAfterMs({ "retry-after": "Wed, 25 Nov 2026 11:59:00 GMT" }, now), 0, "a past date means now");
+  assert.equal(retryAfterMs({ "retry-after-ms": "2500" }, now), 2_500);
+  assert.equal(retryAfterMs({ "retry-after-ms": "2500", "retry-after": "9" }, now), 2_500, "the millisecond header is more precise");
+  for (const value of ["", "soon", "-5", "1.5e3x", "Infinity"]) assert.equal(retryAfterMs({ "retry-after": value }, now), undefined, value);
+  assert.equal(retryAfterMs({}, now), undefined);
+});
+
+test("a server's retry-after raises the wait, never lowers the 429 floor, and is capped", () => {
+  const config = { rateLimitDelayMs: DEFAULT_RATE_LIMIT_DELAY_MS };
+  const none = () => 0;
+  assert.equal(2000 + extraRetryDelayMs("rate-limit", 2000, config, none, 120_000), 120_000);
+  assert.equal(2000 + extraRetryDelayMs("rate-limit", 2000, config, none, 5_000), 60_000, "the floor still applies");
+  assert.equal(2000 + extraRetryDelayMs("server", 2000, config, none, 30_000), 30_000, "a 503 with retry-after waits for it too");
+  assert.equal(2000 + extraRetryDelayMs("rate-limit", 2000, config, none, 24 * 3_600_000), RETRY_AFTER_MAX_MS);
+  assert.equal(extraRetryDelayMs("other", 2000, config, none, undefined), 0, "no header, no change");
+});
+
 test("settings: rateLimitDelayMs and pi's retry block fall back to defaults when invalid", () => {
   assert.equal(backoffConfig({}).rateLimitDelayMs, DEFAULT_RATE_LIMIT_DELAY_MS);
   assert.equal(backoffConfig({ loopPi: { retryBackoff: { rateLimitDelayMs: "60000" } } }).rateLimitDelayMs, DEFAULT_RATE_LIMIT_DELAY_MS);
@@ -129,5 +154,44 @@ test("a 429 from the model waits at least the rate-limit floor before pi's own r
     assert.equal(end.success, true);
   } finally {
     await session.close();
+  }
+});
+
+test("a 429 with retry-after from the openai Responses route waits for the server's hint", async () => {
+  // pi 1.6.1 fires after_provider_response for the 429 itself, so its retry-after reaches the wait.
+  const ok = [
+    { frame: { type: "response.created", sequence_number: 0, response: { id: "resp_ok", object: "response", created_at: 1, status: "in_progress", model: "fixture", output: [] } } },
+    { frame: { type: "response.completed", sequence_number: 1, response: { id: "resp_ok", object: "response", created_at: 1, status: "completed", model: "fixture", output: [],
+      usage: { input_tokens: 1, input_tokens_details: { cached_tokens: 0 }, output_tokens: 1, output_tokens_details: { reasoning_tokens: 0 }, total_tokens: 2 } } } },
+  ];
+  const server = await startResponsesServer([[{ httpError: 429, headers: { "retry-after": "3" } }]], ok);
+  const home = freshDir("retry-after-home-");
+  writeFileSync(join(home, "settings.json"), JSON.stringify({
+    defaultProjectTrust: "never",
+    retry: { maxRetries: 3, baseDelayMs: 100, provider: { maxRetries: 0 } },
+    loopPi: { retryBackoff: { rateLimitDelayMs: 500 } },
+  }));
+  const session = startPiRpc({
+    extensions: [join(HERE, "../call-timing/test-support/responses-provider.ts"), CEILING_EXTENSION],
+    fauxScriptPath: join(home, "unused.json"), agentDir: home,
+    subagentTempRoot: freshDir("retry-after-tmp-"), cwd: freshDir("retry-after-cwd-"), sessionArgs: [],
+    extraArgs: ["--provider", "progress-fixture", "--model", "fixture"],
+    env: { LOOP_PI_PROGRESS_BASE_URL: server.baseUrl, NO_PROXY: "127.0.0.1", no_proxy: "127.0.0.1" },
+  });
+  try {
+    session.send({ id: "p1", type: "prompt", message: "GO" });
+    await session.waitFor((e) => e.type === "message_end" && (e.message as { stopReason?: string })?.stopReason === "error");
+    const failedAt = Date.now();
+    const retry = await session.waitFor((e) => e.type === "auto_retry_start");
+    const waited = Date.now() - failedAt;
+    assert.equal(retry.delayMs, 100);
+    // The configured floor is 500 ms; the server asked for 3 s, so pi's retry starts after that.
+    assert.ok(waited >= 2_700, `pi's retry started ${waited} ms after the 429; expected the server's 3 s retry-after first`);
+    const end = await session.waitFor((e) => e.type === "auto_retry_end");
+    assert.equal(end.success, true);
+    assert.equal(server.requests(), 2);
+  } finally {
+    await session.close();
+    await server.close();
   }
 });
