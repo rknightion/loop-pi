@@ -208,6 +208,28 @@ test("encrypted-only reasoning counts completed items, keeps TTFT null and is re
   }
 });
 
+test("an HTTP error response is observed: its headers are recorded on the failed turn", async () => {
+  // pi 1.6.1 fires after_provider_response for HTTP error responses on the openai Responses route;
+  // 1.6.0 fired it on success only, so a failed turn had no response headers and no observation.
+  const { server, home, session } = await launch([[{ httpError: 400 }]]);
+  try {
+    await settle(session, server);
+    const message = finalRecord(home);
+    assert.equal(message.stopReason, "error");
+    const p = message.loopPiProgress;
+    assert.equal(p.providerResponses, 1, "the error response is one observation");
+    assert.equal(typeof p.firstResponseAt, "number");
+    assert.equal(p.providerRequestId, "fixture-request-1");
+    assert.equal(p.modelEvents, 0, "an error response is not model progress");
+    assert.equal(message.loopPiTiming.headers["x-request-id"], "fixture-request-1");
+    assert.equal(message.loopPiTiming.headers["x-ratelimit-remaining-requests"], "0");
+    assert.equal(message.loopPiTiming.firstTokenAt, null);
+  } finally {
+    await session.close();
+    await server.close();
+  }
+});
+
 test("visible reasoning, text and tool-call deltas are counted without their content", async () => {
   const first = script().start().reasoning(SUMMARY).text([`${TEXT} one`, " two"]).toolCall([`{"path":"`, `${ARGS}.txt"}`]).complete();
   const { server, home, session } = await launch([first.steps]);

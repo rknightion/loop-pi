@@ -1599,8 +1599,10 @@ transient `loop-status-program-status` capture below, set and removed in the sam
   lookups are never altered. An unset `PI_SUBAGENTS_TEMP_ROOT` shows no nested runs. From
   pi-subagents 0.90.0 the native no-id listing also projects each listed lane's nested children under
   that lane (`src/runs/background/async-status.js` `attachNestedChildren`; 0.89.2 filed them under
-  the wrong run id, so it never found them), so section (a) can repeat runs the native listing
-  already shows under their lane. A nested run is still not a top-level row of the root's listing.
+  the wrong run id, so it never found them) as `↳ <label> [<id>] <state>`. Section (a) therefore
+  lists only nested runs whose `[<id>]` the native text does not already carry, for example when the
+  package could not resolve a lane's nested route. A nested run is still not a top-level row of the
+  root's listing.
 - **Program status (OSC 7501).** pi 1.6.1's interactive mode reports its own state to a terminal that
   supports the Program Status Protocol (Orca among them): `working` during a run, then `done`,
   `error` or `idle` (after an abort) at `agent_settled`, and `blocked` while a dialog waits. A loop

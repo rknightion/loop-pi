@@ -144,6 +144,22 @@ test("the root's subagent status listing gains the nested runs", () => {
   }
 });
 
+test("a nested run the native listing already shows under its lane is not listed again", () => {
+  const f = fixture();
+  const previous = process.env.PI_SUBAGENTS_TEMP_ROOT;
+  try {
+    // pi-subagents 0.90.0 projects a lane's nested children under the lane as "↳ <label> [<id>] <state>".
+    const native = `Active async runs: 1\n\n- ${LANE} senior\n  ↳ worker [${CHILD}] running`;
+    assert.equal(startRoot(f)({ action: "status" }, native), undefined, "nothing to add: the native listing has the child");
+    // A child the native listing could not project (for example a failed nested reconciliation) is still added.
+    const result = startRoot(f)({ action: "status" }, `Active async runs: 1\n\n- ${LANE} senior`);
+    assert.match(result.content[0].text, new RegExp(`- ${CHILD} worker \\(single, running\\) parent ${LANE}`));
+  } finally {
+    if (previous === undefined) delete process.env.PI_SUBAGENTS_TEMP_ROOT;
+    else process.env.PI_SUBAGENTS_TEMP_ROOT = previous;
+  }
+});
+
 test("status for a nested run id is answered instead of 'Async run not found'", () => {
   const f = fixture();
   const previous = process.env.PI_SUBAGENTS_TEMP_ROOT;
