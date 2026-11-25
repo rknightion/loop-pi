@@ -45,8 +45,9 @@ launcher wrapper, leak scan). `extensions/SEAMS.md` is the contract between the 
 
 `justfile` is the only task surface. `just check` is `fmt-check lint test leak`; `lint` is
 `tsc --noEmit` plus a Python parse of `bin/`. `.github/workflows/ci.yml` runs `just fmt-check lint
-test` on Linux, `just test` on macOS, the leak scan with the private term list, trufflehog,
-actionlint and zizmor. Workflow actions are pinned by SHA with a version comment. New Python tools
+test` on Linux, `just test` on macOS (skipped only for a pull request that changes nothing but README.md), one
+history-scans job (the leak scan with the private term list, then trufflehog), actionlint and zizmor,
+and a ci-success aggregate that fails unless all of them passed. Workflow actions are pinned by SHA with a version comment. New Python tools
 go in the `python_tests` list in the `justfile` and, in `bin/`, carry the `python-floor` block
 (Python 3.15; `bin/leak-scan` alone does not, so the git hooks never refuse a commit); new `*.test.ts` files are picked up by glob.
 

@@ -13,6 +13,42 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Decides whether the macOS leg can be skipped. Only a pull request whose complete, verified file
+  # list is exactly README.md skips it; every other event or doubtful answer runs macOS.
+  changes:
+    name: changes
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      macos: ${{ steps.decide.outputs.macos }}
+    steps:
+      - name: Decide whether macOS must run
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+        run: |
+          decide() { echo "macos=$1" >> "$GITHUB_OUTPUT"; echo "macOS: $1 ($2)"; }
+          if [ "${EVENT_NAME}" != "pull_request" ]; then decide true "not a pull request"; exit 0; fi
+          if ! files="$(gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/files" \
+            --jq '.[] | .filename, (.previous_filename // empty)')"; then
+            decide true "file list unavailable"; exit 0
+          fi
+          listed="$(gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/files" --jq '.[].filename' | wc -l)" || listed=-1
+          if [ -z "${files}" ] || [ "${listed}" != "${PR_CHANGED_FILES}" ]; then
+            decide true "file list empty or incomplete"; exit 0
+          fi
+          if [ -n "$(printf '%s\n' "${files}" | grep -vx 'README.md' || true)" ]; then
+            decide true "files other than README.md changed"; exit 0
+          fi
+          decide false "only README.md changed"
+
   just-check:
     name: just check
     runs-on: ubuntu-26.04
@@ -80,6 +116,8 @@ jobs:
 
   macos-test:
     name: just test (macOS)
+    needs: changes
+    if: needs.changes.outputs.macos != 'false'
     runs-on: macos-26
     timeout-minutes: 25
     permissions:
@@ -110,10 +148,10 @@ jobs:
       - name: just test
         run: just test
 
-  leak-scan:
-    name: leak-scan
+  history-scans:
+    name: history-scans
     runs-on: ubuntu-26.04
-    timeout-minutes: 10
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
@@ -149,24 +187,6 @@ jobs:
           python3 bin/leak-scan --public-only --history
           python3 bin/leak-scan --public-only --path .
 
-  trufflehog:
-    name: trufflehog
-    runs-on: ubuntu-26.04
-    timeout-minutes: 15
-    permissions:
-      contents: read
-    steps:
-      - name: Harden the runner (audit egress)
-        uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
-        with:
-          egress-policy: audit
-
-      - name: Checkout repository (full history)
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
       # Bump the version and the checksum together, copying the checksum from the release's own
       # trufflehog_<version>_checksums.txt asset; never type it by hand.
       - name: Install trufflehog
@@ -175,12 +195,12 @@ jobs:
           TRUFFLEHOG_LINUX_AMD64_SHA256: "40377e6572495412fb9ba0bc21c9401f73b72f1d2afd11b9931bc4a5ed622866"
         run: |
           archive="trufflehog_${TRUFFLEHOG_VERSION}_linux_amd64.tar.gz"
-          curl --fail --show-error --silent --location --retry 5 --retry-all-errors --output "${archive}" \
+          curl --fail --show-error --silent --location --retry 5 --retry-all-errors --output "${RUNNER_TEMP}/${archive}" \
             "https://github.com/trufflesecurity/trufflehog/releases/download/v${TRUFFLEHOG_VERSION}/${archive}"
-          printf '%s  %s\n' "${TRUFFLEHOG_LINUX_AMD64_SHA256}" "${archive}" | sha256sum --check --strict
+          printf '%s  %s\n' "${TRUFFLEHOG_LINUX_AMD64_SHA256}" "${RUNNER_TEMP}/${archive}" | sha256sum --check --strict
           mkdir -p "${RUNNER_TEMP}/trufflehog"
-          tar -xzf "${archive}" -C "${RUNNER_TEMP}/trufflehog" trufflehog
-          rm -f "${archive}"
+          tar -xzf "${RUNNER_TEMP}/${archive}" -C "${RUNNER_TEMP}/trufflehog" trufflehog
+          rm -f "${RUNNER_TEMP}/${archive}"
 
       - name: Scan the full history
         run: '"${RUNNER_TEMP}/trufflehog/trufflehog" git file://. --results=verified,unknown --fail --no-update'
@@ -198,3 +218,26 @@ jobs:
       security-events: write
       actions: read
     uses: rknightion/.github/.github/workflows/zizmor.yml@20533b678728ec119e52401c1e48b31f3c8b83c4 # v1.32.5
+
+  # The single required check. It fails unless every gate above succeeded; macOS may be skipped
+  # only when the changes job succeeded and decided that only README.md changed.
+  ci-success:
+    name: ci-success
+    if: always()
+    needs: [changes, just-check, macos-test, history-scans, actionlint, zizmor]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Require every gate
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          printf '%s\n' "${RESULTS}" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          printf '%s\n' "${RESULTS}" | jq -e '
+            . as $n
+            | ($n.changes.result == "success")
+              and ([$n["just-check"], $n["history-scans"], $n.actionlint, $n.zizmor] | all(.result == "success"))
+              and ($n["macos-test"].result == "success"
+                   or ($n["macos-test"].result == "skipped" and $n.changes.outputs.macos == "false"))
+          ' > /dev/null
