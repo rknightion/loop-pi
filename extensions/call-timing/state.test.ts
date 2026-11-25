@@ -127,3 +127,35 @@ test("dropped reasoning counts only removed reasoning items and bounds the reaso
   assert.equal(Object.keys(dropped.reasons).length, 17, "16 distinct reasons, then other");
   assert.equal(dropped.reasons.other, 5);
 });
+
+test("a reason seen before the cap keeps its own key after the cap overflows, and literal other/unknown reasons share the overflow and missing buckets", () => {
+  const emit = emitter();
+  emit("turn_start");
+  const many = Array.from({ length: 16 }, (_, i) => "reason_" + i);
+  const message = { ...assistant, diagnostics: [
+    diagnostic(...many),
+    diagnostic("overflow_reason", "reason_0", "reason_0", "other", "unknown", undefined, "y".repeat(64) + "a", "y".repeat(64) + "b"),
+  ] };
+  const dropped = emit("message_end", { message }).message.loopPiTiming.droppedReasoning;
+  assert.equal(dropped.reasons.reason_0, 3, "an early reason still counts under its own key after the cap");
+  assert.equal(dropped.reasons.overflow_reason, undefined, "a new reason past the cap does not get a key");
+  assert.equal(dropped.reasons.other, 6, "overflow, a literal other, a missing reason and two reasons sharing a prefix past the cap share other");
+  assert.equal(dropped.reasons.unknown, undefined, "past the cap even unknown has no key of its own");
+  assert.equal(dropped.count, 24);
+  assert.equal((Object.values(dropped.reasons) as number[]).reduce((a, b) => a + b, 0), dropped.count, "totals stay right");
+});
+
+test("a literal unknown reason and a missing reason share the unknown key", () => {
+  const emit = emitter();
+  emit("turn_start");
+  const end = emit("message_end", { message: { ...assistant, diagnostics: [diagnostic("unknown", undefined, "")] } });
+  assert.deepEqual(end.message.loopPiTiming.droppedReasoning, { count: 3, reasons: { unknown: 3 } });
+});
+
+test("reasons sharing a 64-character prefix merge under one key", () => {
+  const emit = emitter();
+  emit("turn_start");
+  const prefix = "z".repeat(64);
+  const end = emit("message_end", { message: { ...assistant, diagnostics: [diagnostic(prefix + "1", prefix + "2", prefix)] } });
+  assert.deepEqual(end.message.loopPiTiming.droppedReasoning, { count: 3, reasons: { [prefix]: 3 } });
+});
