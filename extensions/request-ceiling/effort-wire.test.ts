@@ -1,9 +1,8 @@
 // pi-ai 1.3.0 marks the GPT-6 family `supportsMidConvoEffort` and exempts only Sign in with ChatGPT at
-// api.openai.com. Behind codex-lb (a ChatGPT-subscription proxy) every request then carries
-// `reasoning.effort: "medium"` plus a `configuration_update` input item, which codex-lb answers at
-// medium effort, and which request-ceiling's portableRequest rejects, so managed recovery is denied.
-// The rob/agents pi-overlay turns the flag off at provider level. This drives the pinned pi CLI with a
-// models.json of the overlay's shape against a capture server and checks the request body on the wire.
+// api.openai.com. Behind any other `openai` base URL (an API-compatible proxy) every request then
+// carries `reasoning.effort: "medium"` plus a `configuration_update` input item, which the proxy may
+// answer at medium effort. A models.json can turn the flag off at provider level. This drives the
+// pinned pi CLI with such a models.json against a capture server and checks the request body on the wire.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -14,7 +13,6 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { hermeticPiEnv } from "../test-support/hermetic-env.ts";
 import { CLI_PATH } from "../loop-wait/test-helpers.ts";
-import { portableRequest } from "./recovery.ts";
 
 const dirs: string[] = [];
 after(() => { for (const dir of dirs) rmSync(dir, { recursive: true, force: true }); });
@@ -64,12 +62,10 @@ test("bare pi 1.3.0 behind a proxy sends effort medium and a configuration_updat
   const body = await captureFirstRequest(undefined);
   assert.equal(body.reasoning?.effort, "medium");
   assert.deepEqual(updates(body).map((item) => item.reasoning?.effort), ["high"]);
-  assert.equal(portableRequest(body), false, "request-ceiling cannot replay a request carrying configuration_update");
 });
 
-test("the overlay's provider compat sends the requested effort and a portable request", { timeout: 60_000 }, async () => {
+test("provider compat sends the requested effort and no configuration_update", { timeout: 60_000 }, async () => {
   const body = await captureFirstRequest({ supportsMidConvoEffort: false });
   assert.equal(body.reasoning?.effort, "high");
   assert.deepEqual(updates(body), []);
-  assert.equal(portableRequest(body), true);
 });

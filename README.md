@@ -35,20 +35,25 @@ Three pi extensions, a home template and an installer:
   settled and its last `closeout-check` is `ok`; a root with no live
   lane and nothing armed to wake it is told to dispatch ready work or close out), and triggers an
   optional transcript sync script.
-- Recovery is automatic for an armed root: when a provider error, a stalled request or a
-  request-ceiling abort leaves it stopped, loop-continuation resumes it after a backoff that starts
-  at 1 minute and doubles to a 15-minute cap (`loopPi.rootRecovery`), with no attempt limit, and
-  records each resume as a `judgement` in the state log. Authentication, policy and
-  context-length failures still stop the root and write an incident; an operator's abort is never
-  resumed. Quota failures get at most two automatic retries, persisted across reloads, then stop
-  until fresh owner input; child notifications and healthy automatic turns do not reset that budget.
-  Lanes are not auto-resumed.
+- Recovery is automatic for every root with a run folder (`LOOP_PI_RUN_DIR`), with or without a
+  v3 launch: when a provider error, a stalled request or a request-ceiling abort leaves it stopped,
+  loop-continuation resumes it after a backoff that starts at 1 minute and doubles to a 15-minute
+  cap, at most 6 times in any rolling hour (`loopPi.rootRecovery`). Past that it stops and writes an
+  incident in the run folder. Each resume or stop is a `judgement` in the v3 state log, or in
+  `root-recovery.jsonl` in the run folder. Authentication, policy, encrypted-content and
+  context-length failures stop the root and write an incident; an operator's abort and a finished
+  root are never resumed, and the owner's input cancels a pending resume. Quota failures get at
+  most two automatic retries, persisted across reloads, then stop until fresh owner input. Lanes
+  are not auto-resumed.
 - `extensions/request-ceiling` bounds each model request in the root and every lane by 15 minutes
   without observed model progress and 75 minutes absolute elapsed time (both configurable), and
   turns an output-budget stop with no output into an incident. Transport keepalives cannot extend
   inactivity; active encrypted reasoning may continue past an hour. Either one sends the
   session a follow-up message that starts its next turn, a bounded number of times in a row.
-  It also adds jitter to pi's retry wait after a 5xx and holds a 429 retry to a flat 60 s.
+  Per request, pi's own retry repeats every transient failure (429, 5xx, network and stream
+  cuts) for about 15 minutes (`retry.maxRetries` 16); request-ceiling adds jitter to each wait,
+  holds a 429 retry to at least 60 s, and stops at once on an authentication, policy or
+  encrypted-content refusal (a short hard-stop list), even one sent with a 5xx status.
 - Telemetry: the root and every lane load Grafana's Agent Observability pi extension
   (`@grafana/agento11y-pi`, pinned), configured by its own
   `~/.config/agento11y/config.env` and any `AGENTO11Y_*` environment; without an endpoint it exports nothing. The launcher

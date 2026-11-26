@@ -76,7 +76,7 @@ Recovery depends on the pinned agent loop refusing to execute tools from failed 
 responses and native retry preserving earlier completed history. Exercise the real Responses
 stream and a side-effecting local tool when changing this boundary; helper-only classification
 checks do not establish it. Hosted tools, protected history and operator cancellation remain
-separate boundaries. Automatic wakes must preserve notices without resetting the outage budget.
+separate boundaries. Automatic wakes must preserve notices without resetting the root's hourly resume cap.
 
 ## Child metadata observation
 

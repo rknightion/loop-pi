@@ -97,7 +97,7 @@ export default function (pi: ExtensionAPI): void {
   let ownerInputPending = false;
   // True from the start of a hold until its messages are delivered: the queue is then persisted.
   let persistHeld = false;
-  // Set when request-ceiling or retry recovery is about to abort a run, not the operator.
+  // Set when request-ceiling is about to abort a run, not the operator.
   let ceilingAbort = false;
   // Session identities pi-subagents may stamp on this session's async-started events.
   let sessionIdentities = new Set<string>();
@@ -337,11 +337,6 @@ export default function (pi: ExtensionAPI): void {
   pi.events.on("loop-recovery:request-timeout", () => {
     ceilingAbort = true;
   });
-  // Recovery emits this synchronously before an episode-expiry or halted-recovery abort.
-  // Like a request timeout, it exempts only the next settle from the operator wake hold.
-  pi.events.on("loop-recovery:abort", () => {
-    ceilingAbort = true;
-  });
   pi.events.on("loop-wait:query-timers", (data) => {
     (data as { reply: (timers: TimerSnapshot[]) => void }).reply(timerManager?.list() ?? []);
   });
@@ -536,9 +531,7 @@ export default function (pi: ExtensionAPI): void {
       // triggerTurn:false message to context immediately while idle, and the final triggerTurn:true
       // message starts exactly one turn that sees the whole batch as context.
       deliver: (message, opts) => {
-        let allowed = true;
-        pi.events.emit("loop-recovery:may-follow-up", { reply: (value: boolean) => { allowed = value; } });
-        pi.sendMessage(message, { triggerTurn: opts.triggerTurn && allowed });
+        pi.sendMessage(message, { triggerTurn: opts.triggerTurn });
       },
     });
 

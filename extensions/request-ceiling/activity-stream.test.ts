@@ -10,7 +10,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const MINUTE = 60000;
 after(cleanupAll);
 
-async function streamCase(run: (peer: any) => Promise<void>, recovery = false) {
+async function streamCase(run: (peer: any) => Promise<void>, followUps = 0) {
   const cwd = freshDir("activity-work-"); const home = freshDir("activity-home-");
   const peers: ServerResponse[] = [];
   const bodies: any[] = [];
@@ -29,7 +29,7 @@ export default function(pi) {
   pi.on("provider_stream_event",e=>{ if(e.data?.type==="fixture.clock") { if(e.data.jump) mock.timers.setTime(Date.now()+e.data.ms); else mock.timers.tick(e.data.ms); writeFileSync(${JSON.stringify(ack)},JSON.stringify({id:e.data.id,now:Date.now()})); } });
   pi.registerProvider("fixture",{baseUrl:"http://127.0.0.1:${port}/v1",api:"openai-responses",apiKey:"test",models:[{id:"fixture",name:"Fixture",reasoning:true,input:["text"],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:100000,maxTokens:80000}]});
 }`);
-  writeFileSync(join(home,"settings.json"),JSON.stringify({httpIdleTimeoutMs:100000000, retry:{maxRetries:3,provider:{maxRetries:0}},loopPi:{requestCeiling:{inactivityMs:15*MINUTE,absoluteMs:75*MINUTE,maxFollowUps:recovery?2:0},retryRecovery:{providerIds:recovery?["fixture"]:[],episodeMs:20*MINUTE},progress:{checkpointIntervalMs:60000}}}));
+  writeFileSync(join(home,"settings.json"),JSON.stringify({httpIdleTimeoutMs:100000000, retry:{maxRetries:3,provider:{maxRetries:0}},loopPi:{requestCeiling:{inactivityMs:15*MINUTE,absoluteMs:75*MINUTE,maxFollowUps:followUps},progress:{checkpointIntervalMs:60000}}}));
   const session = startPiRpc({extensions:[fixture,join(HERE,"index.ts"),join(HERE,"..","call-timing","index.ts")],extraArgs:["--provider","fixture","--model","fixture"],agentDir:home,subagentTempRoot:freshDir(),cwd,fauxScriptPath:""});
   let clockId=0, itemId=0;
   const send=(event:object,n=0)=>peers[n].write(`data: ${JSON.stringify(event)}\n\n`);
@@ -83,28 +83,13 @@ test("endless native reasoning reaches its fixed absolute limit",{timeout:20000}
   });
 });
 
-test("long first request gets recovery budget from failure, and reasoning cannot extend that episode",{timeout:20000},async()=>{
-  await streamCase(async({session,tick,reasoning,peers}:any)=>{
-    for(let i=0;i<14;i++){await tick(5*MINUTE);await reasoning();}
-    await tick(5*MINUTE);await waitForCondition(()=>peers.length===2?true:undefined,5000);
-    await tick(10*MINUTE,1);await reasoning(1);
-    await tick(9*MINUTE,1);await reasoning(1);
-    await tick(MINUTE,1);
-    await session.waitFor((e:any)=>e.type==="message_end"&&(e.message as any)?.customType==="loop-recovery-exhausted",5000);
-    assert.equal(peers.length,2);
-    assert.equal(ends(session).at(-1).loopPiRecovery.reason,"episode-expired");
-  },true);
-});
-
-
-test("native operator cancellation retains abort and creates no recovery incident",{timeout:20000},async()=>{
+test("native operator cancellation retains abort and creates no incident",{timeout:20000},async()=>{
   await streamCase(async({session,reasoning,tick}:any)=>{
     for(let i=0;i<6;i++){await tick(5*MINUTE);await reasoning();} session.send({type:"abort",id:"cancel"});
     await session.waitFor((e:any)=>e.type==="agent_settled",5000);
     assert.equal(ends(session)[0].stopReason,"aborted");
     assert.equal(notice(session),undefined);
-    assert.ok(!session.events.some((e:any)=>e.type==="message_end"&&e.message?.customType==="loop-recovery-required"));
-  },true);
+  },2);
 });
 
 test("late local-tool progress cannot reopen a deadline whose timer was delayed",{timeout:20000},async()=>{

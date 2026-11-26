@@ -9,7 +9,7 @@
   "httpIdleTimeoutMs": 300000,
   "tuiMode": "regular",
   "retry": {
-    "maxRetries": 60,
+    "maxRetries": 16,
     "baseDelayMs": 2000,
     "maxAgentDelayMs": 60000,
     "provider": {

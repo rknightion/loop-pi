@@ -141,9 +141,9 @@ public statement of those contracts.
 - **GPT-6 effort (pi-ai 1.6.0):** the catalogue marks the GPT-6 family `supportsMidConvoEffort`.
   Sign in with ChatGPT at `https://api.openai.com/v1` is exempt: it sends the level in
   `reasoning.effort` alone. Any other `openai` base URL (an API-compatible proxy) would carry
-  `reasoning.effort: "medium"` plus a `configuration_update` input item, which request-ceiling's
-  `portableRequest` rejects, so managed recovery is denied; such a route sets
-  `providers.openai.compat.supportsMidConvoEffort: false` in `models.json`.
+  `reasoning.effort: "medium"` plus a `configuration_update` input item, which such a proxy may
+  answer at medium effort; such a route sets `providers.openai.compat.supportsMidConvoEffort: false`
+  in `models.json`.
   `request-ceiling/effort-wire.test.ts` proves both shapes on the wire against the pinned CLI.
 - **No output cap on Sign in with ChatGPT (pi-ai 1.6.0):** pi omits `max_output_tokens`,
   `temperature` and the prompt-cache retention fields for a ChatGPT sign-in token
@@ -554,230 +554,94 @@ set per model in the home's `models.json` `modelOverrides`.
   error outcome instead of nudging.
 - At `agent_settled` either incident sends one `loop-request-incident` custom message with
   `triggerTurn: true`, up to `maxFollowUps` in a row; any `stop` or `toolUse` response resets the
-  chain. For opted recovery providers, the recovery safety authorizer and shared failure/episode
-  budget additionally gate this continuation. A portable local-tool Responses timeout may continue
-  after partial output only when the pinned failed-response boundary proves its tools never ran.
-  Denied or exhausted managed recovery emits only the recovery controller's cause-specific notice,
-  not a second actionable incident notice. Incident files are still retained. Other providers keep
-  the existing bounded incident behavior.
+  chain. The aborted request's partial output, tool calls included, never runs.
 
-## Retry recovery episode
+## Retry and hard stops
 
-The request-ceiling entries install a retry episode controller. `loopPi.retryRecovery`
-accepts `episodeMs` (default 1200000), `providerIds` (default empty), and `maxAttempts`
-(integer 1 through 5, default 5, counting the original failed attempt). The effective attempt limit
-is also bounded by native `retry.maxRetries + 1` (native default 3 retries means 4 attempts);
-`retry.enabled: false` means one attempt. Ceiling continuations also honor `maxFollowUps`.
-Native retries and ceiling continuations consume the same consecutive-failure counter, not nested
-budgets. Provider-internal retries must be disabled (`retry.provider.maxRetries` absent or zero,
-which is the pinned Responses default): their attempts and classifications are not exposed at the
-extension boundary, so configured internal retries refuse the opted request before dispatch.
-CLI admission reads the supported SettingsManager merge of home and trusted project settings;
-SDK adapters supplying settings must supply their effective runtime settings. Unknown settings
-refuse configured managed admission rather than assuming zero hidden retries.
-The episode and
-proxy classification are enabled only for those provider ids; other providers retain their
-existing retry policy. An episode starts at
-its first safely recoverable assistant failure, at the local observation of that failure, and
-includes subsequent waits and requests. Healthy first-request time is outside the episode.
-Successful `stop` or `toolUse` completion or genuine interactive/RPC input received while idle
-resets it. Reasoning activity does not reset or extend it. Queued input
-cannot reset or extend an active episode. Compaction and extension
-follow-ups do not. Settlement disarms the active timer but retains its deadline; expiry
-aborts active work and refuses synthetic restart, without starting a replacement turn.
-A denied protected or ambiguous attempt latches recovery off until idle genuine input or session/model
-reset. `loop-recovery:may-follow-up` synchronously gates the per-request ceiling's synthetic
-continuation; a timeout authorizes replay after output only for positively established portable
-local-tool Responses requests whose failed-response tools did not run. Protected context, hosted
-or ambiguous output, authentication and policy refusals never authorize replay.
-The ceiling additionally queries `loop-recovery:ceiling-decision` synchronously with
-`{consecutive, maxFollowUps, reply({managed, allowed, attempts, maxAttempts})}`. Only the ceiling
-uses this richer response; the existing boolean wake query is unchanged. A managed refusal owns
-its stop/exhaustion notice, and the ceiling records its incident without sending a duplicate.
-`attempts` counts admitted Agent and native summary stream invocations at the surviving header
-boundary exactly once, not payload callbacks or locally refused stale turns. The attempt cap can decrease but cannot increase during an active episode.
-While halted or expired, extension-sourced input is handled without starting a model turn.
-Child notices already appended to the transcript remain available. The loop-wait delivery adapter
-uses the same synchronous query to append fired notices without triggering a refused turn.
-An ordinary user input while idle still resets recovery; automatic input cannot reset its budget.
-Changing providers disposes the previous episode. Ordinary user abort preserves its outcome.
-The request-ceiling recovery controller synchronously emits `loop-recovery:abort` with `{}`
-before calling `ctx.abort()` for episode expiry or halted recovery. This attributes the abort
-without authorizing a replacement turn.
-The per-request ceiling emits `loop-recovery:request-timeout` before abort so its failure
-also starts the episode; ordinary user cancellation does not start one. Exhaustion posts
-a visible `loop-recovery-exhausted` message with `triggerTurn: false`.
+pi's native retry is the only per-request retry. pi 1.6.1 repeats a run whose last assistant
+message is an error that pi-ai's `isRetryableAssistantError` (`utils/retry.js`) deems transient
+(429, 5xx, overloaded, network and stream cuts) and that is not a context overflow, up to
+`retry.maxRetries` times with `retryDelayMs` between attempts; any success resets its counter.
+The failed attempt is kept in raw history but omitted from the model's input, and the pinned agent
+loop never runs a tool call from an errored assistant message, so a replay keeps earlier completed
+tool results and drops the failed attempt's calls (`native-retry.e2e.test.ts`). Provider-level
+retries (`retry.provider.maxRetries`) stay at zero, so every attempt is visible to pi's retry and to
+the request ceiling.
 
-Only explicitly configured provider ids receive structured proxy classification and unique
-`x-client-request-id` headers. Stable session affinity is unchanged. Classification observes
-parsed provider errors before normalization; bounded status/code metadata is retained on the
-assistant message, together with bounded `reason`, `outputObserved`, `requestPortable` and
-`toolsExecuted` fields. Sanitized upstream classification/type/status/request correlation is
-separate from the recovery disposition; known policy refusals (including `cyber_policy`) and
-authentication refusals remain distinct and nonretryable, even if their body mentions a transient
-error or context overflow. The visible stop includes its allowlisted upstream code. Server
-correlation comes from the response-header event, which pi 1.6.1 also fires for HTTP error
-responses; it stays null when a failure has no HTTP response (a transport error) or the response
-carries no `x-request-id` that `correlation()` accepts. The unique client request id remains
-available separately. Recovery metadata and stop notices never
-retain error bodies or credentials; the existing native compaction diagnostic is unchanged.
-Stop messages name the reason and ask the operator to inspect saved work
-before resuming; one non-triggering `loop-recovery-required` notice surfaces the stop. On an armed
-root the stop is not the end: loop-continuation classifies it and resumes it after a backoff, or
-records an owner-actionable stop (see "Automatic root recovery"). Lanes are never auto-resumed.
+- Hard stops: `installRetryBackoff` (in `extensions/request-ceiling/`, `hard-stop.ts` for the pure
+  list) rewrites a failed assistant message at `message_end`, in the root and every lane, when it is:
+  - authentication: status 401 or 403, or a code, type or text naming `invalid_api_key`,
+    `permission_denied`, `insufficient_permissions`, `permission_error`, `authentication_error`,
+    unauthorized or forbidden;
+  - policy: `cyber_policy`, `content_policy*` or `policy_error`, whatever the status (a policy
+    refusal can arrive as a 5xx);
+  - encrypted content: `invalid_encrypted_content`.
 
-For the pinned pi Responses runtime, a failed assistant response exits the agent loop before
-local tool execution. Native retry omits only that failed attempt from model projection; earlier
-completed tool calls and results remain. Therefore portable, originally unanchored Responses
-requests with only local function/custom tools may retry a structured server `stream_incomplete`
-even after partial text, reasoning or tool-call output. No local tool may have started in that
-request, and observed hosted/unknown output items refuse replay. Input with unresolved or duplicate tool
-calls/results, hosted items, bound files or explicit anchors is protected. Unknown structured errors,
-authentication errors, unclassified nonretryable failures and explicit continuity refusals stop.
-No-output errors recognized by pi as transient retain native retry behavior. From pi-ai 1.6.0 that
-includes "Connection closed." and bare Node socket codes (`ECONNRESET`, `EPIPE`, `ETIMEDOUT`,
-`ECONNABORTED`, `ECONNREFUSED`, "connection reset by peer"), which 1.5.2 stopped as
-`unclassified-failure`, and from pi-ai 1.6.1 Cloudflare's HTTP 525 and the gateway and
-OpenRouter wordings listed under "Retry backoff" (`transport-retry.test.ts`). For portable Responses requests without output, context-window overflow remains available to
-native compaction. During an active opted-in episode, only the first static single-call native
-summary is admitted, on positively known physical standard Responses routing with zero effective
-provider retries and remaining shared count/deadline. Positive route provenance currently means
-a static non-builtin compatibility registration exposed by the public registry, without native
-provider replacement, custom streaming, OAuth or dynamic model refresh. The selected physical
-model must match the registry route; free-form model sampling overrides are also declined because
-they can inject hosted tools or bound state into an unobserved summary. Builtin/inherited and
-models-file-only provenance is conservatively unknown here, not rerouted or silently trusted.
-As with the Agent payload authorizer, arbitrary extensions replacing the global API implementation
-or the route after this check need a separate compatibility proof; shipped extensions do not.
-Two-call split-turn preparation and
-unknown, virtual, custom-stream or auth-rerouted routes are conservatively declined before
-summary dispatch. This deliberately declines some otherwise successful split compactions;
-ordinary compaction outside recovery is unchanged, and eligible single-summary overflow still
-succeeds. Subsequent opaque summary invocations are denied at the supported header boundary:
-the local safety stop is latched before `loop-recovery:abort` and `ctx.abort()`. No summary
-payload/response/raw-stream/message-end hooks are available, so the local notice reports
-`opaque-summary-retry-not-authorized` with unknown/null upstream code/type/status/server id
-and only the actual admitted client correlation, never a guessed refusal. Summary completion
-clears only operation scope, not the episode counter or deadline. Cache warming is stopped by
-the public decision hook during managed work and retained failed episodes. Supported abort
-cancels the root operation, not the session or detached children; retained notifications and
-stale-wake refusal still apply. An expired episode stops compaction as well. The request ceiling also retains its existing
-bounded follow-up for an empty answer (including reasoning-only output), only with portable
-local-tool context and no text or tool calls. Neither controller restarts the recovery budget.
-Genuine operator cancellation remains aborted and latches automatic recovery off without posting
-an upstream-failure notice. Harness-attributed timeouts use the existing custom incident continuation:
-`ctx.abort()` is terminal in the pinned native retry machine, so rewriting an aborted assistant as
-retryable cannot restart it. The Responses converter omits failed/aborted response tools and retains
-earlier completed history. This continuation adds no fake user message and never resets the shared
-attempt counter or original episode deadline. Native retry/backoff handles transport/server errors.
-Count or elapsed-time exhaustion emits one non-triggering actionable notice naming its cause;
-successful `stop` or `toolUse` completion resets the consecutive budget. Stale automatic input
-cannot reopen a halted or exhausted episode. pi-subagents 0.90.0 wakes an idle root with a
-turn-starting notice that never reaches `input`, so while a managed episode refuses automatic turns
-(at `agent_settled`, or when an idle episode's deadline passes) recovery holds pi-subagents' shared
-idle-wake reservation (`Symbol.for("pi.idle-wake.v1")`, keyed by the session manager, `sentAt`
-`WAKE_HOLD`). pi-subagents then appends each notice with no turn (its `src/shared/parent-wake.js`
-`sendMessage`). Recovery releases a hold it still owns on reset; pi-subagents clears it at the next
-`agent_start`. A turn some other extension starts while halted is aborted at `turn_start` and
-reports the original stop reason, so root recovery reads it as the same stop.
-This is broader transient recovery, not an exactly-once guarantee for upstream hosted operations
-or external work whose execution cannot be established. The portability check observes the
-request-ceiling payload hook; shipped extensions do not subsequently replace it with bound or
-hosted state. Arbitrary later payload-mutating extensions require their own compatibility proof.
-The pi 1.6.1 retry API accepts text only: allowlisted server failures are normalized to the
-standard `server error` wording at message_end; denied failures use a nonretryable explanation.
-This is an adapter to pi's classifier, not a new retry loop. Header ids describe provider
-invocations, not hidden SDK retries; use provider maxRetries zero for attempt-level proof.
-The `server` class in `backoff.ts` (`SERVER_PATTERN`) mirrors the upstream-failure wordings that
-pi-ai 1.6.1's `isRetryableAssistantError` (`utils/retry.js`) retries natively. pi-ai 1.2.0 added
-"The upstream provider returned an error"; 1.3.0 "The service is temporarily unavailable" and
-"Unable to forward upstream"; 1.4.0 the gateway codes `upstream_request_failed` and
-`upstream_stream_read_error`, "stream was interrupted", "HTTP/2 stream failed" and the Codex-proxy
-"stream disconnected before completion"; 1.5.1 the gateway relay wording "cut short after the reply
-had begun"; 1.6.0 "Connection closed.", the bare socket codes above, "connection reset by peer" and
-the Codex WebSocket "connection limit reached"; 1.6.1 HTTP 525 (already a 5xx), "provider is
-temporarily unavailable", Anthropic's `"type":"api_error"`, "admission ceiling", the
-OpenAI-compatible and Mistral `finish_reason` errors, OpenRouter's "returned an empty response" and
-"stopped before completing the response", the gateway SSE wordings "ended the response before it was
-complete", "connection to the provider was reset" and "reported a failure while generating the
-response", and "repeat the request later" (all `server`), and "rate increased too quickly"
-(`rate-limit`). Those 1.6.0 transport wordings stay `other`
-deliberately: they are not upstream server failures, and both classes get the same jitter. Its node-fetch "request to ... failed, reason:" is a
-network failure and stays `other`. A pi-ai bump re-reads that list: a wording pi retries natively but
-this pattern misses is classed `other`, not `server`. Between `server` and `other` the class only
-chooses the extra jitter; `rate-limit` also sets the wait floor (`rateLimitDelayMs`, see "Retry
-backoff") and names the class in recovery's rewritten "server error: rate-limit" text.
-
-## Encrypted reasoning recovery
-
-Managed Responses routes classify `invalid_encrypted_content` separately. `ENCRYPTED_REASONING_RETRIES`
-is one: a rejected request can quarantine its session/provider/model route and retry from completed
-portable history without reasoning items, paired function/custom-call item ids, or the encrypted
-reasoning include. Call ids, arguments, completed outputs and unrelated fields remain intact.
-The existing managed attempt ceiling (at most five requests per episode) and deadline still apply
-when a sanitized request needs an ordinary transient retry. No hosted or otherwise protected history
-is stripped. Saved history is unchanged; a version-1 `loop-encrypted-history-quarantine` custom
-entry keeps later turns and reloads on that route sanitized, and suppresses idle cache warming.
-An unsafe encrypted failure or an exhausted episode that took the sanitized retry parks as
-`encrypted-history-quarantined`. Safety and refusal causes (including auth, policy and quota),
-and later unrelated failures, retain their own classifications, including a refusal arriving after
-the episode deadline. Deadline exhaustion never converts an authentication, policy or quota
-refusal into encrypted-history quarantine.
-Automatic root recovery, including its quota exception, cannot reopen it. Genuine user input may
-reopen the episode; the route stays sanitized. This request handling covers root and lane entries
-that install request-ceiling; the automatic-root stop below is root-only. Native summary calls
-remain outside this payload transformation and retain their existing protected-route checks.
+  The error text becomes `loop-pi hard stop (<category>[: <code>]); not retried, the owner must act`,
+  which pi's retry classifier rejects and which reads as no context overflow, and the message gains
+  `loopPiHardStop: {category, code, type, status}`: the code and type only as safe tokens
+  (`[A-Za-z0-9._:-]{1,64}`), never the error body. The status and code are parsed from pi's
+  provider error text (`<Provider> API error (<status>): <body>`, `<status>: <body>`, a Responses
+  `response.failed` `<code>: <message>` or `Error Code <code>: ...`).
+- Not on the list, and left to pi: quota and usage limits (`insufficient_quota`,
+  `subscription_sharing_usage_limit_exceeded` and the rest of pi's own non-retryable limit list)
+  stop as pi's own refusal; a context overflow goes to pi's compaction; every other error pi deems
+  transient is retried. Nothing here makes pi retry an error it would not.
+- Budget: the shipped `home/settings.json` sets `retry` to `maxRetries: 16`, `baseDelayMs: 2000`,
+  `maxAgentDelayMs: 60000`. pi's waits then sum to 722 s (2, 4, 8, 16 and 32 s, then eleven at 60 s);
+  the retry backoff below adds a mean of a quarter more, about 15 minutes per request in all. A 429
+  waits at least 60 s each time, and a server's `retry-after` can lengthen any one wait to at most
+  300 s (see "Retry backoff"). The request ceiling still bounds each attempt.
+- Lanes get exactly this per-request retry and no automatic resume; their root repairs them.
 
 ## Automatic root recovery
 
-Plain-text authentication, quota and content-policy refusals retain an allowlisted category before
-managed recovery replaces their text. Authentication and policy categories stop the root immediately. A quota category
-permits two automatic root retries with the existing backoff, then stops with a quota incident.
-The retry count is stored in version-1 `loop-root-quota-recovery` custom entries and restored
-on session start; invalid entries exhaust the budget. Only genuine owner input writes a zero
-reset. Child notifications, recovery turns and healthy automatic replies never renew it. Transport connection refusals remain eligible for the existing backoff;
-this classification never authorizes tool replay or overrides operator cancellation.
+loop-continuation (root only) resumes a root that pi's retry and the request ceiling have left idle
+on a failed model request, so an owner's "continue" is not needed.
 
-loop-continuation (root only) resumes an armed root that stops on a failed model request, so an
-owner's "continue" is no longer needed. Everything above (pi's native retry, the request ceiling,
-the retry recovery episode) runs first and is unchanged; this acts only once that machinery has
-left the root idle.
-
-- Trigger: at `agent_settled`, while armed and the closeout does not count, the session branch's
-  last assistant message is classified (`root-recovery.ts` `classifyRootStop`). An abort is the
-  harness's only when this run saw `loop-recovery:request-timeout` or `loop-recovery:abort`;
-  otherwise it is the operator's and is never resumed (any pending resume is cancelled).
-- Classification, owner-actionable rows first (the detail names only the retry-recovery reason,
-  the allowlisted upstream code and the status, never an error body):
+- Armed: every loop-pi root with a run folder (`LOOP_PI_RUN_DIR`), whether or not a v3 launch armed
+  it. A pi-subagents child (`PI_SUBAGENT_CHILD=1`, a lane) never is, even if it loaded the
+  extension; the installer loads loop-continuation only in the root.
+- Trigger: at `agent_settled` the session branch's last assistant message is classified
+  (`root-recovery.ts` `classifyRootStop`); a v3 root whose closeout counts is left alone. An abort is
+  the harness's only when this run saw `loop-recovery:request-timeout`; otherwise it is the
+  operator's and is never resumed (any pending resume is cancelled). A message that is not an error
+  or a harness abort is healthy, so a finished root never resumes.
+- Classification, owner-actionable rows first (the detail names only a safe-token upstream code and
+  the status, never an error body):
 
   | Evidence on the failed message | Decision |
   |---|---|
   | `stop`/`toolUse`/`length`, or no assistant message | none |
-  | aborted without a harness marker, or reason `operator-cancelled` | none |
-  | reason `upstream-auth-refusal`; code `invalid_api_key`/`authentication_error`/`permission_denied`/`insufficient_permissions`; type `authentication_error`/`permission_error`; status 401/403; unmanaged text naming 401/403, unauthorized, forbidden, authentication | stop: `authentication` |
-  | reason `upstream-policy-refusal`; a policy code (`cyber_policy`, `content_policy_violation`, `content_filter`, `policy_violation`, `safety_violation`); type `policy_error`; unmanaged text naming a policy or a refusal | stop: `policy` |
-  | code `invalid_encrypted_content` or reason `encrypted-history-quarantined` | stop: `encrypted-history`; never automatic quota/provider resume |
-  | code `insufficient_quota`; unmanaged text naming quota, usage limit, billing, budget or balance | resume: `quota` at most twice per genuine owner-input interval; then stop: `quota` |
-  | code `context_length_exceeded`; pi's context-overflow pattern; a summary-route reason (`summary-*`, `two-call-summary-not-authorized`, `opaque-summary-*`) | stop: `context-length` |
-  | reason `unobservable-provider-retries` | stop: `configuration` |
-  | `loop-recovery:request-timeout` this run (limit `inactivity` or unknown), or reason `safe-local-timeout`/`timeout-not-replayable` | resume: `stalled-request` |
+  | aborted without `loop-recovery:request-timeout` this run | none |
+  | a hard stop (`loopPiHardStop`, or the same list read from the text): authentication, policy | stop: `authentication`, `policy` |
+  | a hard stop on `invalid_encrypted_content` | stop: `encrypted-history`; never a quota or provider resume |
+  | code `insufficient_quota`; text naming quota, usage limit, billing, budget or balance | resume: `quota` at most twice per genuine owner-input interval; then stop: `quota` |
+  | code `context_length_exceeded`; pi's context-overflow pattern | stop: `context-length` |
+  | `loop-recovery:request-timeout` this run (limit `inactivity` or unknown) | resume: `stalled-request` |
   | the same with limit `absolute`, or the request ceiling's empty output-budget error | resume: `request-ceiling` |
-  | any other error or harness abort (server errors, `stream_incomplete`, rate limits, `attempt-limit`, `episode-expired`, `ceiling-limit`, `protected-request`, `non-retryable-upstream`, unclassified) | resume: `provider-error` |
+  | any other error (server errors after pi's retries, rate limits, stream cuts, unknown codes) | resume: `provider-error` |
 
 - Resume: after `min(baseDelayMs * 2^(n-1), maxDelayMs)` for the n-th resume since the root last
-  completed a `stop` or `toolUse` message (`loopPi.rootRecovery: {enabled, baseDelayMs,
-  maxDelayMs}`, defaults true, 60000, 900000), with no attempt limit while armed. A run that
-  starts before the timer fires holds it, keeping its due time; that run's settle re-arms it.
-  At expiry the root must still be armed, idle, without a counted closeout and still stopped on a
-  failed message, else nothing is sent. Then loop-continuation appends a `judgement`
-  `loop-pi auto-resume <n>: <cause> (<detail>) after <s> backoff` to the state log (by `ext`),
-  emits `loop-recovery:resume`, and sends one `loop-root-recovery` custom message with
-  `triggerTurn: true`. Wakes held while the episode was halted are already in the transcript.
-- Stop: one `loop-root-recovery-stopped` root incident (`incidents/root/`, `loopPi.onIncident`), one
-  `judgement` `loop-pi recovery stopped: <cause> (<detail>); the root waits for its owner`, and a
-  visible error notice, once per failed message. The owner's own input cancels a pending resume.
-- Healthy progress (`stop`/`toolUse`) resets the backoff to the base. Session start and shutdown
-  drop a pending resume.
+  completed a `stop` or `toolUse` message (`loopPi.rootRecovery: {enabled, baseDelayMs, maxDelayMs,
+  maxResumes, windowMs}`, defaults true, 60000, 900000, 6, 3600000). Scheduling shows a notice
+  (`automatic resume <n> in <s> s`). A run that starts before the timer fires holds it, keeping its
+  due time; that run's settle re-arms it. At expiry the root must still be armed, idle, without a
+  counted closeout and still stopped on an error or a harness abort, else nothing is sent. Then
+  loop-continuation records a `judgement` `loop-pi auto-resume <n>: <cause> (<detail>) after <s>
+  backoff` and sends one `loop-root-recovery` custom message with `triggerTurn: true` and details
+  `{attempt, cause, detail, delayMs, at}`.
+- Cap: at most `maxResumes` resumes in any rolling `windowMs`, counted from the `at` of the
+  `loop-root-recovery` messages on the session branch, so a reload keeps the count. One more failure
+  inside the window is a stop with cause `resume-cap`; the owner resumes.
+- Stop: one `loop-root-recovery-stopped` incident in the home (`incidents/root/`, then
+  `loopPi.onIncident`) and the same record in the run folder (`incidents/`), one `judgement`
+  `loop-pi recovery stopped: <cause> (<detail>); the root waits for its owner`, and a visible error
+  notice, once per failed message.
+- Judgements go to the v3 state log (by `ext`) when the root has one, else to
+  `$LOOP_PI_RUN_DIR/root-recovery.jsonl` `{v: 1, ts, session, ev: "judgement", text}`.
+- The owner's own input cancels a pending resume. Healthy progress (`stop`/`toolUse`) resets the
+  backoff to the base. Session start and shutdown drop a pending resume.
 
 ## Retry backoff
 
@@ -792,7 +656,7 @@ from an extension, so the extension adds a wait in front of it.
   The retry decision uses pi-ai's public `isRetryableAssistantError`, `isContextOverflow` and
   `retryDelayMs`. pi's attempt counter is private; the extension mirrors it (increment per retried
   error, reset on any non-error assistant `message_end` and at `agent_settled`, when pi's is zero).
-- Totals: a 429 (`429`, `rate limit`, `too many requests` in the error text) waits at least
+- Totals: a 429 (`429`, `rate limit`, `too many requests`, `rate increased too quickly` in the error text) waits at least
   `loopPi.retryBackoff.rateLimitDelayMs` (default 60000) including pi's delay, plus up to 50% jitter. A 5xx (a `5xx`
   status, `overloaded`, `service unavailable`, `server error`, `internal error`, `bad gateway`,
   `temporarily unavailable`, `unable to forward upstream`, `upstream provider returned an error`)
@@ -804,10 +668,30 @@ from an extension, so the extension adds a wait in front of it.
   for the turn; a later response replaces it and `turn_start` clears it. The hint only lengthens the
   wait: the total is at least the hint, capped at `RETRY_AFTER_MAX_MS` (300000), and never below the
   class floor above; jitter is drawn on that total. A provider without error-response headers, or a
-  transport failure, leaves the wait as above. A long hint can outlast a recovery episode
-  (`retryRecovery.episodeMs`), which then stops the run as it would after any slow retry.
+  transport failure, leaves the wait as above. Each hinted wait is still one of pi's
+  `retry.maxRetries` attempts, so hints lengthen a request's retry budget by at most 300 s per attempt.
 - pi's `auto_retry_start` event still reports only pi's own `delayMs`, and is emitted after the
   extension's wait.
+
+The `server` class in `backoff.ts` (`SERVER_PATTERN`) mirrors the upstream-failure wordings that
+pi-ai 1.6.1's `isRetryableAssistantError` (`utils/retry.js`) retries natively. pi-ai 1.2.0 added
+"The upstream provider returned an error"; 1.3.0 "The service is temporarily unavailable" and
+"Unable to forward upstream"; 1.4.0 the gateway codes `upstream_request_failed` and
+`upstream_stream_read_error`, "stream was interrupted", "HTTP/2 stream failed" and the Codex-proxy
+"stream disconnected before completion"; 1.5.1 the gateway relay wording "cut short after the reply
+had begun"; 1.6.0 "Connection closed.", the bare Node socket codes (`ECONNRESET`, `EPIPE`,
+`ETIMEDOUT`, `ECONNABORTED`, `ECONNREFUSED`), "connection reset by peer" and the Codex WebSocket
+"connection limit reached"; 1.6.1 HTTP 525 (already a 5xx), "provider is temporarily unavailable",
+Anthropic's `"type":"api_error"`, "admission ceiling", the OpenAI-compatible and Mistral
+`finish_reason` errors, OpenRouter's "returned an empty response" and "stopped before completing the
+response", the gateway SSE wordings "ended the response before it was complete", "connection to the
+provider was reset" and "reported a failure while generating the response", and "repeat the request
+later" (all `server`), and "rate increased too quickly" (`rate-limit`). Those 1.6.0 transport
+wordings stay `other` deliberately: they are not upstream server failures, and both classes get the
+same jitter. Its node-fetch "request to ... failed, reason:" is a network failure and stays `other`.
+A pi-ai bump re-reads that list: a wording pi retries natively but this pattern misses is classed
+`other`, not `server`. Between `server` and `other` the class only chooses the extra jitter;
+`rate-limit` also sets the wait floor (`rateLimitDelayMs`).
 
 ## Delivery after an operator abort
 
@@ -820,11 +704,10 @@ before timers and watchers are reconciled. They are dropped from the snapshot on
 - The hold ends at the `agent_settled` that the owner's next input produces: an `input` event whose
   `source` is not `extension` marks it pending, and input alone sends nothing. If that settle is
   itself an abort, the hold continues.
-- An abort preceded by `loop-recovery:request-timeout` (see "Request ceiling") or
-  `loop-recovery:abort` (see "Retry recovery episode") is not the operator's and does not
-  establish a wake hold. loop-wait records an ephemeral, nonpersisted marker, consumed at exactly
+- An abort preceded by `loop-recovery:request-timeout` (see "Request ceiling") is not the
+  operator's and does not establish a wake hold. loop-wait records an ephemeral, nonpersisted marker, consumed at exactly
   one `agent_settled` (whether aborted or not), and reset at `agent_start` and `session_start`.
-  Fired wakes can therefore be delivered after a recovery abort; genuine operator Esc still
+  Fired wakes can therefore be delivered after a ceiling abort; genuine operator Esc still
   establishes the unchanged durable hold. An existing hold is not cleared merely by the marker.
 
 ## Test harness
@@ -875,10 +758,6 @@ before any `await`. A missing reply means the provider extension is not loaded; 
   budget"). Lanes never emit it. Fire and forget: no reply.
 - `loop-recovery:request-timeout` `{ limitType: "inactivity" | "absolute" }`: the request ceiling,
   synchronously before its `ctx.abort()`. `limitType` is additive; older readers ignore it.
-- `loop-recovery:resume` `{}`: loop-continuation, synchronously before it sends an automatic root
-  resume (see "Automatic root recovery"). The retry recovery controller resets an idle episode
-  exactly as an owner's idle input would. Nothing else emits it: wakes, notices and ceiling
-  follow-ups never reset the outage budget.
 - `loop-guard` needs "is any async subagent run active" for its root rule. It owns detecting that
   (pi-subagents public API if one exists, else tracking `subagent` results and `subagent-notify`
   messages). No other extension provides it.
@@ -890,7 +769,7 @@ before any `await`. A missing reply means the provider extension is not loaded; 
 - Custom message types (these start root turns, parsed by `parse_pi.py`): `loop-watch` (watcher
   exit or deadline), `loop-wake` (timer fired), `loop-continuation` (nudge), `loop-request-incident`
   (request ceiling follow-up; also starts lane turns), `loop-root-recovery` (automatic root resume;
-  details `{attempt, cause, detail, delayMs}`). Persisted state uses
+  details `{attempt, cause, detail, delayMs, at}`). Persisted state uses
   `pi.appendEntry` with `customType` `loop-wait-state` and `loop-continuation-state`.
 - loop-wait run dir: `<agentDir>/loop-wait/<sessionId>/`, receipts at
   `<run-dir>/receipts/<watch-id>.json` with fields (`phase`, `observations`,
@@ -899,7 +778,8 @@ before any `await`. A missing reply means the provider extension is not loaded; 
 - Continuation incident files: `<agentDir>/incidents/<sessionId>-<UTC timestamp>.json`. A root
   recovery stop: `<agentDir>/incidents/root/<sessionId>-<UTC>-recovery-stopped.json`
   `{v: 1, session, class: loop-root-recovery-stopped, at, home, cwd, cause, detail}`, then
-  `loopPi.onIncident`.
+  `loopPi.onIncident`; the same file in the run folder at
+  `$LOOP_PI_RUN_DIR/incidents/<sessionId>-<UTC>-recovery-stopped.json`.
 - Request incident files: `<agentDir>/incidents/request/<sessionId>-<UTC timestamp>-<kind>-<attempt>[-exhausted].json`,
   `{v: 1, session, class, at, home, cwd, model, elapsed_ms, wall_clock_ms, attempt}` with class
   `loop-request-wall-clock-ceiling` or `loop-request-empty-length-stop`, plus `-exhausted` when the
@@ -1076,7 +956,8 @@ paths are exact, bash write detection is best-effort.
   interpreter's code or stdin script, a git alias's shell body or unparseable text is refused, as is
   any push through `watch_process`; an undetected one (a script file, a task runner) is unlogged and
   the audit reports it UNGRANTED; `standing.md`;
-  `returns/<runId>.md`; `worktrees/l<32 hex>/`. The lane binding carries optional `runDir`.
+  `returns/<runId>.md`; `worktrees/l<32 hex>/`; `root-recovery.jsonl` and `incidents/` (see
+  "Automatic root recovery"). The lane binding carries optional `runDir`.
 - **Idle-parent wake (pi-subagents 0.90.0):** a turn-starting notice to an idle root is sent as
   `sendMessage(notice, { triggerTurn: true })` (`src/shared/parent-wake.js`), which pi runs as a
   custom-message run: `before_agent_start` with `messageType: "custom"`, then the notice's own
@@ -1103,15 +984,15 @@ paths are exact, bash write detection is best-effort.
   the abort as compaction. Manual compaction of an idle parent does not itself start a turn. A hold
   lasts until the next `agent_start`: while held, a completion starts no turn and ends with
   "The user stopped the parent turn ... do not resume the stopped task unless asked". It cannot tell
-  an operator Esc from loop-pi's request-ceiling or recovery abort. loop-state
-  (`loop-state/harness-hold.ts`) opens a window at `loop-recovery:request-timeout` or
-  `loop-recovery:abort`, closes it at the next `agent_start`, persists it as `loop-pi-harness-hold`
+  an operator Esc from loop-pi's request-ceiling abort. loop-state
+  (`loop-state/harness-hold.ts`) opens a window at `loop-recovery:request-timeout`, closes it at
+  the next `agent_start`, persists it as `loop-pi-harness-hold`
   entries, and in its request hook replaces that line in held notices timestamped inside a window
   with a neutral loop-pi line. An operator Esc keeps the package's text. No wake is restored: after a
   continuing incident the incident's own turn clears the hold, and after a recovery stop the root
   waits for the owner, as the recovery notice already says.
-  - **No window for an owner abort.** The ceiling timer and the recovery episode timer emit their
-    abort marker only while `ctx.signal` is not already aborted. An owner Esc in the same run (a race
+  - **No window for an owner abort.** The ceiling timer emits its abort marker only while
+    `ctx.signal` is not already aborted. An owner Esc in the same run (a race
     of milliseconds) is the owner's stop: it opens no window and its held notices keep the package's text.
   - **Compaction.** pi 1.6.1 runs the request hooks (`context`, `context_with_system`) only on the agent loop's request path
     (`core/sdk.js` `transformContext` is the single caller of `emitContext`). Native compaction, manual
@@ -1207,7 +1088,7 @@ paths are exact, bash write detection is best-effort.
     one `lane-return` block first and at most a few lines of prose after it (home agent files). The
     parser takes the last, here the only, block, and both caps keep a block at the start in the
     head.
-  - Limit: a notify appended without a turn (the parent held, or the recovery wake hold) reaches no
+  - Limit: a notify appended without a turn (the parent held) reaches no
     root extension at `message_end`, and pi-subagents batches completions that finish together into
     one notify, which is stored at the sum of their previews. The request hook still caps what the
     model sees.

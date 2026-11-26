@@ -1,7 +1,8 @@
 // Automatic root recovery end to end (SEAMS.md "Automatic root recovery"). A real pi root, armed by a
-// v3 launch, runs against a scripted local Responses peer through pi's native Responses decoder,
-// agent loop and retry machine, with the request ceiling, the retry recovery episode, loop-wait and
-// loop-continuation loaded. Only the network peer is scripted; the bash side effect is real.
+// v3 launch or started with only a run folder (a v5-style root), runs against a scripted local
+// Responses peer through pi's native Responses decoder, agent loop and retry machine, with the
+// request ceiling, loop-wait and loop-continuation loaded. Only the network peer is scripted; the
+// bash side effect is real.
 import assert from "node:assert/strict";
 import { createServer, type ServerResponse } from "node:http";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -29,7 +30,19 @@ type Step =
 
 interface Captured { body: any; at: number }
 
-async function rootCase(steps: (n: number) => Step, opts: { recoverPlainTransport?: boolean; ownerFollowUp?: boolean; plainProviderError?: string; abortAfterMs?: number; until: (events: RpcEvent[], requests: Captured[]) => boolean; settleMs?: number }) {
+interface CaseOpts {
+  recoverPlainTransport?: boolean; ownerFollowUp?: boolean; plainProviderError?: string; abortAfterMs?: number;
+  until: (events: RpcEvent[], requests: Captured[]) => boolean; settleMs?: number;
+  /** No v3 launch text: the root has only its run folder, as a v5 root does. */
+  plainRoot?: boolean;
+  /** Extra environment for the pi process, e.g. the pi-subagents child marker a lane carries. */
+  env?: Record<string, string>;
+  rootRecovery?: Record<string, number>;
+  /** Owner input sent once the first automatic resume is scheduled, before it fires. */
+  ownerInputWhilePending?: boolean;
+}
+
+async function rootCase(steps: (n: number) => Step, opts: CaseOpts) {
   const f = loopFixture();
   const requests: Captured[] = [];
   const open: ServerResponse[] = [];
@@ -78,19 +91,22 @@ async function rootCase(steps: (n: number) => Step, opts: { recoverPlainTranspor
   writeFileSync(join(f.agentDir, "settings.json"), JSON.stringify({
     retry: { enabled: true, maxRetries: 1, baseDelayMs: 20, maxAgentDelayMs: 20, provider: { maxRetries: 0 } },
     loopPi: {
-      retryRecovery: { providerIds: ["fixture"], episodeMs: 20_000, maxAttempts: 2 },
       requestCeiling: { inactivityMs: 700, absoluteMs: 30_000, maxFollowUps: 0 },
-      rootRecovery: { baseDelayMs: BASE_MS, maxDelayMs: MAX_MS },
+      rootRecovery: { baseDelayMs: BASE_MS, maxDelayMs: MAX_MS, ...opts.rootRecovery },
     },
   }));
   const session = startPiRpc({
     extensions: [provider, CEILING, LOOP_WAIT, CONTINUATION],
     extraArgs: ["--provider", "fixture", "--model", "fixture"],
     agentDir: f.agentDir, subagentTempRoot: freshDir(), cwd: f.repo, fauxScriptPath: "",
-    env: { LOOP_PI_RUN_DIR: f.runDir },
+    env: { LOOP_PI_RUN_DIR: f.runDir, ...opts.env },
   });
   try {
-    session.send({ type: "prompt", id: "launch", message: f.launch });
+    session.send({ type: "prompt", id: "launch", message: opts.plainRoot ? "Start the run in this repository." : f.launch });
+    if (opts.ownerInputWhilePending) {
+      await session.waitFor((e) => e.type === "extension_ui_request" && /automatic resume 1 in/.test(String((e as any).message ?? "")), 20_000);
+      session.send({ type: "prompt", id: "owner-input", message: "I am here; carry on." });
+    }
     if (opts.abortAfterMs !== undefined) {
       await session.waitFor((e) => e.type === "agent_start", 10_000);
       await new Promise((resolve) => setTimeout(resolve, opts.abortAfterMs));
@@ -115,7 +131,13 @@ async function rootCase(steps: (n: number) => Step, opts: { recoverPlainTranspor
       ? readdirSync(incidentDir).map((name) => ({ name, body: JSON.parse(readFileSync(join(incidentDir, name), "utf8")) }))
       : [];
     const executions = existsSync(join(f.repo, "executions.log")) ? readFileSync(join(f.repo, "executions.log"), "utf8") : "";
-    return { requests, requestsBeforeOwner, quotaEntries, events: session.events, log, incidents, executions, stderr: session.stderr };
+    const runLogPath = join(f.runDir, "root-recovery.jsonl");
+    const runLog = existsSync(runLogPath) ? readFileSync(runLogPath, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line)) : [];
+    const runIncidentDir = join(f.runDir, "incidents");
+    const runIncidents = existsSync(runIncidentDir)
+      ? readdirSync(runIncidentDir).map((name) => ({ name, body: JSON.parse(readFileSync(join(runIncidentDir, name), "utf8")) }))
+      : [];
+    return { requests, requestsBeforeOwner, quotaEntries, events: session.events, log, incidents, executions, stderr: session.stderr, runLog, runIncidents };
   } finally {
     for (const res of open) res.destroy();
     await session.close();
@@ -132,8 +154,8 @@ const lastAssistantText = (events: RpcEvent[]) => {
   return (message?.content ?? []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("");
 };
 
-test("provider errors that exhaust the recovery budget resume the root with exponential backoff until it recovers", { timeout: 45_000 }, async () => {
-  // 1: a real side-effecting tool call. 2-7: three exhausted episodes of two failed attempts each.
+test("provider errors that exhaust pi's native retry resume the root with exponential backoff until it recovers", { timeout: 45_000 }, async () => {
+  // 1: a real side-effecting tool call. 2-7: three runs of two failed attempts each (pi's one retry).
   // 8: success. The root resumes after 400 ms, then 800 ms, then 800 ms (the cap), and never relaunches.
   const run = await rootCase(
     (n) => n === 1 ? { kind: "tool", command: "printf 'prior\\n' >> executions.log" } : n <= 7 ? { kind: "fail" } : { kind: "text", text: "PAUSED: recovered after the outage" },
@@ -146,14 +168,14 @@ test("provider errors that exhaust the recovery budget resume the root with expo
   assert.deepEqual(sent.map((m) => [m.details.attempt, m.details.cause, m.details.delayMs]), [
     [1, "provider-error", BASE_MS], [2, "provider-error", MAX_MS], [3, "provider-error", MAX_MS],
   ]);
-  assert.match(sent[0].details.detail, /attempt-limit/);
+  assert.equal(sent[0].details.detail, "upstream=stream_incomplete");
   assert.doesNotMatch(JSON.stringify(sent), /fixture upstream body/, "notices never retain an upstream body");
-  // Each episode's first request waits for its backoff after the previous episode's last failure.
+  // Each run's first request waits for its backoff after the previous run's last failure.
   const gap = (i: number) => run.requests[i].at - run.requests[i - 1].at;
   assert.ok(gap(3) >= BASE_MS, `first resume waited ${gap(3)} ms`);
   assert.ok(gap(5) >= MAX_MS, `second resume waited ${gap(5)} ms`);
   assert.ok(gap(7) >= MAX_MS && gap(7) < 2 * MAX_MS, `third resume is capped: ${gap(7)} ms`);
-  assert.ok(gap(4) < BASE_MS && gap(6) < BASE_MS, "within an episode pi's own short retry runs, not the root backoff");
+  assert.ok(gap(4) < BASE_MS && gap(6) < BASE_MS, "within a run pi's own short retry runs, not the root backoff");
   // Completed history survives every resume; failed attempts are not replayed.
   const replay = run.requests[7].body.input;
   assert.equal(replay.filter((i: any) => i.type === "function_call_output" && i.call_id === "call_1").length, 1);
@@ -165,12 +187,71 @@ test("provider errors that exhaust the recovery budget resume the root with expo
     ["ext", "loop-pi auto-resume 2: provider-error () after 0.8 s backoff"],
     ["ext", "loop-pi auto-resume 3: provider-error () after 0.8 s backoff"],
   ]);
+  assert.equal(run.runLog.length, 0, "a v3 root records its judgements in its state log");
   assert.equal(run.incidents.filter((i) => i.body.class === "loop-root-recovery-stopped").length, 0);
+});
+
+test("a v5-style root with only a run folder resumes after a provider error and records the judgement in its run folder", { timeout: 30_000 }, async () => {
+  const run = await rootCase((n) => n <= 2 ? { kind: "fail" } : { kind: "text", text: "recovered without a v3 launch" }, {
+    plainRoot: true, until: (_events, requests) => requests.length >= 3,
+  });
+  assert.equal(run.requests.length, 3, run.stderr.join(""));
+  assert.equal(lastAssistantText(run.events), "recovered without a v3 launch");
+  assert.deepEqual(resumes(run.events).map((m) => [m.details.attempt, m.details.cause]), [[1, "provider-error"]]);
+  assert.equal(run.log.length, 0, "there is no v3 state log");
+  assert.deepEqual(run.runLog.map((row) => [row.ev, row.text.split(" (")[0]]), [["judgement", "loop-pi auto-resume 1: provider-error"]]);
+});
+
+test("a finished root is never resumed", { timeout: 30_000 }, async () => {
+  const run = await rootCase(() => ({ kind: "text", text: "all done" }), {
+    plainRoot: true, until: (_events, requests) => requests.length >= 1, settleMs: 3 * MAX_MS + 500,
+  });
+  assert.equal(run.requests.length, 1);
+  assert.equal(resumes(run.events).length, 0);
+  assert.equal(run.runLog.length, 0);
+});
+
+test("past six resumes in an hour the root stops with an incident in its run folder", { timeout: 45_000 }, async () => {
+  const run = await rootCase(() => ({ kind: "fail" }), {
+    plainRoot: true, rootRecovery: { baseDelayMs: 50, maxDelayMs: 100 },
+    until: (events) => events.some((e) => e.type === "extension_ui_request" && /not resuming automatically after resume-cap/.test(String((e as any).message ?? ""))),
+    settleMs: 1_000,
+  });
+  assert.equal(resumes(run.events).length, 6, "the default cap is six resumes in any rolling hour");
+  assert.equal(run.requests.length, 14, "seven runs of two attempts (pi's one retry), then nothing more");
+  const stopped = run.runIncidents.filter((i) => i.body.class === "loop-root-recovery-stopped");
+  assert.equal(stopped.length, 1, JSON.stringify(run.runIncidents));
+  assert.equal(stopped[0].body.cause, "resume-cap");
+  assert.match(stopped[0].body.detail, /^6 automatic resumes in 60 min; last provider-error/);
+  assert.equal(run.incidents.filter((i) => i.body.cause === "resume-cap").length, 1, "the home incident and loopPi.onIncident still fire");
+  assert.deepEqual(run.runLog.map((row) => row.text.split(" (")[0]).at(-1), "loop-pi recovery stopped: resume-cap");
+});
+
+test("owner input cancels a pending resume", { timeout: 30_000 }, async () => {
+  const run = await rootCase((n) => n <= 2 ? { kind: "fail" } : { kind: "text", text: "answered the owner" }, {
+    plainRoot: true, rootRecovery: { baseDelayMs: 2_000, maxDelayMs: 2_000 }, ownerInputWhilePending: true,
+    until: (_events, requests) => requests.length >= 3, settleMs: 2_500,
+  });
+  assert.equal(run.requests.length, 3, "the two failed attempts, then the owner's turn only");
+  assert.equal(lastAssistantText(run.events), "answered the owner");
+  assert.equal(resumes(run.events).length, 0, "the scheduled resume never fired");
+  assert.equal(run.runLog.length, 0);
+});
+
+test("a lane (a pi-subagents child) is never resumed, even with a run folder", { timeout: 30_000 }, async () => {
+  const run = await rootCase(() => ({ kind: "fail" }), {
+    plainRoot: true, env: { PI_SUBAGENT_CHILD: "1" },
+    until: (_events, requests) => requests.length >= 2, settleMs: 3 * MAX_MS + 500,
+  });
+  assert.equal(run.requests.length, 2, "pi's own per-request retry still runs in a lane");
+  assert.equal(resumes(run.events).length, 0);
+  assert.equal(run.runLog.length, 0);
+  assert.equal(run.runIncidents.length + run.incidents.filter((i) => i.body.class === "loop-root-recovery-stopped").length, 0);
 });
 
 for (const c of [
   { name: "authentication", status: 401, code: "invalid_api_key", type: "authentication_error" },
-    { name: "policy", status: 400, code: "cyber_policy", type: "invalid_request_error" },
+  { name: "policy", status: 503, code: "cyber_policy", type: "server_error" },
 ] as const) {
   test(`a ${c.name} refusal stops the root with an incident and is never resumed`, { timeout: 30_000 }, async () => {
     const run = await rootCase(() => ({ kind: "http", status: c.status, code: c.code, type: c.type }), {
@@ -182,7 +263,9 @@ for (const c of [
     assert.equal(stopped.length, 1, JSON.stringify(run.incidents));
     assert.match(stopped[0].name, /-recovery-stopped\.json$/);
     assert.equal(stopped[0].body.cause, c.name);
+    assert.equal(stopped[0].body.detail, `upstream=${c.code} status=${c.status}`);
     assert.doesNotMatch(JSON.stringify(stopped[0].body), /fixture upstream body/);
+    assert.equal(run.runIncidents.filter((i) => i.body.cause === c.name).length, 1, "the run folder has the same incident");
     assert.deepEqual(judgements(run.log).map((row) => row.text.split(" (")[0]), [`loop-pi recovery stopped: ${c.name}`]);
   });
 }
@@ -231,13 +314,13 @@ for (const [cause, errorMessage] of [
   });
 }
 
-test("a plain connection refusal still permits automatic root recovery", { timeout: 30_000 }, async () => {
+test("a plain connection refusal is retried by pi itself, with no root resume", { timeout: 30_000 }, async () => {
   const run = await rootCase(() => ({ kind: "text", text: "PAUSED: transport recovered" }), {
     plainProviderError: "Connection refused", recoverPlainTransport: true,
     until: (_events, requests) => requests.length >= 2,
   });
   assert.equal(run.requests.length, 2);
-  assert.equal(resumes(run.events).length, 1);
+  assert.equal(resumes(run.events).length, 0);
   assert.equal(lastAssistantText(run.events), "PAUSED: transport recovered");
   assert.equal(run.incidents.filter((incident) => incident.body.class === "loop-root-recovery-stopped").length, 0);
 });
