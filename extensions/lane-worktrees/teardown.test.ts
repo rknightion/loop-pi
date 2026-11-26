@@ -472,14 +472,18 @@ test("a second closeout reports what the first removed as absent and still tears
     const kept = join(base, "evidence");
     mkdirSync(first);
     mkdirSync(kept);
+    // Created while `first` still exists, so it cannot be handed the inode `first` frees. The ledger
+    // fences on filesystem identity, and a reused inode would make the second closeout fail without
+    // writing a receipt, leaving the first receipt (first: removed) in place.
+    mkdirSync(later);
     writeFileSync(join(kept, "proof.log"), "only copy");
     await h.register({ path: first, kind: "cache", disposable: true });
     await h.register({ path: kept, kind: "gate", keep: true });
     await h.closeout();
     assert.equal(existsSync(first), false);
-    mkdirSync(later);
     await h.register({ path: later, kind: "cache", disposable: true });
-    await h.closeout();
+    const second = await h.closeout();
+    assert.doesNotMatch(second.join("\n"), /teardown failed/);
     const entries = h.receipt().entries;
     assert.equal(entries.find((e: { path: string }) => e.path === first)?.outcome, "absent");
     assert.equal(entries.find((e: { path: string }) => e.path === later)?.outcome, "removed");

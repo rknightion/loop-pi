@@ -832,14 +832,26 @@ test("concurrent resumes of an unverifiable worktree rebuild it once and point a
       "#!/bin/sh",
       'case " $* " in *" symbolic-ref --quiet HEAD "*)',
       `  i=1; while ! mkdir "${slots}/$i" 2>/dev/null; do i=$((i+1)); done`,
-      '  [ "$i" = 1 ] && sleep 4;;',
+      // The first caller holds until the test signals that the other resume has finished (bounded, so a
+      // broken test cannot hang): no fixed delay stands in for how long the rebuild takes.
+      `  if [ "$i" = 1 ]; then n=0; while [ ! -e "${slots}/release" ] && [ $n -lt 2400 ]; do sleep 0.05; n=$((n+1)); done; fi;;`,
       "esac",
       `exec "${realGit}" "$@"`,
       "",
     ].join("\n"), { mode: 0o755 });
     process.env.PATH = `${bin}:${path}`;
     const resume = (id: string) => s.handlers.get("tool_call")!({ toolName: "subagent", toolCallId: id, input: { action: "resume", id: "run-1" } }, s.ctx);
-    const results = await Promise.all([resume("resume-a"), resume("resume-b")]);
+    // Start the held resume, wait until it is actually inside the held git call, run the other to
+    // completion, then release the held one.
+    const held = resume("resume-a");
+    const heldDeadline = Date.now() + 120_000;
+    while (!existsSync(join(slots, "1"))) {
+      assert.ok(Date.now() < heldDeadline, "the first resume reached its held git call");
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    const other = await resume("resume-b");
+    writeFileSync(join(slots, "release"), "");
+    const results = [await held, other];
     process.env.PATH = path;
 
     const current = s.path("L1");
