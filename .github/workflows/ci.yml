@@ -81,7 +81,7 @@ jobs:
         run: python3 -c 'import sys; print(sys.version); sys.exit(sys.version_info[:2] != (3, 15))'
 
       - name: Set up just
-        uses: rknightion/.github/.github/actions/setup-just@3dacb3010d3967dfa9d7619c2d61dc7af14d72dc # v1.34.1
+        uses: rknightion/.github/.github/actions/setup-just@a6e7f83c8fd233841120fc14c0412124a445c306 # v1.35.0
 
       - name: just setup
         run: just setup
@@ -143,7 +143,7 @@ jobs:
           python-version-file: .python-version
 
       - name: Set up just
-        uses: rknightion/.github/.github/actions/setup-just@3dacb3010d3967dfa9d7619c2d61dc7af14d72dc # v1.34.1
+        uses: rknightion/.github/.github/actions/setup-just@a6e7f83c8fd233841120fc14c0412124a445c306 # v1.35.0
 
       - name: just setup
         run: just setup
@@ -212,7 +212,7 @@ jobs:
     name: actionlint
     permissions:
       contents: read
-    uses: rknightion/.github/.github/workflows/actionlint.yml@3dacb3010d3967dfa9d7619c2d61dc7af14d72dc # v1.34.1
+    uses: rknightion/.github/.github/workflows/actionlint.yml@a6e7f83c8fd233841120fc14c0412124a445c306 # v1.35.0
 
   zizmor:
     name: zizmor
@@ -220,7 +220,7 @@ jobs:
       contents: read
       security-events: write
       actions: read
-    uses: rknightion/.github/.github/workflows/zizmor.yml@3dacb3010d3967dfa9d7619c2d61dc7af14d72dc # v1.34.1
+    uses: rknightion/.github/.github/workflows/zizmor.yml@a6e7f83c8fd233841120fc14c0412124a445c306 # v1.35.0
 
   # The single required check. It fails unless every gate above succeeded; macOS may be skipped
   # only when the changes job succeeded and decided that only README.md changed.
