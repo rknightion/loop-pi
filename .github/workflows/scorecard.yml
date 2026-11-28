@@ -1,9 +1,9 @@
 name: Scorecard
 on:
-  push:
-    branches: [main]
+  # Weekly and on demand only: a push to main does not change what Scorecard measures.
   schedule:
     - cron: '53 8 * * 3'
+  workflow_dispatch:
 permissions: {}
 jobs:
   scorecard:
