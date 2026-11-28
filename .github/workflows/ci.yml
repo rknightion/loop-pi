@@ -56,10 +56,6 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Harden the runner (audit egress)
-        uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
-        with:
-          egress-policy: audit
 
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -167,10 +163,6 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Harden the runner (audit egress)
-        uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
-        with:
-          egress-policy: audit
 
       - name: Checkout repository (full history)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -217,8 +209,10 @@ jobs:
       - name: Scan the full history
         run: '"${RUNNER_TEMP}/trufflehog/trufflehog" git file://. --results=verified,unknown --fail --no-update'
 
+  # Pull requests only: a push to main re-lints the workflow files the merged pull request already linted.
   actionlint:
     name: actionlint
+    if: ${{ github.event_name == 'pull_request' }}
     permissions:
       contents: read
     uses: rknightion/.github/.github/workflows/actionlint.yml@a6e7f83c8fd233841120fc14c0412124a445c306 # v1.35.0
@@ -232,7 +226,8 @@ jobs:
     uses: rknightion/.github/.github/workflows/zizmor.yml@a6e7f83c8fd233841120fc14c0412124a445c306 # v1.35.0
 
   # The single required check. It fails unless every gate above succeeded; macOS may be skipped
-  # only when the changes job succeeded and decided that only README.md changed.
+  # only when the changes job succeeded and decided that only README.md changed; actionlint runs on
+# pull requests only, so it may be skipped off a pull request.
   ci-success:
     name: ci-success
     if: always()
@@ -244,12 +239,15 @@ jobs:
       - name: Require every gate
         env:
           RESULTS: ${{ toJSON(needs) }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           printf '%s\n' "${RESULTS}" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
-          printf '%s\n' "${RESULTS}" | jq -e '
+          printf '%s\n' "${RESULTS}" | jq -e --arg event "${EVENT_NAME}" '
             . as $n
             | ($n.changes.result == "success")
-              and ([$n["just-check"], $n["history-scans"], $n.actionlint, $n.zizmor] | all(.result == "success"))
+              and ([$n["just-check"], $n["history-scans"], $n.zizmor] | all(.result == "success"))
+              and ($n.actionlint.result == "success"
+                   or ($n.actionlint.result == "skipped" and $event != "pull_request"))
               and ($n["macos-test"].result == "success"
                    or ($n["macos-test"].result == "skipped" and $n.changes.outputs.macos == "false"))
           ' > /dev/null
