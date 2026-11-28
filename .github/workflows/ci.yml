@@ -215,7 +215,7 @@ jobs:
     if: ${{ github.event_name == 'pull_request' }}
     permissions:
       contents: read
-    uses: rknightion/.github/.github/workflows/actionlint.yml@a6e7f83c8fd233841120fc14c0412124a445c306 # v1.35.0
+    uses: rknightion/.github/.github/workflows/actionlint.yml@0cc331c4859b1056333df332c7d31d23c9060c4c # v1.36.0
 
   zizmor:
     name: zizmor
@@ -223,7 +223,7 @@ jobs:
       contents: read
       security-events: write
       actions: read
-    uses: rknightion/.github/.github/workflows/zizmor.yml@a6e7f83c8fd233841120fc14c0412124a445c306 # v1.35.0
+    uses: rknightion/.github/.github/workflows/zizmor.yml@0cc331c4859b1056333df332c7d31d23c9060c4c # v1.36.0
 
   # The single required check. It fails unless every gate above succeeded; macOS may be skipped
   # only when the changes job succeeded and decided that only README.md changed; actionlint runs on
