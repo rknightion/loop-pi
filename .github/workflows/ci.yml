@@ -71,6 +71,7 @@ jobs:
         with:
           # renovate: datasource=node-version depName=node
           node-version: "26.13.1"
+          cache: npm
 
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
@@ -136,6 +137,7 @@ jobs:
         with:
           # renovate: datasource=node-version depName=node
           node-version: "26.13.1"
+          cache: npm
 
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
@@ -148,8 +150,15 @@ jobs:
       - name: just setup
         run: just setup
 
-      - name: just test
+      # Pull requests run only what differs by platform; main pushes and manual runs run it all.
+      # The Linux job has already run the full suite on the same commit.
+      - name: just test (full)
+        if: github.event_name != 'pull_request'
         run: just test
+
+      - name: just test-macos (platform-specific subset)
+        if: github.event_name == 'pull_request'
+        run: just test-macos
 
   history-scans:
     name: history-scans

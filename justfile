@@ -33,6 +33,14 @@ test:
     npm test
     just test-python
 
+# The macOS-only leg on pull requests: what differs by platform (the Python tools and their path,
+# interpreter and git handling, the push log and the launch-detect/arm code that branches on
+# process.platform). The full suite runs on Linux every time and on macOS for pushes to main and manual runs.
+[group('check')]
+test-macos:
+    node --test --test-reporter=spec extensions/loop-guard/push-log.test.ts extensions/loop-continuation/arm.test.ts extensions/loop-continuation/cli.test.ts extensions/loop-guard/launcher-pin.e2e.test.ts
+    just test-python
+
 # Run the Python tool tests on the python3 first on PATH
 [group('check')]
 test-python:
